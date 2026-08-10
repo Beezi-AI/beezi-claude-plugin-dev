@@ -86,7 +86,7 @@ function secretToolBackend(run) {
     },
     set(token) {
       // secret-tool reads the secret from stdin — keeps it out of the process list.
-      return run('secret-tool', ['store', '--label=beezi-analytics', ...attrs], token).ok
+      return run('secret-tool', ['store', `--label=${SERVICE}`, ...attrs], token).ok
         ? 'the OS secret service (libsecret)' : false;
     },
     delete() {
