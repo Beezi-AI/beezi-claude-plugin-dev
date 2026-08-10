@@ -1,0 +1,75 @@
+import os from 'node:os';
+import path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Baked environment identity: scripts/make-variant.sh writes env.json into dev/staging variants;
+// the prod plugin ships { "name": "" }. Missing or unreadable reads as prod.
+function readEnvJson() {
+  try {
+    const file = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'env.json');
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+const ENV_JSON = readEnvJson();
+
+// Namespace for every machine-local artifact: state dir and OS credential entry alike.
+// BEEZI_ENV overrides for local development; otherwise the identity is baked into the variant,
+// so simultaneously installed variants never share tokens, queue or state. This is the only
+// switch: nothing keyed off it may be namespaced independently.
+export const BEEZI_ENV =
+  process.env.BEEZI_ENV ?? (typeof ENV_JSON.name === 'string' ? ENV_JSON.name : '');
+
+// This variant's default API base; config.mjs owns the resolution order.
+export const ENV_API_BASE = typeof ENV_JSON.apiBase === 'string' ? ENV_JSON.apiBase : null;
+
+// '-dev' when namespaced, '' on prod.
+export function envSuffix() {
+  return BEEZI_ENV ? `-${BEEZI_ENV}` : '';
+}
+
+export function beeziHome() {
+  return process.env.BEEZI_HOME ?? path.join(os.homedir(), `.beezi${envSuffix()}`);
+}
+
+export function queueDir() {
+  return path.join(beeziHome(), 'queue');
+}
+
+export function stateDir() {
+  return path.join(beeziHome(), 'state');
+}
+
+// Persisted known-repo-root map (dir→root resolution cache/seed). One JSON for the machine.
+export function repoMapFile() {
+  return path.join(beeziHome(), 'repo-map.json');
+}
+
+export function credentialsFile() {
+  return path.join(beeziHome(), 'credentials.json');
+}
+
+export function billingConfigFile() {
+  return path.join(beeziHome(), 'billing.json');
+}
+
+// Last-sent usage-snapshot marker: { version, lastSent: { accountUuid, fetchedAtMs } }.
+export function usageSnapshotStateFile() {
+  return path.join(beeziHome(), 'usage-snapshot.json');
+}
+
+// Claude Code's config root — `~/.claude`, relocatable via CLAUDE_CONFIG_DIR. Single source
+// for the dirs the plugin reads out of Claude Code (transcripts, live session store).
+export function claudeHome() {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+export function claudeProjectsDir() {
+  return path.join(claudeHome(), 'projects');
+}
+
+export function claudeSessionsDir() {
+  return path.join(claudeHome(), 'sessions');
+}
