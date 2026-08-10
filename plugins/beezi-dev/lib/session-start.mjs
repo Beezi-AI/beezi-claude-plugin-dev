@@ -16,6 +16,14 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { whoami } from './whoami.mjs';
+import { getMachineClientId } from './machine-identity.mjs';
+import {
+  recordWhoami,
+  readTrackingState,
+  isLiveTrackingAllowed,
+  shouldBackfill,
+  TrackingMode,
+} from './tracking.mjs';
 import { BillingSource } from './billing.mjs';
 import {
   readBillingConfig as _readBillingConfig,
@@ -97,9 +105,10 @@ async function announceRepo(cwd, token, fetchImpl, gitImpl) {
 // So this only decides what to *tell* the user; discarding credentials is left to the token
 // endpoint naming the grant revoked, or to the user re-running /beezi:login.
 // Offline/unknown (null) still reads as fine, so a check we couldn't run stays silent.
-async function isTokenRejected(token, fetchImpl) {
+// The body is returned alongside the verdict — it carries the tenant's tracking policy.
+async function probeToken(token, fetchImpl) {
   const who = await whoami(token, { fetchImpl });
-  return who?.valid === false;
+  return { rejected: who?.valid === false, who };
 }
 
 // Returns an optional systemMessage string (or null). Never throws for expected failures.
@@ -111,30 +120,41 @@ export async function runSessionStart(input, deps = {}) {
   const readBillingConfig = deps.readBillingConfig ?? _readBillingConfig;
   const writeBillingConfig = deps.writeBillingConfig ?? _writeBillingConfig;
   const isStale = deps.isStale ?? _isStale;
+  const recordWhoamiImpl = deps.recordWhoamiImpl ?? recordWhoami;
 
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
   if (!token)
     return '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.';
 
-  if (await isTokenRejected(token, fetchImpl)) {
+  let probe = await probeToken(token, fetchImpl);
+  if (probe.rejected) {
     // The 401 is the server's verdict on the token; expires_at was only ours, and a server that
     // omits expires_in leaves it a guess. Take the server's word and refresh once before
     // declaring the link bad — otherwise a token that died earlier than we estimated is never
     // renewed, and every session reports a rejection that a single refresh would have fixed.
     const refreshed = await getAccessToken({}, { forceRefresh: true }).catch(() => null);
-    if (!refreshed || await isTokenRejected(refreshed, fetchImpl)) {
+    probe = refreshed ? await probeToken(refreshed, fetchImpl) : { rejected: true, who: null };
+    if (!refreshed || probe.rejected) {
       return '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.';
     }
     token = refreshed;
   }
 
+  // Persist the tenant's tracking policy BEFORE the flush below, so a freshly-disabled tenant
+  // never gets one last ungated drain. Bound to this login's client id — a workspace switch
+  // must not inherit the previous tenant's flags.
+  try { recordWhoamiImpl(probe.who, getMachineClientId() ?? probe.who?.email ?? null); } catch { /* best-effort */ }
+  const tracking = readTrackingState();
+  const liveAllowed = isLiveTrackingAllowed(tracking);
+
   initSessionState(input.session_id, { cwd: input.cwd ?? null, transcriptPath: input.transcript_path ?? null });
   // Independent network I/O on the per-session hot path — flush queued checkpoints
-  // and probe repo status concurrently rather than serially.
+  // and probe repo status concurrently rather than serially. A dark workspace skips the repo
+  // probe's promise entirely: "Task-branch sessions will be tracked" would be a lie there.
   const [, systemMessage] = await Promise.all([
     flushQueue(token, { fetchImpl }),
-    announceRepo(input.cwd, token, fetchImpl, gitImpl),
+    liveAllowed ? announceRepo(input.cwd, token, fetchImpl, gitImpl) : Promise.resolve(null),
   ]);
   try { pruneStale(); } catch { /* best-effort */ }
 
@@ -163,14 +183,34 @@ export async function runSessionStart(input, deps = {}) {
   } catch { /* best-effort */ }
 
   let message = systemMessage;
-  if (billingSource === BillingSource.SUBSCRIPTION && isStale(billingConfig)) {
-    const nudge = 'Beezi: subscription plan info is missing or stale — run /beezi:refresh to update it.';
-    message = message ? `${message}\n${nudge}` : nudge;
-  } else if (billingSource === BillingSource.UNKNOWN) {
-    // Reported honestly as `unknown` rather than guessed. Only the user can resolve it, and
-    // without this they would never learn their usage is landing unattributed.
-    const nudge = 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
-    message = message ? `${message}\n${nudge}` : nudge;
+  // Billing nudges are noise for a workspace that reports nothing live.
+  if (liveAllowed) {
+    if (billingSource === BillingSource.SUBSCRIPTION && isStale(billingConfig)) {
+      const nudge = 'Beezi: subscription plan info is missing or stale — run /beezi:refresh to update it.';
+      message = message ? `${message}\n${nudge}` : nudge;
+    } else if (billingSource === BillingSource.UNKNOWN) {
+      // Reported honestly as `unknown` rather than guessed. Only the user can resolve it, and
+      // without this they would never learn their usage is landing unattributed.
+      const nudge = 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
+      message = message ? `${message}\n${nudge}` : nudge;
+    }
   }
+
+  // Tracking-policy messages: tell a dark workspace it is dark, and point at the login flow
+  // wherever the one-time history pull has not completed yet (paid tenants included) — the
+  // backfill runs as the last step of /beezi:login.
+  const mode = tracking?.trackingMode ?? null;
+  let policy = null;
+  if (mode === TrackingMode.BACKFILL_ONLY) {
+    policy = shouldBackfill(tracking)
+      ? 'Beezi: audit mode — new sessions are not tracked. Run /beezi:login to upload your session history, or upgrade your workspace plan to track new sessions.'
+      : 'Beezi: audit mode — new sessions are not tracked. Upgrade your workspace plan to start tracking them.';
+  } else if (mode === TrackingMode.DISABLED) {
+    policy = 'Beezi: analytics are off for this workspace.';
+  } else if (shouldBackfill(tracking)) {
+    policy = 'Beezi: run /beezi:login once to include your past sessions.';
+  }
+  if (policy) message = message ? `${message}\n${policy}` : policy;
+
   return message;
 }

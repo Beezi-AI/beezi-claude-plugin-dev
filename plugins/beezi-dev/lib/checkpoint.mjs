@@ -22,6 +22,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { listSubagentTranscripts, buildTaskDescriptionMap } from './subagents.mjs';
 import { claimIntervals, mergeIntervals, subtractIntervals, totalMs } from './active-time.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
+import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
 import { maybePostUsageSnapshot as _maybePostUsageSnapshot } from './usage-snapshot-report.mjs';
@@ -53,6 +54,15 @@ function localRemote(dir) {
   return name ? `local:${name}` : null;
 }
 
+// Server-side DTO caps. One over-long field 400s the whole request (and on the batch route the
+// whole 50-session chunk), so clamp at the source. `remote` is deliberately NOT clamped: a
+// truncated remote would fabricate a bogus repo key — let it be rejected honestly.
+const clamp = (value, max) =>
+  typeof value === 'string' && value.length > max ? value.slice(0, max) : value;
+const BRANCH_MAX = 255;
+const AGENT_NAME_MAX = 200;
+const AGENT_TYPE_MAX = 100;
+
 // The machine's IANA timezone (e.g. Europe/Kyiv). Snapshotted per checkpoint so the server can
 // bucket this session's activity in the user's local time even if they later travel. Null when
 // the runtime can't resolve one — the field is then omitted from the payload.
@@ -66,17 +76,36 @@ function detectTimezone() {
 
 // `deps` holds substitutable implementations (test seams); `options` holds caller-driven execution
 // modes. Keeping them separate stops a behavior flag from masquerading as an injectable.
-// Returns { enqueued, flush } — flush is the flushQueue summary (or null when it never ran).
+// Returns { enqueued, flush, sessionErrors } — flush is the flushQueue summary (or null when it
+// never ran); sessionErrors is populated only under options.collectSessionErrors.
+//
+// The bulk import (/beezi:import) drives this same function per past session, which is why three
+// options exist to redirect its side effects: `sink` (payloads to the caller instead of the disk
+// queue), `skipFlush` (no per-session HTTP), `collectSessionErrors` (buffer API-error reports
+// instead of POSTing them one at a time). All default to today's hook behavior.
 export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
   const getAccessToken = deps.getAccessToken ?? _getAccessToken;
   const gitImpl = deps.gitImpl ?? git;
   const computeDelta = deps.computeDelta ?? _computeDelta;
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+  // Where a built payload goes. The import collects them in memory and batches them itself;
+  // letting it fall through to the disk queue would drip-feed hundreds of segments to the
+  // single-report endpoint on the next hook, bypassing the batch route's whole-session dedupe.
+  const emit = options.sink ?? enqueue;
+  const collectedErrors = [];
 
   let token = null;
-  try { token = await getAccessToken(); } catch { return { enqueued: 0, flush: null }; }
-  if (!token) return { enqueued: 0, flush: null };
+  try { token = await getAccessToken(); } catch { return { enqueued: 0, flush: null, sessionErrors: collectedErrors }; }
+  if (!token) return { enqueued: 0, flush: null, sessionErrors: collectedErrors };
+
+  // Tenant gate: audit-mode workspaces never track live — the server would 403 every report
+  // anyway (TrackingEnabledGuard), this just spares the work and the noise. `gated` lets
+  // /beezi:track tell "tracking is off" apart from "nothing new". The audit run passes
+  // skipLiveTrackingGate — an explicit flag, never inferred from the sink seam.
+  if (options.skipLiveTrackingGate !== true && !isLiveTrackingAllowed()) {
+    return { enqueued: 0, flush: null, sessionErrors: collectedErrors, gated: true };
+  }
 
   // Below the token gate: skip this work entirely on an unlinked machine.
   const resolvedSessionName = resolveSessionName(session_id, transcript_path);
@@ -122,6 +151,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     return r;
   };
 
+  const emptyResult = { enqueued: 0, flush: null, sessionErrors: collectedErrors };
   const state = loadState(session_id);
   // When the session file is unreadable (name resolves to null), keep the last name we sent
   // rather than overwriting the stored name with null.
@@ -130,7 +160,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try {
     delta = computeDelta(transcript_path, state.cursor, { cwd, repoRootOf, branchAt: branchOf });
   } catch {
-    return { enqueued: 0, flush: null };
+    return emptyResult;
   }
   const { nextCursor, segments, apiErrorEvents = [] } = delta;
 
@@ -138,8 +168,12 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // window is proof the session bills an API key, and that proof has to be in hand before the
   // segments it belongs to are stamped. Persisted so later sessions resolve correctly too —
   // the switch that produced it is invisible to process.env.
+  //
+  // Historical transcripts must not rewrite this machine's CURRENT billing state: an API-key
+  // error from months ago is not evidence about today, and stamping it would flip the live
+  // billing source for the next 24h. persistState:false is the audit run.
   let billingConfig = readBillingConfig();
-  if (isApiKeyBillingEvidence(apiErrorEvents)) {
+  if (options.persistState !== false && isApiKeyBillingEvidence(apiErrorEvents)) {
     const recorded = recordApiKeyEvidence(billingConfig);
     if (recorded) {
       try { writeBillingConfig(recorded); } catch { /* best-effort */ }
@@ -208,7 +242,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           segmentId: `${segmentScope}:${seg.fromLine}-${seg.toLine}`,
           sessionId: session_id,
           remote,
-          branch: seg.branch,
+          branch: clamp(seg.branch, BRANCH_MAX),
           from_line: seg.fromLine,
           to_line: seg.toLine,
           ...billingFields,
@@ -219,7 +253,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           ...stats,
           duration_sec: durationSec,
         };
-        enqueue(payload);
+        emit(payload);
         // Claim only what actually reached the queue: a failed write must not swallow the window
         // for every later segment too.
         if (intervals?.length) {
@@ -251,8 +285,8 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
       is_subagent: true,
       agent_id: agentId,
-      agent_type: agentType,
-      agent_name: toolUseId ? (taskDescriptions.get(toolUseId) ?? null) : null,
+      agent_type: clamp(agentType, AGENT_TYPE_MAX),
+      agent_name: toolUseId ? clamp(taskDescriptions.get(toolUseId) ?? null, AGENT_NAME_MAX) : null,
       spawn_depth: spawnDepth,
     }, { includeContext: false });
     // A subagent that dies on an API error never ends the main turn, so no StopFailure fires
@@ -269,17 +303,22 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // a StopFailure hook that never fired: the server keys on session+error+minute and both
   // paths stamp the transcript line's timestamp, so the two collapse onto one row.
   for (const event of apiErrorEvents) {
-    await postSessionError(
-      {
-        sessionId: session_id,
-        error: event.error,
-        errorDetails: null,
-        lastAssistantMessage: event.text,
-        occurredAt: event.occurredAt ?? new Date().toISOString(),
-      },
-      token,
-      { fetchImpl },
-    );
+    const errorPayload = {
+      sessionId: session_id,
+      error: event.error,
+      errorDetails: null,
+      lastAssistantMessage: event.text,
+      occurredAt: event.occurredAt ?? new Date().toISOString(),
+    };
+    // The audit run buffers these instead: one awaited POST per event across hundreds of
+    // sessions is minutes of dead time, and follow-ups only make sense for sessions the server
+    // accepted — the backfill route dedupes via its upsert keys, so ordering is about
+    // attribution, not skip-existing (the old batch route's premise is gone).
+    if (options.collectSessionErrors) {
+      collectedErrors.push(errorPayload);
+      continue;
+    }
+    await postSessionError(errorPayload, token, { fetchImpl });
   }
 
   let stateDirty = false;
@@ -328,7 +367,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     stateDirty = true;
   } else if (sessionName != null && sessionName !== state.sentSessionName && state.anchor) {
     try {
-      enqueue({ ...state.anchor, session_name: sessionName });
+      emit({ ...state.anchor, session_name: sessionName });
       state.sentSessionName = sessionName;
       stateDirty = true;
     } catch { /* best-effort; retry next checkpoint */ }
@@ -356,24 +395,67 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     state.updatedAt = new Date().toISOString();
     stateDirty = true;
   }
-  if (stateDirty) {
+  // The import never persists the cursor. It builds payloads first and delivers them afterwards,
+  // so advancing the cursor here would consume a session's lines before the server ever accepted
+  // them: a failed delivery leaves the session unledgered AND unreadable, and the re-run finds
+  // nothing left to send. Not advancing costs nothing — segmentIds are deterministic, so if that
+  // session is later resumed live its hooks re-report the same ids and the server upserts.
+  if (stateDirty && options.persistState !== false) {
     try { saveState(session_id, state); } catch { /* best-effort */ }
   }
   if (mapDirty) {
     try { saveRepoMap(map); } catch { /* best-effort */ }
   }
 
-  const flush = await flushQueue(token, { fetchImpl });
-  return { enqueued, flush };
+  // The import owns its own batched delivery, so it must not drain the live queue per session —
+  // that would add unrelated HTTP calls mid-import and muddy its summary.
+  const flush = options.skipFlush ? null : await flushQueue(token, { fetchImpl });
+  return { enqueued, flush, sessionErrors: collectedErrors };
 }
 
-// Returns { flushed, rejected, failed, lastError } — flushed = accepted (2xx),
-// rejected = permanently declined by the server (4xx, e.g. branch not linked),
-// failed = transient (5xx/network, file kept for retry).
+// Once tracking is off, queued reports are held for this long: a tenant that converts to paid
+// inside the window flushes them normally on its first live session; after it they expire.
+export const QUEUE_HOLD_MS = 3 * 24 * 60 * 60 * 1000;
+
+// Expire queue files older than the hold window. Only meaningful while tracking is off — a
+// live-mode queue drains through flushing, not expiry.
+function sweepHeldQueue(dir, result, now = Date.now()) {
+  let files;
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const file of files) {
+    const filePath = path.join(dir, file);
+    try {
+      if (now - fs.statSync(filePath).mtimeMs > QUEUE_HOLD_MS) {
+        fs.unlinkSync(filePath);
+        result.expired += 1;
+      }
+    } catch { /* best-effort */ }
+  }
+}
+
+// Returns { flushed, rejected, failed, expired, trackingDisabled, lastError } —
+// flushed = accepted (2xx), rejected = permanently declined by the server (4xx, e.g. branch not
+// linked), failed = transient or reversible (5xx/network/code-less 403, file kept for retry),
+// expired = held files past the 3-day window, trackingDisabled = the server said the workspace
+// is dark (audit mode) and the flush stopped.
 export async function flushQueue(token, deps = {}) {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const getAccessToken = deps.getAccessToken ?? _getAccessToken;
-  const result = { flushed: 0, rejected: 0, failed: 0, lastError: null };
+  const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, trackingDisabled: false, lastError: null };
+  const dir = queueDir();
+
+  // Dark workspace: no readdir-and-post loop, just the hold-window sweep. Files stay for
+  // QUEUE_HOLD_MS in case the tenant converts to paid, then expire.
+  if (!isLiveTrackingAllowed()) {
+    result.trackingDisabled = true;
+    sweepHeldQueue(dir, result);
+    return result;
+  }
+
   // A 401 is authentication, not a verdict on the payload, so it must not count as a permanent
   // rejection — that would delete queued analytics that were never actually refused. Renew once
   // for the whole flush and retry; if renewal fails, keep every file for the next attempt.
@@ -386,7 +468,6 @@ export async function flushQueue(token, deps = {}) {
     return null;
   };
 
-  const dir = queueDir();
   const reportUrl = `${apiBase()}${ENDPOINTS.sessionsReport}`;
 
   let files;
@@ -416,6 +497,22 @@ export async function flushQueue(token, deps = {}) {
         // never judged, and re-linking should let it through later.
         result.failed += 1;
         result.lastError = `HTTP ${res.status}`;
+      } else if (res.status === 403) {
+        // Branch on the machine-readable code, never the message. TRACKING_DISABLED = the
+        // workspace is in audit mode: record it, stop the storm, and HOLD the files — they
+        // flush if the tenant converts within the window, and expire after it. A code-less 403
+        // (seat revoked, deactivated user) is reversible: keep the file, count it failed.
+        let body = null;
+        try { body = await res.json(); } catch { /* non-JSON body */ }
+        if (body?.code === 'TRACKING_DISABLED') {
+          try { markTrackingDisabled(body?.message ?? null); } catch { /* best-effort */ }
+          result.trackingDisabled = true;
+          result.lastError = body?.message ?? 'HTTP 403';
+          sweepHeldQueue(dir, result);
+          break;
+        }
+        result.failed += 1;
+        result.lastError = body?.message ?? `HTTP ${res.status}`;
       } else if (res.status < 500) {
         // Permanent rejection — drop the file, but remember why.
         result.rejected += 1;

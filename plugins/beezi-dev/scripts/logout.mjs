@@ -1,5 +1,8 @@
+import fs from 'node:fs';
 import { apiBase, ENDPOINTS } from '../lib/config.mjs';
 import { getCredentials, deleteCredentials } from '../lib/credentials.mjs';
+import { auditLedgerFile } from '../lib/paths.mjs';
+import { clearTrackingState } from '../lib/tracking.mjs';
 import { getAccessToken } from '../lib/token.mjs';
 import { machineHeaders } from '../lib/machine-identity.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
@@ -65,6 +68,10 @@ async function main() {
   const revoked = serverUnlinked ? false : await revokeAtAuthServer(creds);
 
   await deleteCredentials().catch(() => {});
+  // Machine-global tenant state must not survive into the next login: a foreign audit ledger
+  // would replay as "all uploaded" and seal the new workspace's pull empty.
+  clearTrackingState();
+  try { fs.rmSync(auditLedgerFile(), { force: true }); } catch { /* best-effort */ }
 
   if (serverUnlinked) {
     console.log('✓ Logged out. This machine is unlinked from Beezi.');

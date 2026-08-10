@@ -47,6 +47,20 @@ export function repoMapFile() {
   return path.join(beeziHome(), 'repo-map.json');
 }
 
+// Durable "already imported" ledger for /beezi:import. Deliberately at the beeziHome() ROOT and
+// not under state/ or queue/: pruneStale() deletes 14-day-old files in both of those, so a marker
+// living there would expire and make every old session look importable again on the next run.
+export function auditLedgerFile() {
+  return path.join(beeziHome(), 'audit-ledger.json');
+}
+
+// Cached tenant tracking state (whoami's trackingMode/tier/backfillCompleted). Root-level for
+// the same pruneStale() reason as the audit ledger — an expiring gate would silently re-enable
+// tracking for dark-mode tenants.
+export function trackingStateFile() {
+  return path.join(beeziHome(), 'tracking.json');
+}
+
 export function credentialsFile() {
   return path.join(beeziHome(), 'credentials.json');
 }

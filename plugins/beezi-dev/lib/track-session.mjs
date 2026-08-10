@@ -22,11 +22,16 @@ export async function trackSession({ sessionId, transcriptPath, cwd }, deps = {}
     return { ok: false, message: 'Beezi: this machine is not linked. Run /beezi:login first.' };
   }
 
-  const { enqueued, flush } = await runCheckpoint({
+  const { enqueued, flush, gated } = await runCheckpoint({
     session_id: sessionId,
     transcript_path: transcriptPath,
     cwd,
   });
+
+  // The tenant gate answered, not the server: "already up to date" would be a lie here.
+  if (gated) {
+    return { ok: false, message: 'Beezi: live tracking is off for this workspace (audit mode).' };
+  }
 
   if (flush?.failed) {
     return { ok: false, message: 'Beezi: could not reach the server — analytics will be retried automatically.' };
