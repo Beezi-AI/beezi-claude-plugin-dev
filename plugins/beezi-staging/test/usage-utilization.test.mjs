@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { readUsageUtilization } from '../lib/usage-utilization.mjs';
 
 const CACHE = {
@@ -62,5 +63,6 @@ test('readUsageUtilization — CLAUDE_CONFIG_DIR wins over homedir', () => {
     env: { CLAUDE_CONFIG_DIR: '/custom' },
     homedir: '/home/u',
   });
-  assert.ok(seen[0].startsWith('/custom'));
+  // path.join normalizes separators, so compare against a joined path rather than the raw prefix.
+  assert.equal(seen[0], path.join('/custom', '.claude.json'));
 });

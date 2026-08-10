@@ -1,7 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { apiBase, OAUTH_SCOPES } from '../lib/config.mjs';
+import { auditLedgerFile } from '../lib/paths.mjs';
+import { clearTrackingState, recordWhoami } from '../lib/tracking.mjs';
 import { discover, registerClient, pkcePair, exchangeCode } from '../lib/oauth.mjs';
 import { getCredentials, setCredentials, deleteCredentials } from '../lib/credentials.mjs';
 import { startLoopback } from '../lib/loopback.mjs';
@@ -64,6 +67,9 @@ async function run() {
     setMachineClientId(existing.client_id);
     const who = await whoami(existing.access_token, { base });
     if (who?.valid) {
+      // The login flow continues into plan capture and the history backfill even when already
+      // linked — refresh the cached tracking policy so those steps act on current state.
+      try { recordWhoami(who, existing.client_id); } catch { /* best-effort */ }
       const account = who.name || who.email;
       console.log(`\n✓ This machine is already linked to Beezi${account ? ` as ${account}` : ''}.`);
       console.log('  Nothing to do.\n');
@@ -120,14 +126,25 @@ async function run() {
     expires_at: Date.now() + (tokens.expires_in ?? 3_600) * 1000,
   });
   setMachineClientId(clientId);
+  // A fresh login is a fresh identity: machine-global tenant state recorded under the previous
+  // one (audit ledger, tracking cache) must not leak into this workspace — a foreign ledger
+  // replayed here would seal the new tenant's pull empty.
+  clearTrackingState();
+  try { fs.rmSync(auditLedgerFile(), { force: true }); } catch { /* best-effort */ }
   // The portal registers a machine from the X-Beezi-Host/Client headers that ride along on an
   // authenticated request — it has no registration endpoint. Without a call here it keeps
   // showing this machine as not connected until some later hook happens to fire, so make that
   // first call now. Best-effort: the link itself is already stored and valid.
   const who = await whoami(tokens.access_token, { base }).catch(() => null);
+  if (who?.valid) {
+    try { recordWhoami(who, clientId); } catch { /* best-effort */ }
+  }
   console.log(`\n✓ Beezi analytics linked. Credentials stored in ${where}.`);
   const account = who?.valid ? (who.name || who.email) : null;
   if (account) console.log(`  Account: ${account}`);
+  if (who?.valid && who.trackingMode && who.trackingMode !== 'live') {
+    console.log('  This workspace is in audit mode — your session history uploads at the end of this login.');
+  }
 }
 
 // argv ('start'/'wait') is ignored: the PKCE flow is a single blocking command,

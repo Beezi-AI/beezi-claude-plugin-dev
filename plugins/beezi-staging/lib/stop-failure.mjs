@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { getAccessToken } from './token.mjs';
 import { postSessionError } from './session-error-report.mjs';
+import { isLiveTrackingAllowed } from './tracking.mjs';
 
 // Best-effort: pull the last assistant message text, any API-error detail, and the error line's
 // own timestamp from the transcript tail. The StopFailure `error` code is the reliable signal;
@@ -73,6 +74,11 @@ export async function reportSessionError(input, deps = {}) {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const now = deps.now ?? (() => new Date());
   const getTokenImpl = deps.getAccessToken ?? getAccessToken;
+  const isAllowed = deps.isLiveTrackingAllowedImpl ?? isLiveTrackingAllowed;
+
+  // /sessions/errors carries the same tracking gate as /sessions/report — this path posts
+  // outside runCheckpoint, so it needs its own check or a dark tenant 403s on every failure.
+  if (!isAllowed()) return { reported: false, reason: 'tracking-disabled' };
 
   const sessionId = input?.session_id;
   // Claude Code names this field `error` on the StopFailure payload; `error_type` was the

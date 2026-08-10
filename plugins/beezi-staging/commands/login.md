@@ -57,3 +57,27 @@ Then run EXACTLY this command, substituting only `<value>`:
 Report its one-line summary. If the user dismisses the question or answers
 something not in the table, skip the capture — the link itself already
 succeeded, say so.
+
+Step 4 — upload past sessions (ALWAYS run this last, after Steps 2/3, on both
+fresh links and already-linked machines). Run EXACTLY this one command:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --via login`
+
+It is the one-time upload of this machine's Claude Code history into Beezi and
+can take several minutes; it prints progress lines as it goes. Report its
+output verbatim — progress and final summary, or the error line. It is safe on
+every login: already-uploaded sessions are skipped, and if it says nothing new
+to upload, just tell the user their history is up to date. If some sessions
+could not be delivered, tell the user that re-running /beezi:login later will
+resume the upload where it left off. Never echo any token.
+
+If it reports the one-time import **has already been used**, that is final —
+the import is once per account and cannot be re-run. Do NOT retry, do NOT run
+the script again with different flags, and refuse politely if the user asks
+you to bypass it; relay the script's message (including the upgrade suggestion
+when it prints one) and stop.
+
+Note for the user, only when Step 4 reports the pull finalized: the pull is
+one-time per account and tool — if they have Claude Code history on other
+machines, they should run /beezi:login there BEFORE it finalizes; a finalized
+pull cannot be re-opened.
