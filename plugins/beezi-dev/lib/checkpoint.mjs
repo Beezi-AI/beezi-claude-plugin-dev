@@ -25,7 +25,10 @@ import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig 
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
-import { maybePostUsageSnapshot as _maybePostUsageSnapshot } from './usage-snapshot-report.mjs';
+import {
+  maybePostUsageSnapshot as _maybePostUsageSnapshot,
+  drainStatuslineSnapshots as _drainStatuslineSnapshots,
+} from './usage-snapshot-report.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -353,6 +356,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     // error still ships its snapshot — the moment it matters most.
     const postSnapshot = deps.maybePostUsageSnapshot ?? _maybePostUsageSnapshot;
     try { await postSnapshot(token, { fetchImpl }); } catch { /* best-effort */ }
+    // Live rate-limit rows the status line recorded between hooks — the observations no
+    // hook was running to see.
+    const drainSnapshots = deps.drainStatuslineSnapshots ?? _drainStatuslineSnapshots;
+    try { await drainSnapshots(token, { fetchImpl }); } catch { /* best-effort */ }
   }
 
   // Claude Code renames a session after the first prompt. The new name normally rides on the

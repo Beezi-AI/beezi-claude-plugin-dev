@@ -74,6 +74,13 @@ export function usageSnapshotStateFile() {
   return path.join(beeziHome(), 'usage-snapshot.json');
 }
 
+// Rate-limit observations captured by the status line, awaiting the next drain. Separate from
+// usage-snapshot.json because the status line writes it on render and must never contend with
+// the reporting path's own markers.
+export function statuslineUsageFile() {
+  return path.join(beeziHome(), 'statusline-usage.json');
+}
+
 // Claude Code's config root — `~/.claude`, relocatable via CLAUDE_CONFIG_DIR. Single source
 // for the dirs the plugin reads out of Claude Code (transcripts, live session store).
 export function claudeHome() {

@@ -5,6 +5,10 @@ import { usageSnapshotStateFile } from './paths.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
 import { normalizePlan } from './billing.mjs';
+import {
+  readPendingStatuslineUsage as _readPendingStatuslineUsage,
+  clearPendingStatuslineUsage as _clearPendingStatuslineUsage,
+} from './statusline-usage.mjs';
 
 // The API deep-whitelists nested limit entries (forbidNonWhitelisted): an unknown upstream key
 // inside limits[] would 400 the whole snapshot. Send exactly the known keys; JSON serialization
@@ -45,6 +49,49 @@ export function buildSnapshotPayload(utilization, account) {
   };
 }
 
+// Ships the rate-limit observations the status line recorded locally. Each row already carries
+// its own fetched_at, so the server's (account, fetched_at) unique key dedupes replays for free.
+// Rows are cleared only up to the last confirmed store, so a mid-drain failure retries the rest.
+export async function drainStatuslineSnapshots(token, deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+  const readPending = deps.readPendingStatuslineUsage ?? _readPendingStatuslineUsage;
+  const clearPending = deps.clearPendingStatuslineUsage ?? _clearPendingStatuslineUsage;
+  const readAccount = deps.readClaudeAccount ?? _readClaudeAccount;
+  if (!token) return { posted: 0, reason: 'no-token' };
+
+  const pending = readPending();
+  if (!pending.length) return { posted: 0, reason: 'empty' };
+
+  let account = null;
+  try { account = readAccount(); } catch { account = null; }
+  const identity = {
+    account_uuid: account?.accountUuid ?? null,
+    subscription_type: account?.subscriptionType ?? null,
+    rate_limit_tier: account?.rateLimitTier ?? null,
+    subscription_plan: account
+      ? normalizePlan(account.subscriptionType, account.rateLimitTier)
+      : null,
+  };
+
+  let posted = 0;
+  for (const row of pending) {
+    try {
+      const res = await postJson(
+        `${apiBase()}${ENDPOINTS.usageSnapshot}`,
+        token,
+        { ...identity, ...row, limits: null, raw: null },
+        { fetchImpl },
+      );
+      if (res.status < 200 || res.status >= 300) break;
+      posted += 1;
+    } catch {
+      break;
+    }
+  }
+  if (posted > 0) clearPending(posted);
+  return { posted };
+}
+
 // Post the current snapshot unless this exact (accountUuid, fetchedAtMs) pair already went out.
 // The marker advances only on a confirmed 2xx, so any failure (404 on an old API included)
 // retries at the next turn-end. Concurrent sessions can race and double-post; the server drops
@@ -60,7 +107,10 @@ export async function maybePostUsageSnapshot(token, deps = {}) {
   if (!utilization) return { reported: false, reason: 'no-utilization' };
 
   const stateFile = usageSnapshotStateFile();
-  const sent = readJson(stateFile)?.lastSent ?? {};
+  // The whole state is carried forward, not just lastSent: usage-ping.mjs keeps its config-mtime
+  // gate in this same file, and replacing the object would blow that marker away on every post.
+  const state = readJson(stateFile) ?? {};
+  const sent = state.lastSent ?? {};
   if (sent.accountUuid === utilization.accountUuid && sent.fetchedAtMs === utilization.fetchedAtMs) {
     return { reported: false, reason: 'already-sent' };
   }
@@ -72,6 +122,7 @@ export async function maybePostUsageSnapshot(token, deps = {}) {
     const res = await postJson(`${apiBase()}${ENDPOINTS.usageSnapshot}`, token, payload, { fetchImpl });
     if (res.status >= 200 && res.status < 300) {
       writeJsonSecure(stateFile, {
+        ...state,
         version: 1,
         lastSent: { accountUuid: utilization.accountUuid, fetchedAtMs: utilization.fetchedAtMs },
       });
