@@ -4,6 +4,8 @@ A Claude Code plugin that hooks into session lifecycle events (SessionStart, Pos
 
 It also ships ticket drafting: the `create-ticket` skill (`skills/create-ticket/SKILL.md`) plus a `.mcp.json` stdio bridge (`scripts/mcp.mjs` → `lib/mcp-bridge.mjs`) that forwards MCP traffic to the Beezi server authenticated with the stored `/beezi:login` credentials — no separate MCP OAuth prompt. The skill is a thin launcher — the drafting workflow is served by the server via `get_drafting_instructions`, so it stays current without a plugin reinstall. The bridge defaults to the production Beezi API; set `BEEZI_MCP_URL` to override.
 
+And a personal analytics summary: the `analytics` skill (`skills/analytics/SKILL.md`) answers "how much did I spend this week?" in the terminal, covering your own last 7 or 30 days with an alert status and up to three recommendations. It is a launcher on the same pattern — the workflow, response format, and insight rules are served by `get_analytics_instructions`, so wording and rules change server-side without a plugin release. Data always covers the invoking user only, whatever their role or plan. It rides the same bridge and the same `/beezi:login` machine link.
+
 ## Install
 
 ```
