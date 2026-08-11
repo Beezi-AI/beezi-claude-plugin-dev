@@ -23,6 +23,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { listSubagentTranscripts, buildTaskDescriptionMap } from './subagents.mjs';
 import { claimIntervals, mergeIntervals, subtractIntervals, totalMs } from './active-time.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
+import { claudeMdLines } from './claude-md.mjs';
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
@@ -119,6 +120,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const rootCache = new Map();
   const remoteCache = new Map();
   const timelineCache = new Map();
+  const claudeMdCache = new Map();
 
   // Persisted known-root map: seeds resolution (prefix match) and gets refreshed with any root→origin
   // we learn this checkpoint. A best-effort hint — a load failure yields an empty map, not a throw.
@@ -154,6 +156,16 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     if (r) { upsertRoot(map, root, r); mapDirty = true; }
     remoteCache.set(root, r);
     return r;
+  };
+
+  // Read per root, not per segment: repo-hopping splits one window into several segments against
+  // the same checkout, and the file cannot change meaningfully inside a single checkpoint.
+  const resolveClaudeMdLines = (root) => {
+    if (!root) return null;
+    if (claudeMdCache.has(root)) return claudeMdCache.get(root);
+    const lines = claudeMdLines(root);
+    claudeMdCache.set(root, lines);
+    return lines;
   };
 
   // Why segments did not become reports. A caller that gets zero reports cannot otherwise tell a
@@ -252,6 +264,9 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       // A subagent's context window is not the session's — its context fields never ship.
       const { context_peak_tokens, context_final_tokens, context_final_model, ...statsSansContext } = seg.stats;
       const stats = includeContext ? seg.stats : statsSansContext;
+      // Reported off the segment's own repo root, so a session that spans repositories describes
+      // the CLAUDE.md each part of it actually ran under.
+      const mdLines = resolveClaudeMdLines(seg.repoRoot);
       try {
         const payload = {
           segmentId: `${segmentScope}:${seg.fromLine}-${seg.toLine}`,
@@ -264,6 +279,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           ...usageStamp,
           session_name: sessionName,
           ...(timezone ? { timezone } : {}),
+          ...(mdLines != null ? { claude_md_lines: mdLines } : {}),
           ...(extra || {}),
           ...stats,
           duration_sec: durationSec,

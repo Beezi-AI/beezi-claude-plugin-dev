@@ -1717,3 +1717,38 @@ test('usage stamp — snapshot post fires only with emitTimeline, via the deps s
   await runCheckpoint({ session_id: 'sess-u4', transcript_path: transcript, cwd: dir }, deps, { emitTimeline: true });
   assert.equal(calls, 1, 'turn-end checkpoint posts once');
 });
+
+// ─── CLAUDE.md size rides the report ────────────────────────────────────────
+
+test('claude_md_lines — reported from the segment repo root, omitted when the repo has none', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Rules\n\nBe careful.\n', 'utf-8');
+
+  const deps = {
+    getAccessToken: async () => 'tok',
+    gitImpl: fakeGitRepo('feature/task-1', 'https://host/org/repo.git'),
+    fetchImpl: fakeFetch(503), // keep the queue file so the payload is readable
+  };
+  const transcript = writeTranscript(dir, [
+    assistantLine('feature/task-1', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint({ session_id: 'sess-md', transcript_path: transcript, cwd: dir }, deps);
+
+  const items = readQueue(dir);
+  assert.equal(items.length, 1, 'exactly one queue file');
+  assert.equal(items[0].payload.claude_md_lines, 3);
+
+  // Same setup, no CLAUDE.md: the key must be absent rather than 0, which the server reads as
+  // an empty-but-present file.
+  const bare = makeTmpDir(t);
+  setHome(bare);
+  const transcript2 = writeTranscript(bare, [
+    assistantLine('feature/task-1', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint({ session_id: 'sess-md2', transcript_path: transcript2, cwd: bare }, deps);
+
+  const bareItems = readQueue(bare);
+  assert.equal(bareItems.length, 1, 'exactly one queue file');
+  assert.equal('claude_md_lines' in bareItems[0].payload, false);
+});
