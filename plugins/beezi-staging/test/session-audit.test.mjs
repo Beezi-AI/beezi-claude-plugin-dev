@@ -20,6 +20,7 @@ const flushResult = (over = {}) => ({
   stored: 0,
   skipped: 0,
   timelines: 0,
+  timelinesDropped: 0,
   itemErrors: 0,
   retryableFailures: 0,
   permanentRejections: 0,
@@ -28,6 +29,15 @@ const flushResult = (over = {}) => ({
   halt: null,
   lastError: null,
   ...over,
+});
+
+// Sibling of flushResult for the other shape the audit consumes: a test states only the skip
+// reason it is about, and a new field costs one edit here instead of one per test.
+const checkpointResult = (skipped = {}) => ({
+  enqueued: 0,
+  flush: null,
+  sessionErrors: [],
+  skipped: { noRemote: 0, emitFailed: 0, deltaFailed: false, ...skipped },
 });
 
 // A flush double that accepts everything it is handed and records the call.
@@ -54,7 +64,7 @@ function fakeFlush(statusFor = () => BackfillSessionStatus.ACCEPTED) {
 function makeDeps(overrides = {}) {
   const events = [];
   const saved = [];
-  const ledger = { version: 1, identity: null, sessions: {}, complete: false, updatedAt: null };
+  const ledger = { version: 1, identity: null, sessions: {}, unreadable: {}, complete: false, updatedAt: null };
   const deps = {
     env: {},
     now: () => 10 * 60 * 60 * 1000, // fixed clock, far past every fixture mtime + the 30min window
@@ -206,6 +216,130 @@ test('11. live-mode tenants only upload transcripts predating the machine link',
 
   assert.equal(result.liveTracked, 1);
   assert.equal(result.candidates, 1);
+});
+
+// The stamp is the real signal; the credentials mtime is only a fallback for links made before it
+// existed. On CredMan/Keychain/secret-tool machines that file never exists, so a stat-only cutoff
+// returned null and the guard above silently never fired.
+test('11b. the link cutoff comes from the tracking stamp, not the credentials file', async () => {
+  const { deps } = makeDeps({
+    readTrackingStateImpl: () => ({
+      trackingMode: 'live',
+      backfillCompleted: false,
+      linkedAt: new Date(5_000).toISOString(),
+    }),
+    // No credentials file on this machine — the old implementation gave up here.
+    statImpl: () => { throw new Error('ENOENT'); },
+    listTranscripts: () => [transcript('before-link', 1_000), transcript('after-link', 9_000)],
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.liveTracked, 1);
+  assert.equal(result.candidates, 1);
+});
+
+// Every candidate that yields no report used to vanish between `candidates` and
+// `sessionsImported` with nothing printed — the run said it read 593 and uploaded 576, and the
+// missing 17 had no name anywhere. Each cause now has its own counter.
+test('11c. a candidate with no usage data counts as empty, not as a loss', async () => {
+  const { deps } = makeDeps({
+    listTranscripts: () => [transcript('has-usage'), transcript('no-usage')],
+    runCheckpointImpl: async (input, _d, options) => {
+      if (input.session_id === 'has-usage') options.sink(report(input.session_id));
+      return checkpointResult();
+    },
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.candidates, 2);
+  assert.equal(result.sessionsImported, 1);
+  assert.equal(result.empty, 1);
+  assert.equal(result.noRemote, 0);
+  assert.equal(result.unreadable, 0);
+  // Nothing to upload is not a failure — it must not hold the one-time pull open.
+  assert.equal(result.finalized, true);
+});
+
+test('11d. a candidate with no resolvable repository is reported separately from empty', async () => {
+  const { deps } = makeDeps({
+    listTranscripts: () => [transcript('no-remote')],
+    runCheckpointImpl: async () => checkpointResult({ noRemote: 2 }),
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.noRemote, 1);
+  assert.equal(result.empty, 0);
+  // Deterministic: a transcript with no recorded cwd will have none next run either, so gating
+  // the seal on it would hold the pull open forever.
+  assert.equal(result.finalized, true);
+});
+
+// The seal is one-time per account and tool, and --force skips only the local caches. Sealing
+// over a transcript we merely failed to READ loses that session permanently.
+test('11e. an unreadable transcript is counted and keeps the pull open', async () => {
+  const { deps } = makeDeps({
+    listTranscripts: () => [transcript('unreadable')],
+    runCheckpointImpl: async () => checkpointResult({ deltaFailed: true }),
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.unreadable, 1);
+  assert.equal(result.empty, 0);
+  assert.equal(result.finalized, false);
+});
+
+test('11f. a throwing checkpoint counts as unreadable and keeps the pull open', async () => {
+  const { deps } = makeDeps({
+    listTranscripts: () => [transcript('boom')],
+    runCheckpointImpl: async () => { throw new Error('ENOENT'); },
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.unreadable, 1);
+  assert.equal(result.sessionsImported, 0);
+  assert.equal(result.finalized, false);
+});
+
+// A session we failed to prepare must never be reported as "held no usage data" — that sentence
+// is the silent-loss-dressed-as-normal outcome this whole change set exists to end.
+test('11h. a session whose segments all failed to emit is not reported as empty', async () => {
+  const { deps } = makeDeps({
+    listTranscripts: () => [transcript('emit-boom')],
+    runCheckpointImpl: async () => checkpointResult({ emitFailed: 2 }),
+  });
+
+  const result = await runAudit(deps, {});
+
+  assert.equal(result.emitFailed, 1);
+  assert.equal(result.empty, 0);
+});
+
+// EACCES reads exactly like transient I/O at the call site. Without a bound, one such file would
+// hold the pull open on every future login and the summary would tell the user to re-run forever.
+test('11g. a transcript that fails twice stops blocking the seal on the second run', async () => {
+  const ledger = { version: 1, identity: null, sessions: {}, unreadable: {}, complete: false, updatedAt: null };
+  const make = () =>
+    makeDeps({
+      listTranscripts: () => [transcript('always-broken')],
+      runCheckpointImpl: async () => { throw new Error('EACCES'); },
+      loadLedgerImpl: () => ledger,
+      saveLedgerImpl: () => {},
+    }).deps;
+
+  const first = await runAudit(make(), {});
+  assert.equal(first.unreadable, 1);
+  assert.equal(first.retriableUnreadable, 1);
+  assert.equal(first.finalized, false, 'first failure earns a retry');
+
+  const second = await runAudit(make(), {});
+  assert.equal(second.unreadable, 1, 'still reported to the user');
+  assert.equal(second.retriableUnreadable, 0, 'but no longer blocking');
+  assert.equal(second.finalized, true, 'the pull can seal');
 });
 
 test('12. --since drops transcripts older than the cutoff', async () => {

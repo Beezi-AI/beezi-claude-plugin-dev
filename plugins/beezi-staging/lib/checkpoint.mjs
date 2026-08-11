@@ -25,7 +25,10 @@ import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig 
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
-import { maybePostUsageSnapshot as _maybePostUsageSnapshot } from './usage-snapshot-report.mjs';
+import {
+  maybePostUsageSnapshot as _maybePostUsageSnapshot,
+  drainStatuslineSnapshots as _drainStatuslineSnapshots,
+} from './usage-snapshot-report.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -151,7 +154,12 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     return r;
   };
 
-  const emptyResult = { enqueued: 0, flush: null, sessionErrors: collectedErrors };
+  // Why segments did not become reports. A caller that gets zero reports cannot otherwise tell a
+  // session that genuinely holds no usage (a transcript with no assistant tokens — nothing to
+  // upload, and nothing wrong) from one we dropped for a reason worth reporting. Only the
+  // problem cases are counted: "no usage" is the absence of all of them.
+  const skipped = { noRemote: 0, emitFailed: 0, deltaFailed: false };
+  const emptyResult = { enqueued: 0, flush: null, sessionErrors: collectedErrors, skipped };
   const state = loadState(session_id);
   // When the session file is unreadable (name resolves to null), keep the last name we sent
   // rather than overwriting the stored name with null.
@@ -160,6 +168,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try {
     delta = computeDelta(transcript_path, state.cursor, { cwd, repoRootOf, branchAt: branchOf });
   } catch {
+    skipped.deltaFailed = true;
     return emptyResult;
   }
   const { nextCursor, segments, apiErrorEvents = [] } = delta;
@@ -231,7 +240,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       if (seg.stats.token_total === 0 && durationSec === 0) continue;
       const remote = resolveRemote(seg.repoRoot) ?? localRemote(seg.repoRoot ?? cwd);
       // Nothing left to name the work by — only reachable when the session has no cwd either.
-      if (!remote) continue;
+      if (!remote) { skipped.noRemote += 1; continue; }
       // A single write failure must not abort the window (which would leave the cursor
       // unadvanced and re-process everything forever) — skip that segment and continue.
       // A subagent's context window is not the session's — its context fields never ship.
@@ -262,7 +271,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
         }
         lastPayload = payload;
         enqueued += 1;
-      } catch { /* keep going; the cursor still advances below */ }
+      } catch { skipped.emitFailed += 1; /* keep going; the cursor still advances below */ }
     }
   };
   enqueueSegments(segments, session_id);
@@ -353,6 +362,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     // error still ships its snapshot — the moment it matters most.
     const postSnapshot = deps.maybePostUsageSnapshot ?? _maybePostUsageSnapshot;
     try { await postSnapshot(token, { fetchImpl }); } catch { /* best-effort */ }
+    // Live rate-limit rows the status line recorded between hooks — the observations no
+    // hook was running to see.
+    const drainSnapshots = deps.drainStatuslineSnapshots ?? _drainStatuslineSnapshots;
+    try { await drainSnapshots(token, { fetchImpl }); } catch { /* best-effort */ }
   }
 
   // Claude Code renames a session after the first prompt. The new name normally rides on the
@@ -410,7 +423,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // The import owns its own batched delivery, so it must not drain the live queue per session —
   // that would add unrelated HTTP calls mid-import and muddy its summary.
   const flush = options.skipFlush ? null : await flushQueue(token, { fetchImpl });
-  return { enqueued, flush, sessionErrors: collectedErrors };
+  return { enqueued, flush, sessionErrors: collectedErrors, skipped };
 }
 
 // Once tracking is off, queued reports are held for this long: a tenant that converts to paid

@@ -7,6 +7,8 @@ import {
   saveLedger as _saveLedger,
   isImported,
   markImported,
+  markUnreadable,
+  wasUnreadable,
   markComplete,
   isComplete,
 } from './audit-ledger.mjs';
@@ -31,6 +33,7 @@ import {
   isLiveTrackingAllowed,
   markBackfillCompleted,
   recordWhoami,
+  linkedAtMs as _linkedAtMs,
   TrackingMode,
 } from './tracking.mjs';
 import { UserError } from './friendly-error.mjs';
@@ -87,9 +90,16 @@ function liveSessionId(env, deps) {
 
 // When live tracking is on, everything after the machine link was (or will be) tracked live —
 // re-sending it through the audit would re-segment the same transcript lines on different
-// boundaries once the per-session cursor has been pruned, and double-count the spend. The link
-// instant is approximated by the credentials file's mtime (rewritten at login).
-function linkedAtMs(deps) {
+// boundaries once the per-session cursor has been pruned, and double-count the spend.
+//
+// The link instant comes from tracking.json, stamped by login. It used to be read as the
+// credentials file's mtime, which is written only by the DPAPI/plaintext fallbacks: on any machine
+// with a real credential store (CredMan, Keychain, secret-tool) the file does not exist, so this
+// returned null and the guard below never fired. The mtime stays as the fallback for links made
+// before the stamp existed — and it is the weaker signal, since token refresh rewrites it.
+function linkedAtMs(tracking, deps) {
+  const stamped = _linkedAtMs(tracking);
+  if (stamped != null) return stamped;
   const statImpl = deps.statImpl ?? ((p) => fs.statSync(p));
   try {
     return statImpl(credentialsFile()).mtimeMs ?? null;
@@ -122,6 +132,17 @@ export function shouldFinalize(result, options = {}) {
   if (result.reportsFailed > 0) return false;
   if (result.unattributed > 0) return false;
   if (result.permanentRejections > 0) return false;
+  // A transcript we could not read is a retryable failure like any other, and sealing over it
+  // loses that session for good — the seal is one-time per account and tool, and --force skips
+  // only the LOCAL caches, never the server's verdict. So the first failure holds the pull open.
+  //
+  // Only the FIRST failure, though: a permission error is indistinguishable from transient I/O at
+  // the call site, so gating on every occurrence would let one permanently unreadable file block
+  // the seal forever and tell the user to re-run login on a loop.
+  //
+  // `empty` and `noRemote` never block: the first has nothing to upload, and the second can never
+  // succeed (a transcript with no recorded cwd will have none on the next run either).
+  if (result.retriableUnreadable > 0) return false;
   return true;
 }
 
@@ -162,8 +183,27 @@ export async function runAudit(deps = {}, options = {}) {
     oversize: 0,
     candidates: 0,
     plannedChunks: 0,
+    // Reports built and handed to the flush — in a dry run, what WOULD have been sent. Counted in
+    // both modes so "stored" has something to be compared against: without it a server that
+    // quietly stores fewer than it was sent is undetectable.
     plannedReports: 0,
     sessionsImported: 0,
+    // Candidates that produced no report, split by cause — every one of these used to vanish
+    // between `candidates` and `sessionsImported` with nothing printed, which is why the totals
+    // never added up. `empty` is the benign one: the transcript genuinely carries no usage.
+    empty: 0,
+    noRemote: 0,
+    emitFailed: 0,
+    // A transcript we could not read, whether the throw escaped runCheckpoint or was caught
+    // inside it — the user-visible fact is the same, so it is one number.
+    unreadable: 0,
+    // Unreadable sessions this run is willing to hold the pull open for: the ones we had not
+    // already tried. A file that fails on the retry too is deterministic (a permission error is
+    // indistinguishable from a transient one at the call site), and blocking on it forever would
+    // trade the old silent-loss bug for a pull that can never seal.
+    retriableUnreadable: 0,
+    // Sessions, not reports: reportsRejected counts reports and was never printed at all.
+    sessionsRejected: 0,
     reportsStored: 0,
     reportsSkipped: 0,
     itemErrors: 0,
@@ -177,6 +217,10 @@ export async function runAudit(deps = {}, options = {}) {
     upgradeAdvised: false,
     followupsAllowed: true,
     timelines: 0,
+    // Client-side twin of `timelines` (which is purely the server's number), so a gap between
+    // what we sent and what landed is attributable instead of a bare unexplained difference.
+    timelinesOffered: 0,
+    timelinesDropped: 0,
     sessionErrors: 0,
     lastError: null,
   };
@@ -234,7 +278,7 @@ export async function runAudit(deps = {}, options = {}) {
   // would double-count once its per-session cursor was pruned. Dark-mode tenants never tracked
   // live, so every transcript is fair game.
   const liveMode = trackingValid && tracking?.trackingMode === TrackingMode.LIVE;
-  const linkCutoffMs = liveMode ? linkedAtMs(deps) : null;
+  const linkCutoffMs = liveMode ? linkedAtMs(tracking, deps) : null;
   const activeCutoffMs = now() - ACTIVE_SESSION_WINDOW_MS;
 
   const candidates = [];
@@ -286,16 +330,17 @@ export async function runAudit(deps = {}, options = {}) {
   let halted = false;
 
   const dispatchBatch = async (batch) => {
+    result.plannedReports += batch.reduce((sum, g) => sum + g.reports.length, 0);
     if (options.dryRun) {
       const chunks = planChunks(batch);
       result.plannedChunks += chunks.length;
-      result.plannedReports += batch.reduce((sum, g) => sum + g.reports.length, 0);
       for (const group of batch) followups.delete(group.sessionId);
       return;
     }
 
     const flushed = await flushBackfillChunks(batch, token, { fetchImpl }, { timeoutMs: AUDIT_TIMEOUT_MS });
     result.plannedChunks += flushed.chunks;
+    result.timelinesDropped += flushed.timelinesDropped ?? 0;
     result.reportsStored += flushed.stored;
     result.reportsSkipped += flushed.skipped;
     result.timelines += flushed.timelines;
@@ -314,7 +359,10 @@ export async function runAudit(deps = {}, options = {}) {
         result.sessionsImported += 1;
         landed.push(group.sessionId);
       }
-      if (status === BackfillSessionStatus.REJECTED) result.reportsRejected += group.reports.length;
+      if (status === BackfillSessionStatus.REJECTED) {
+        result.reportsRejected += group.reports.length;
+        result.sessionsRejected += 1;
+      }
       if (status === BackfillSessionStatus.FAILED) result.reportsFailed += group.reports.length;
       // Anything the server judged is ledgered, including a rejection: an unconnected repository
       // will reject on every future run too. Failures and unattributed chunks stay eligible.
@@ -376,6 +424,15 @@ export async function runAudit(deps = {}, options = {}) {
     inFlight = dispatchBatch(batch);
   };
 
+  // First failure earns a retry and holds the pull open; a second one does not, so a permanently
+  // unreadable file costs one extra login rather than sealing the pull never.
+  let unreadableDirty = false;
+  const noteUnreadable = (sessionId) => {
+    if (!wasUnreadable(ledger, sessionId)) result.retriableUnreadable += 1;
+    markUnreadable(ledger, sessionId);
+    unreadableDirty = true;
+  };
+
   // Parsing itself stays strictly sequential. computeDelta reads and JSON.parses the whole
   // transcript, so parsing sessions in parallel multiplies peak memory with no gain on a
   // single thread.
@@ -383,6 +440,7 @@ export async function runAudit(deps = {}, options = {}) {
     if (halted) break;
     const reports = [];
     let sessionErrors = [];
+    let skipped = null;
     try {
       const checkpoint = await runCheckpoint(
         {
@@ -400,13 +458,27 @@ export async function runAudit(deps = {}, options = {}) {
         },
       );
       sessionErrors = checkpoint?.sessionErrors ?? [];
+      skipped = checkpoint?.skipped ?? null;
     } catch {
-      // One unreadable transcript must not end the run.
+      // One unreadable transcript must not end the run — but it is no longer silent.
+      result.unreadable += 1;
+      noteUnreadable(entry.sessionId);
       processed += 1;
       continue;
     }
     processed += 1;
-    if (reports.length === 0) continue;
+    if (reports.length === 0) {
+      // Classify rather than drop on the floor. `empty` is the only benign outcome, so it is the
+      // fallback ONLY once every reason worth reporting has been ruled out — telling a user that
+      // a session we failed to upload "held no usage data" is the silent loss this exists to end.
+      if (skipped?.deltaFailed) {
+        result.unreadable += 1;
+        noteUnreadable(entry.sessionId);
+      } else if ((skipped?.emitFailed ?? 0) > 0) result.emitFailed += 1;
+      else if ((skipped?.noRemote ?? 0) > 0) result.noRemote += 1;
+      else result.empty += 1;
+      continue;
+    }
 
     // Timeline travels with the session's own chunk. Best-effort: a timeline that fails to
     // compute never blocks the usage upload.
@@ -418,6 +490,7 @@ export async function runAudit(deps = {}, options = {}) {
         (computed.periods.length > 0 || computed.subagents.length > 0 || computed.plan_events.length > 0)
       ) {
         timeline = { sessionId: entry.sessionId, ...computed };
+        result.timelinesOffered += 1;
       }
     } catch { /* best-effort */ }
 
@@ -429,6 +502,12 @@ export async function runAudit(deps = {}, options = {}) {
   }
   await dispatch();
   if (inFlight) await inFlight;
+
+  // A run can hit unreadable transcripts and dispatch nothing at all, so this cannot ride on the
+  // per-dispatch save — without it the retry marker is lost and the next run blocks again.
+  if (unreadableDirty) {
+    try { saveLedger(ledger); } catch { /* best-effort */ }
+  }
 
   result.ok = true;
   await finalize();

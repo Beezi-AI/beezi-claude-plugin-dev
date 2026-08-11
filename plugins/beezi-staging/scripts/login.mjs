@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { apiBase, OAUTH_SCOPES } from '../lib/config.mjs';
 import { auditLedgerFile } from '../lib/paths.mjs';
-import { clearTrackingState, recordWhoami } from '../lib/tracking.mjs';
+import { clearTrackingState, markLinked, recordWhoami } from '../lib/tracking.mjs';
 import { discover, registerClient, pkcePair, exchangeCode } from '../lib/oauth.mjs';
 import { getCredentials, setCredentials, deleteCredentials } from '../lib/credentials.mjs';
 import { startLoopback } from '../lib/loopback.mjs';
@@ -131,6 +131,9 @@ async function run() {
   // replayed here would seal the new tenant's pull empty.
   clearTrackingState();
   try { fs.rmSync(auditLedgerFile(), { force: true }); } catch { /* best-effort */ }
+  // Stamp the link instant before anything can be tracked under it: the audit skips transcripts
+  // touched after this, which is what stops it re-segmenting sessions live tracking already sent.
+  markLinked();
   // The portal registers a machine from the X-Beezi-Host/Client headers that ride along on an
   // authenticated request — it has no registration endpoint. Without a call here it keeps
   // showing this machine as not connected until some later hook happens to fire, so make that

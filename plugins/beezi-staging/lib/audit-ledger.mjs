@@ -26,11 +26,21 @@ export function loadLedger(identity = null) {
     return emptyLedger(identity);
   }
   if (!raw.identity && identity) raw.identity = identity;
+  // Added after v1 shipped, so a ledger written before it has no such key. Normalised here rather
+  // than guarded at every use site.
+  if (!raw.unreadable || typeof raw.unreadable !== 'object') raw.unreadable = {};
   return raw;
 }
 
 function emptyLedger(identity) {
-  return { version: LEDGER_VERSION, identity: identity ?? null, sessions: {}, complete: false, updatedAt: null };
+  return {
+    version: LEDGER_VERSION,
+    identity: identity ?? null,
+    sessions: {},
+    unreadable: {},
+    complete: false,
+    updatedAt: null,
+  };
 }
 
 // The pull was sealed server-side (we finalized it, or a chunk answered ALREADY_COMPLETED).
@@ -53,8 +63,25 @@ export function isImported(ledger, sessionId) {
 
 export function markImported(ledger, sessionId, { outcome, reports = 0, at = new Date() } = {}) {
   ledger.sessions[sessionId] = { at: at.toISOString(), outcome, reports };
+  // A session that read fine this time is not unreadable any more; leaving the marker would make
+  // wasUnreadable() answer yes forever for a session that has since imported.
+  delete ledger.unreadable?.[sessionId];
   ledger.updatedAt = at.toISOString();
   return ledger;
+}
+
+// A transcript that could not be read. Deliberately NOT in `sessions`: the session stays eligible,
+// so the next run parses it again. It only records that we already gave it one chance, which is
+// what lets the pull seal on the second attempt instead of blocking forever on a file that fails
+// deterministically (a permission error reads exactly like a transient one).
+export function markUnreadable(ledger, sessionId, { at = new Date() } = {}) {
+  ledger.unreadable[sessionId] = { at: at.toISOString() };
+  ledger.updatedAt = at.toISOString();
+  return ledger;
+}
+
+export function wasUnreadable(ledger, sessionId) {
+  return Object.prototype.hasOwnProperty.call(ledger?.unreadable ?? {}, sessionId);
 }
 
 // 0600 — the ledger records which projects the user worked on, by session id only, but the file

@@ -153,6 +153,10 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
     stored: 0,
     skipped: 0,
     timelines: 0,
+    // Timelines this run deliberately abandoned to save the usage they rode with. Counted so the
+    // summary can say the sessions landed but their timelines did not, instead of leaving an
+    // unexplained gap between offered and attached.
+    timelinesDropped: 0,
     itemErrors: 0,
     retryableFailures: 0,
     permanentRejections: 0,
@@ -324,6 +328,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
       // (forbidNonWhitelisted). Retry once without them — losing timelines beats losing the
       // usage, and the next login (post-deploy) delivers nothing new only because the ledger
       // already sealed these sessions; acceptable for a deploy-order violation.
+      result.timelinesDropped += chunk.timelines.length;
       return sendChunk({ ...chunk, timelines: [] }, depth);
     }
 
