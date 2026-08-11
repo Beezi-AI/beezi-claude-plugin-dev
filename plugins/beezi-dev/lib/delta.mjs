@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'fs';
 import { extractPathSignal } from './repo-timeline.mjs';
 import { computeCodeChanges } from './code-changes.mjs';
 import { computeOperations } from './operations.mjs';
@@ -10,10 +10,10 @@ export const IDLE_GAP_SEC = 300;
 
 // Pull display text out of an assistant message (string content or text blocks).
 function messageText(message) {
-  const c = message?.content;
+  const c = message == null ? undefined : message.content;
   if (typeof c === 'string') return c.trim() || null;
   if (Array.isArray(c)) {
-    const text = c.filter((b) => b?.type === 'text' && typeof b.text === 'string')
+    const text = c.filter((b) => b != null && b.type === 'text' && typeof b.text === 'string')
       .map((b) => b.text).join('\n').trim();
     return text || null;
   }
@@ -43,9 +43,9 @@ function isTransientApiError(line) {
 // every block-line (incl. the first) — otherwise a message's tokens bill to the repo that
 // was active before its own tool_use ran, which is exactly the wrong repo on a switch.
 export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
-  const cwd = resolvers.cwd ?? null;
-  const repoRootOf = resolvers.repoRootOf ?? ((dir) => dir);
-  const branchAt = resolvers.branchAt ?? null;
+  const cwd = resolvers.cwd == null ? null : resolvers.cwd;
+  const repoRootOf = resolvers.repoRootOf == null ? ((dir) => dir) : resolvers.repoRootOf;
+  const branchAt = resolvers.branchAt == null ? null : resolvers.branchAt;
 
   const content = fs.readFileSync(transcriptPath, 'utf-8');
   // Strip trailing newline(s): a JSONL file at rest ends with '\n', and the trailing empty
@@ -67,7 +67,8 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
   // Pre-pass: message id -> last tool-path signal across all of the message's block-lines.
   const messageDir = new Map();
   for (const { line } of parsed) {
-    const id = line.message?.id ?? line.requestId ?? null;
+    const msgId = line.message == null ? undefined : line.message.id;
+    const id = msgId == null ? (line.requestId == null ? null : line.requestId) : msgId;
     if (!id) continue;
     const dir = extractPathSignal(line, cwd);
     if (dir) messageDir.set(id, dir); // last-touch-wins within the message
@@ -105,7 +106,8 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
   };
 
   for (const { lineNo, line } of parsed) {
-    const id = line.message?.id ?? line.requestId ?? null;
+    const msgId = line.message == null ? undefined : line.message.id;
+    const id = msgId == null ? (line.requestId == null ? null : line.requestId) : msgId;
     // Whole-message signal when known (applies to every block-line incl. the first, so the
     // message's tokens bill to the repo its own tool_use touched); else the line's own tool path;
     // else the line's own recorded cwd. The cwd fallback tracks `cd`s and attributes signal-less
@@ -139,12 +141,12 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
           ? line.error
           : (line.apiErrorStatus === 429 ? 'rate_limit' : 'unknown'),
         text: messageText(line.message),
-        occurredAt: line.timestamp ?? null,
+        occurredAt: line.timestamp == null ? null : line.timestamp,
         lineNo,
       });
     }
 
-    if (line.type === 'assistant' && line.message?.usage) {
+    if (line.type === 'assistant' && line.message != null && line.message.usage) {
       if (id && countedMessages.has(id)) continue;
       if (id) countedMessages.add(id);
 
@@ -152,9 +154,12 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
       const u = line.message.usage;
       const cacheCreation = u.cache_creation_input_tokens
         || Object.values(u.cache_creation || {}).reduce((a, x) => a + (x || 0), 0);
-      const m = (run.models[model] ??= {
-        token_input: 0, token_output: 0, token_cache_read: 0, token_cache_creation: 0, requests: 0,
-      });
+      if (run.models[model] == null) {
+        run.models[model] = {
+          token_input: 0, token_output: 0, token_cache_read: 0, token_cache_creation: 0, requests: 0,
+        };
+      }
+      const m = run.models[model];
       m.token_input += u.input_tokens || 0;
       m.token_output += u.output_tokens || 0;
       m.token_cache_read += u.cache_read_input_tokens || 0;
@@ -165,7 +170,7 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
       // run tiny separate contexts and must not move the session's numbers.
       if (line.isSidechain !== true) {
         const contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + cacheCreation;
-        run.contextPeak = Math.max(run.contextPeak ?? 0, contextTokens);
+        run.contextPeak = Math.max(run.contextPeak == null ? 0 : run.contextPeak, contextTokens);
         run.contextFinal = contextTokens;
         run.contextFinalModel = model;
       }

@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import { execFileSync } from 'child_process';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { apiBase, OAUTH_SCOPES } from '../lib/config.mjs';
 import { auditLedgerFile } from '../lib/paths.mjs';
 import { clearTrackingState, markLinked, recordWhoami } from '../lib/tracking.mjs';
@@ -45,7 +45,7 @@ function openBrowser(url) {
 // matches redirect URIs exactly (port included), so client_id and redirect_uri
 // always travel together.
 async function bindClient(meta, existing, state) {
-  if (existing?.client_id && existing.redirect_uri) {
+  if (existing && existing.client_id && existing.redirect_uri) {
     const port = Number(new URL(existing.redirect_uri).port);
     try {
       const lb = await startLoopback({ port, expectedState: state });
@@ -66,7 +66,7 @@ async function run() {
   if (existing) {
     setMachineClientId(existing.client_id);
     const who = await whoami(existing.access_token, { base });
-    if (who?.valid) {
+    if (who && who.valid) {
       // The login flow continues into plan capture and the history backfill even when already
       // linked — refresh the cached tracking policy so those steps act on current state.
       try { recordWhoami(who, existing.client_id); } catch { /* best-effort */ }
@@ -123,7 +123,7 @@ async function run() {
     // Underestimate when the server omits expires_in — see DEFAULT_EXPIRES_IN_S in lib/token.mjs.
     // Guessing long parks a dead token in the keychain for the whole difference, and nothing
     // refreshes it because expires_at still reads healthy.
-    expires_at: Date.now() + (tokens.expires_in ?? 3_600) * 1000,
+    expires_at: Date.now() + (tokens.expires_in == null ? 3_600 : tokens.expires_in) * 1000,
   });
   setMachineClientId(clientId);
   // A fresh login is a fresh identity: machine-global tenant state recorded under the previous
@@ -139,13 +139,13 @@ async function run() {
   // showing this machine as not connected until some later hook happens to fire, so make that
   // first call now. Best-effort: the link itself is already stored and valid.
   const who = await whoami(tokens.access_token, { base }).catch(() => null);
-  if (who?.valid) {
+  if (who && who.valid) {
     try { recordWhoami(who, clientId); } catch { /* best-effort */ }
   }
   console.log(`\n✓ Beezi analytics linked. Credentials stored in ${where}.`);
-  const account = who?.valid ? (who.name || who.email) : null;
+  const account = who && who.valid ? (who.name || who.email) : null;
   if (account) console.log(`  Account: ${account}`);
-  if (who?.valid && who.trackingMode && who.trackingMode !== 'live') {
+  if (who && who.valid && who.trackingMode && who.trackingMode !== 'live') {
     console.log('  This workspace is in audit mode — your session history uploads at the end of this login.');
   }
 }

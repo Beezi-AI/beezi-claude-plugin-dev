@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'fs';
 import { trackingStateFile } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 
@@ -19,14 +19,14 @@ export const TrackingMode = Object.freeze({
 // in whoami) means "allow" — the server's TrackingEnabledGuard is the actual boundary, and
 // failing closed would dark-mode every fresh install until its first whoami.
 export function readTrackingState(deps = {}) {
-  const read = deps.readJsonImpl ?? readJson;
+  const read = deps.readJsonImpl == null ? readJson : deps.readJsonImpl;
   const raw = read(trackingStateFile(), null);
   if (!raw || raw.version !== STATE_VERSION) return null;
   return raw;
 }
 
 export function writeTrackingState(state, deps = {}) {
-  const write = deps.writeJsonImpl ?? writeJsonSecure;
+  const write = deps.writeJsonImpl == null ? writeJsonSecure : deps.writeJsonImpl;
   // 0600 like every other beeziHome() root file; best-effort — a disk failure must never
   // break a hook.
   try {
@@ -35,7 +35,7 @@ export function writeTrackingState(state, deps = {}) {
 }
 
 export function isLiveTrackingAllowed(state = readTrackingState()) {
-  const mode = state?.trackingMode ?? null;
+  const mode = state == null || state.trackingMode == null ? null : state.trackingMode;
   if (mode === TrackingMode.BACKFILL_ONLY || mode === TrackingMode.DISABLED) return false;
   return true;
 }
@@ -55,7 +55,7 @@ export function shouldBackfill(state = readTrackingState()) {
 // client id changes on every login (dynamic registration), so it is the natural binding key;
 // email is the fallback for states recorded before the id was known.
 export function matchesIdentity(state, identity) {
-  if (!state?.identity || !identity) return true;
+  if (state == null || !state.identity || !identity) return true;
   return state.identity === identity;
 }
 
@@ -63,7 +63,8 @@ export function matchesIdentity(state, identity) {
 // object instead drops whatever fields the caller did not know about, which is exactly how a
 // whoami refresh used to clobber the linkedAt stamp written at login.
 function patchTrackingState(patch, deps = {}) {
-  writeTrackingState({ ...(readTrackingState(deps) ?? {}), ...patch }, deps);
+  const current = readTrackingState(deps);
+  writeTrackingState({ ...(current == null ? {} : current), ...patch }, deps);
 }
 
 // When this machine was linked, as an ISO instant. The audit uses it to skip transcripts that live
@@ -77,7 +78,7 @@ export function markLinked(deps = {}) {
 // Takes the already-read state so callers that hold one don't re-read the file — and so the audit
 // can feed it the same state its other gates key off.
 export function linkedAtMs(state) {
-  const at = state?.linkedAt;
+  const at = state == null ? undefined : state.linkedAt;
   if (!at) return null;
   const ms = Date.parse(at);
   return Number.isFinite(ms) ? ms : null;
@@ -88,10 +89,10 @@ export function recordWhoami(who, identity, deps = {}) {
   if (!who || who.valid !== true) return;
   patchTrackingState(
     {
-      trackingMode: who.trackingMode ?? null,
-      tenantTier: who.tenantTier ?? null,
+      trackingMode: who.trackingMode == null ? null : who.trackingMode,
+      tenantTier: who.tenantTier == null ? null : who.tenantTier,
       backfillCompleted: who.backfillCompleted === true,
-      identity: identity ?? null,
+      identity: identity == null ? null : identity,
       fetchedAt: new Date().toISOString(),
       reason: null,
     },
@@ -106,7 +107,7 @@ export function markTrackingDisabled(reason, deps = {}) {
     {
       trackingMode: TrackingMode.DISABLED,
       fetchedAt: new Date().toISOString(),
-      reason: reason ?? null,
+      reason: reason == null ? null : reason,
     },
     deps,
   );
@@ -118,7 +119,7 @@ export function markBackfillCompleted(deps = {}) {
 }
 
 export function clearTrackingState(deps = {}) {
-  const fsImpl = deps.fsImpl ?? fs;
+  const fsImpl = deps.fsImpl == null ? fs : deps.fsImpl;
   try {
     fsImpl.rmSync(trackingStateFile(), { force: true });
   } catch { /* best-effort */ }

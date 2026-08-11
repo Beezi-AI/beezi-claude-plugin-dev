@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import os from 'node:os';
+import fs from 'fs';
+import os from 'os';
 import { configCandidates } from './claude-account.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { usageSnapshotStateFile } from './paths.mjs';
@@ -35,15 +35,16 @@ function newestConfigMtimeMs(env, homedir, statFn) {
 // Best-effort by construction: every failure path returns a reason and never throws, so a hook
 // wrapping this can never delay or break a turn.
 export async function pingUsageSnapshot(deps = {}) {
-  const statFn = deps.statSync ?? ((p) => fs.statSync(p));
-  const env = deps.env ?? process.env;
-  const homedir = deps.homedir ?? os.homedir();
+  const statFn = deps.statSync == null ? ((p) => fs.statSync(p)) : deps.statSync;
+  const env = deps.env == null ? process.env : deps.env;
+  const homedir = deps.homedir == null ? os.homedir() : deps.homedir;
 
   const mtimeMs = newestConfigMtimeMs(env, homedir, statFn);
   if (mtimeMs === 0) return { reported: false, reason: 'no-config' };
 
   const stateFile = usageSnapshotStateFile();
-  const state = readJson(stateFile) ?? {};
+  const storedState = readJson(stateFile);
+  const state = storedState == null ? {} : storedState;
   // The file has not been touched since we last looked, so the cache inside it cannot have moved.
   if (state.lastSeenConfigMtimeMs === mtimeMs) {
     return { reported: false, reason: 'unchanged' };

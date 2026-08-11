@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'fs';
 import { apiBase, ENDPOINTS } from '../lib/config.mjs';
 import { getCredentials, deleteCredentials } from '../lib/credentials.mjs';
 import { auditLedgerFile } from '../lib/paths.mjs';
@@ -6,6 +6,7 @@ import { clearTrackingState } from '../lib/tracking.mjs';
 import { getAccessToken } from '../lib/token.mjs';
 import { machineHeaders } from '../lib/machine-identity.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
+import { resolveFetch } from '../lib/fetch-compat.mjs';
 
 const TIMEOUT_MS = 5000;
 
@@ -15,7 +16,8 @@ async function unlinkOnServer(token) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${apiBase()}${ENDPOINTS.machine}`, {
+    const fetchImpl = resolveFetch();
+    const res = await fetchImpl(`${apiBase()}${ENDPOINTS.machine}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}`, ...machineHeaders() },
       signal: controller.signal,
@@ -31,13 +33,14 @@ async function unlinkOnServer(token) {
 // Fallback when the portal is unreachable: revoke the grant at the authorization
 // server directly (RFC 7009 endpoint sits next to the token endpoint).
 async function revokeAtAuthServer(creds) {
-  if (!creds?.token_endpoint || !creds.client_id) return false;
-  const token = creds.refresh_token ?? creds.access_token;
+  if (creds == null || !creds.token_endpoint || !creds.client_id) return false;
+  const token = creds.refresh_token == null ? creds.access_token : creds.refresh_token;
   if (!token) return false;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const res = await fetch(`${creds.token_endpoint.replace(/\/$/, '')}/revoke`, {
+    const fetchImpl = resolveFetch();
+    const res = await fetchImpl(`${creds.token_endpoint.replace(/\/$/, '')}/revoke`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({

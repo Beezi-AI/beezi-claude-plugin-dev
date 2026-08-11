@@ -21,18 +21,25 @@ const pct = (value) => (typeof value === 'number' ? `${Math.round(value)}%` : nu
 export function renderDefaultStatusline(payload) {
   const segments = [];
 
-  const dir = basename(payload?.workspace?.current_dir ?? payload?.cwd);
-  const model = payload?.model?.display_name;
+  const workspace = payload == null ? undefined : payload.workspace;
+  const currentDir = workspace == null ? undefined : workspace.current_dir;
+  const dir = basename(currentDir == null ? (payload == null ? undefined : payload.cwd) : currentDir);
+  const modelInfo = payload == null ? undefined : payload.model;
+  const model = modelInfo == null ? undefined : modelInfo.display_name;
   if (dir && model) segments.push(`${dir} [${model}]`);
   else if (dir) segments.push(dir);
   else if (model) segments.push(`[${model}]`);
 
-  const fiveHour = pct(payload?.rate_limits?.five_hour?.used_percentage);
-  const sevenDay = pct(payload?.rate_limits?.seven_day?.used_percentage);
+  const rateLimits = payload == null ? undefined : payload.rate_limits;
+  const fiveHourWindow = rateLimits == null ? undefined : rateLimits.five_hour;
+  const fiveHour = pct(fiveHourWindow == null ? undefined : fiveHourWindow.used_percentage);
+  const sevenDayWindow = rateLimits == null ? undefined : rateLimits.seven_day;
+  const sevenDay = pct(sevenDayWindow == null ? undefined : sevenDayWindow.used_percentage);
   const limits = [fiveHour && `5h ${fiveHour}`, sevenDay && `7d ${sevenDay}`].filter(Boolean);
   if (limits.length) segments.push(limits.join(' '));
 
-  const context = pct(payload?.context_window?.used_percentage);
+  const contextWindow = payload == null ? undefined : payload.context_window;
+  const context = pct(contextWindow == null ? undefined : contextWindow.used_percentage);
   if (context) segments.push(`ctx ${context}`);
 
   return segments.join(' · ');

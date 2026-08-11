@@ -37,8 +37,8 @@ function isMaterial(next, last) {
   if (!last) return true;
   if (next.resetsAt !== last.resetsAt) return true;
   if (next.pct === null) return false;
-  if (next.pct >= 100 && (last.pct ?? 0) < 100) return true;
-  return Math.abs(next.pct - (last.pct ?? 0)) >= MATERIAL_DELTA_PCT;
+  if (next.pct >= 100 && (last.pct == null ? 0 : last.pct) < 100) return true;
+  return Math.abs(next.pct - (last.pct == null ? 0 : last.pct)) >= MATERIAL_DELTA_PCT;
 }
 
 const epochToIso = (seconds) =>
@@ -46,14 +46,15 @@ const epochToIso = (seconds) =>
 
 // Returns { recorded } — recorded is true when this render produced a new pending row.
 export function recordStatuslineUsage(payload, deps = {}) {
-  const now = deps.now ?? (() => new Date());
-  const limits = payload?.rate_limits;
-  const fiveHour = readWindow(limits?.five_hour);
-  const sevenDay = readWindow(limits?.seven_day);
+  const now = deps.now == null ? () => new Date() : deps.now;
+  const limits = payload == null ? undefined : payload.rate_limits;
+  const fiveHour = readWindow(limits == null ? undefined : limits.five_hour);
+  const sevenDay = readWindow(limits == null ? undefined : limits.seven_day);
   if (!fiveHour && !sevenDay) return { recorded: false, reason: 'no-rate-limits' };
 
   const file = statuslineUsageFile();
-  const state = readJson(file) ?? {};
+  let state = readJson(file);
+  if (state == null) state = {};
   if (!isMaterial(fiveHour, state.lastFiveHour) && !isMaterial(sevenDay, state.lastSevenDay)) {
     return { recorded: false, reason: 'immaterial' };
   }
@@ -63,23 +64,24 @@ export function recordStatuslineUsage(payload, deps = {}) {
   const pending = Array.isArray(state.pending) ? state.pending : [];
   pending.push({
     fetched_at: now().toISOString(),
-    five_hour_pct: fiveHour?.pct ?? null,
-    five_hour_resets_at: epochToIso(fiveHour?.resetsAt ?? null),
-    seven_day_pct: sevenDay?.pct ?? null,
-    seven_day_resets_at: epochToIso(sevenDay?.resetsAt ?? null),
+    five_hour_pct: fiveHour == null || fiveHour.pct == null ? null : fiveHour.pct,
+    five_hour_resets_at: epochToIso(fiveHour == null || fiveHour.resetsAt == null ? null : fiveHour.resetsAt),
+    seven_day_pct: sevenDay == null || sevenDay.pct == null ? null : sevenDay.pct,
+    seven_day_resets_at: epochToIso(sevenDay == null || sevenDay.resetsAt == null ? null : sevenDay.resetsAt),
   });
 
   writeJsonSecure(file, {
     version: 1,
-    lastFiveHour: fiveHour ?? state.lastFiveHour ?? null,
-    lastSevenDay: sevenDay ?? state.lastSevenDay ?? null,
+    lastFiveHour: fiveHour == null ? (state.lastFiveHour == null ? null : state.lastFiveHour) : fiveHour,
+    lastSevenDay: sevenDay == null ? (state.lastSevenDay == null ? null : state.lastSevenDay) : sevenDay,
     pending: pending.slice(-MAX_PENDING),
   });
   return { recorded: true };
 }
 
 export function readPendingStatuslineUsage() {
-  const state = readJson(statuslineUsageFile()) ?? {};
+  let state = readJson(statuslineUsageFile());
+  if (state == null) state = {};
   return Array.isArray(state.pending) ? state.pending : [];
 }
 
@@ -87,7 +89,8 @@ export function readPendingStatuslineUsage() {
 // meantime untouched — the drain and the recorder run in different processes.
 export function clearPendingStatuslineUsage(count) {
   const file = statuslineUsageFile();
-  const state = readJson(file) ?? {};
+  let state = readJson(file);
+  if (state == null) state = {};
   const pending = Array.isArray(state.pending) ? state.pending : [];
   writeJsonSecure(file, { ...state, version: 1, pending: pending.slice(count) });
 }

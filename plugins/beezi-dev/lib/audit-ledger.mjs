@@ -35,7 +35,7 @@ export function loadLedger(identity = null) {
 function emptyLedger(identity) {
   return {
     version: LEDGER_VERSION,
-    identity: identity ?? null,
+    identity: identity == null ? null : identity,
     sessions: {},
     unreadable: {},
     complete: false,
@@ -51,21 +51,22 @@ export function markComplete(ledger, { at = new Date() } = {}) {
 }
 
 export function isComplete(ledger) {
-  return ledger?.complete === true;
+  return ledger != null && ledger.complete === true;
 }
 
 // Rejected sessions count as imported. A repository that was never connected to Beezi rejects
 // every one of its reports and always will, so resending it each run is pure waste; --force is the
 // escape hatch when the repo has since been connected.
 export function isImported(ledger, sessionId) {
-  return Object.prototype.hasOwnProperty.call(ledger?.sessions ?? {}, sessionId);
+  const sessions = ledger == null ? undefined : ledger.sessions;
+  return Object.prototype.hasOwnProperty.call(sessions == null ? {} : sessions, sessionId);
 }
 
 export function markImported(ledger, sessionId, { outcome, reports = 0, at = new Date() } = {}) {
   ledger.sessions[sessionId] = { at: at.toISOString(), outcome, reports };
   // A session that read fine this time is not unreadable any more; leaving the marker would make
   // wasUnreadable() answer yes forever for a session that has since imported.
-  delete ledger.unreadable?.[sessionId];
+  if (ledger.unreadable != null) delete ledger.unreadable[sessionId];
   ledger.updatedAt = at.toISOString();
   return ledger;
 }
@@ -81,7 +82,8 @@ export function markUnreadable(ledger, sessionId, { at = new Date() } = {}) {
 }
 
 export function wasUnreadable(ledger, sessionId) {
-  return Object.prototype.hasOwnProperty.call(ledger?.unreadable ?? {}, sessionId);
+  const unreadable = ledger == null ? undefined : ledger.unreadable;
+  return Object.prototype.hasOwnProperty.call(unreadable == null ? {} : unreadable, sessionId);
 }
 
 // 0600 — the ledger records which projects the user worked on, by session id only, but the file

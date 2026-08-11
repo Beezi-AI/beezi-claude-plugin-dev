@@ -32,7 +32,7 @@ try {
   }
 
   writeBillingConfig(config);
-  console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan ?? 'n/a'}.`);
+  console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan == null ? 'n/a' : config.plan}.`);
 } catch (error) {
   console.error(`✗ ${friendlyMessage(error)}`);
   process.exit(1);

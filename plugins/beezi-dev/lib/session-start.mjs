@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 import { getAccessToken as _getAccessToken } from './token.mjs';
 import { flushQueue } from './checkpoint.mjs';
 import { git as _git, resolveOriginRemote } from './git.mjs';
@@ -15,6 +15,7 @@ import { stateDir } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 import { whoami } from './whoami.mjs';
 import { getMachineClientId } from './machine-identity.mjs';
 import {
@@ -54,13 +55,14 @@ export function initSessionState(sessionId, { cwd = null, transcriptPath = null 
 // level) for a .git and maps each child repo. Best-effort; never throws. Returns the (possibly
 // mutated) map plus a dirty flag.
 export function discoverRepos(cwd, gitImpl, map, deps = {}) {
-  const fsImpl = deps.fs ?? fs;
+  const fsImpl = deps.fs == null ? fs : deps.fs;
   let dirty = false;
   if (!cwd) return { map, dirty };
   const cache = new Map();
   const recordRoot = (root) => {
     if (!root) return;
-    const origin = resolveOriginRemote(gitImpl, root) ?? originFromGitConfig(root);
+    let origin = resolveOriginRemote(gitImpl, root);
+    if (origin == null) origin = originFromGitConfig(root);
     upsertRoot(map, root, origin);
     dirty = true;
   };
@@ -77,7 +79,8 @@ export function discoverRepos(cwd, gitImpl, map, deps = {}) {
       try {
         if (!fsImpl.existsSync(path.join(child, '.git'))) continue;
       } catch { continue; }
-      recordRoot(resolveRepoRoot(gitImpl, child, cache, map) ?? child);
+      const childRoot = resolveRepoRoot(gitImpl, child, cache, map);
+      recordRoot(childRoot == null ? child : childRoot);
     }
   }
   return { map, dirty };
@@ -108,19 +111,19 @@ async function announceRepo(cwd, token, fetchImpl, gitImpl) {
 // The body is returned alongside the verdict — it carries the tenant's tracking policy.
 async function probeToken(token, fetchImpl) {
   const who = await whoami(token, { fetchImpl });
-  return { rejected: who?.valid === false, who };
+  return { rejected: who != null && who.valid === false, who };
 }
 
 // Returns an optional systemMessage string (or null). Never throws for expected failures.
 export async function runSessionStart(input, deps = {}) {
-  const getAccessToken = deps.getAccessToken ?? _getAccessToken;
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const gitImpl = deps.gitImpl ?? _git;
-  const resolveSource = deps.resolveSource ?? _resolveSource;
-  const readBillingConfig = deps.readBillingConfig ?? _readBillingConfig;
-  const writeBillingConfig = deps.writeBillingConfig ?? _writeBillingConfig;
-  const isStale = deps.isStale ?? _isStale;
-  const recordWhoamiImpl = deps.recordWhoamiImpl ?? recordWhoami;
+  const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const gitImpl = deps.gitImpl == null ? _git : deps.gitImpl;
+  const resolveSource = deps.resolveSource == null ? _resolveSource : deps.resolveSource;
+  const readBillingConfig = deps.readBillingConfig == null ? _readBillingConfig : deps.readBillingConfig;
+  const writeBillingConfig = deps.writeBillingConfig == null ? _writeBillingConfig : deps.writeBillingConfig;
+  const isStale = deps.isStale == null ? _isStale : deps.isStale;
+  const recordWhoamiImpl = deps.recordWhoamiImpl == null ? recordWhoami : deps.recordWhoamiImpl;
 
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
@@ -144,11 +147,15 @@ export async function runSessionStart(input, deps = {}) {
   // Persist the tenant's tracking policy BEFORE the flush below, so a freshly-disabled tenant
   // never gets one last ungated drain. Bound to this login's client id — a workspace switch
   // must not inherit the previous tenant's flags.
-  try { recordWhoamiImpl(probe.who, getMachineClientId() ?? probe.who?.email ?? null); } catch { /* best-effort */ }
+  try {
+    let clientId = getMachineClientId();
+    if (clientId == null) clientId = probe.who == null ? undefined : probe.who.email;
+    recordWhoamiImpl(probe.who, clientId == null ? null : clientId);
+  } catch { /* best-effort */ }
   const tracking = readTrackingState();
   const liveAllowed = isLiveTrackingAllowed(tracking);
 
-  initSessionState(input.session_id, { cwd: input.cwd ?? null, transcriptPath: input.transcript_path ?? null });
+  initSessionState(input.session_id, { cwd: input.cwd == null ? null : input.cwd, transcriptPath: input.transcript_path == null ? null : input.transcript_path });
   // Independent network I/O on the per-session hot path — flush queued checkpoints
   // and probe repo status concurrently rather than serially. A dark workspace skips the repo
   // probe's promise entirely: "Task-branch sessions will be tracked" would be a lie there.
@@ -199,7 +206,7 @@ export async function runSessionStart(input, deps = {}) {
   // Tracking-policy messages: tell a dark workspace it is dark, and point at the login flow
   // wherever the one-time history pull has not completed yet (paid tenants included) — the
   // backfill runs as the last step of /beezi:login.
-  const mode = tracking?.trackingMode ?? null;
+  const mode = tracking == null || tracking.trackingMode == null ? null : tracking.trackingMode;
   let policy = null;
   if (mode === TrackingMode.BACKFILL_ONLY) {
     policy = shouldBackfill(tracking)

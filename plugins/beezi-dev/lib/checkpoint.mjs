@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 import { computeDelta as _computeDelta } from './delta.mjs';
 import { getAccessToken as _getAccessToken } from './token.mjs';
 import { queueDir, stateDir } from './paths.mjs';
@@ -8,6 +8,7 @@ import { readCheckoutEvents, buildBranchTimeline, branchAt as branchAtReflog } f
 import { resolveRepoRoot } from './repo-timeline.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 import { postSessionError } from './session-error-report.mjs';
 import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { isApiKeyBillingEvidence } from './billing.mjs';
@@ -71,7 +72,8 @@ const AGENT_TYPE_MAX = 100;
 // the runtime can't resolve one — the field is then omitted from the payload.
 function detectTimezone() {
   try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return timeZone == null ? null : timeZone;
   } catch {
     return null;
   }
@@ -88,14 +90,14 @@ function detectTimezone() {
 // instead of POSTing them one at a time). All default to today's hook behavior.
 export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
-  const getAccessToken = deps.getAccessToken ?? _getAccessToken;
-  const gitImpl = deps.gitImpl ?? git;
-  const computeDelta = deps.computeDelta ?? _computeDelta;
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+  const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
+  const gitImpl = deps.gitImpl == null ? git : deps.gitImpl;
+  const computeDelta = deps.computeDelta == null ? _computeDelta : deps.computeDelta;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   // Where a built payload goes. The import collects them in memory and batches them itself;
   // letting it fall through to the disk queue would drip-feed hundreds of segments to the
   // single-report endpoint on the next hook, bypassing the batch route's whole-session dedupe.
-  const emit = options.sink ?? enqueue;
+  const emit = options.sink == null ? enqueue : options.sink;
   const collectedErrors = [];
 
   let token = null;
@@ -163,7 +165,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const state = loadState(session_id);
   // When the session file is unreadable (name resolves to null), keep the last name we sent
   // rather than overwriting the stored name with null.
-  const sessionName = resolvedSessionName ?? state.sentSessionName ?? null;
+  const sessionName =
+    resolvedSessionName != null ? resolvedSessionName
+    : state.sentSessionName != null ? state.sentSessionName
+    : null;
   let delta;
   try {
     delta = computeDelta(transcript_path, state.cursor, { cwd, repoRootOf, branchAt: branchOf });
@@ -195,14 +200,14 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // checkpoint. Keys are omitted (not null) when unknown. usage_account_uuid is the CACHE's own
   // account — after a switch it names the previous account until Claude Code refetches, which is
   // the truth about whose numbers these are; account_uuid is who is logged in NOW.
-  const readUtilization = deps.readUsageUtilization ?? _readUsageUtilization;
-  const readAccount = deps.readClaudeAccount ?? _readClaudeAccount;
+  const readUtilization = deps.readUsageUtilization == null ? _readUsageUtilization : deps.readUsageUtilization;
+  const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   let utilization = null;
   try { utilization = readUtilization(); } catch { utilization = null; }
   let claudeAccount = null;
   try { claudeAccount = readAccount(); } catch { claudeAccount = null; }
   const usageStamp = {
-    ...(claudeAccount?.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
+    ...(claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
     ...(utilization
       ? {
           usage_five_hour_pct: utilization.fiveHourPct,
@@ -238,7 +243,8 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
         ? Math.round(totalMs(subtractIntervals(intervals, covered)) / 1000)
         : seg.stats.duration_sec;
       if (seg.stats.token_total === 0 && durationSec === 0) continue;
-      const remote = resolveRemote(seg.repoRoot) ?? localRemote(seg.repoRoot ?? cwd);
+      const resolvedRemote = resolveRemote(seg.repoRoot);
+      const remote = resolvedRemote == null ? localRemote(seg.repoRoot == null ? cwd : seg.repoRoot) : resolvedRemote;
       // Nothing left to name the work by — only reachable when the session has no cwd either.
       if (!remote) { skipped.noRemote += 1; continue; }
       // A single write failure must not abort the window (which would leave the cursor
@@ -265,7 +271,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
         emit(payload);
         // Claim only what actually reached the queue: a failed write must not swallow the window
         // for every later segment too.
-        if (intervals?.length) {
+        if (intervals != null && intervals.length) {
           covered = claimIntervals(covered, intervals);
           coveredDirty = true;
         }
@@ -280,27 +286,28 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // appear in the main transcript, so each agent file gets its own delta window with its
   // own cursor. Line numbers are per-file: scope the segmentId by agent id so they can't
   // collide with main-transcript segments (or each other) on the server upsert.
-  const agentCursors = state.agentCursors ?? {};
+  const agentCursors = state.agentCursors == null ? {} : state.agentCursors;
   let agentCursorsDirty = false;
   // Each subagent's display name is the `description` of the Task block that spawned it; join via
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
   const taskDescriptions = buildTaskDescriptionMap(transcript_path);
   for (const { agentId, path: agentPath, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
-    const agentFrom = agentCursors[agentId] ?? 0;
+    const agentFrom = agentCursors[agentId] == null ? 0 : agentCursors[agentId];
     let agentDelta;
     try {
       agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
     } catch { continue; }
+    const taskDescription = toolUseId ? taskDescriptions.get(toolUseId) : null;
     enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
       is_subagent: true,
       agent_id: agentId,
       agent_type: clamp(agentType, AGENT_TYPE_MAX),
-      agent_name: toolUseId ? clamp(taskDescriptions.get(toolUseId) ?? null, AGENT_NAME_MAX) : null,
+      agent_name: toolUseId ? clamp(taskDescription == null ? null : taskDescription, AGENT_NAME_MAX) : null,
       spawn_depth: spawnDepth,
     }, { includeContext: false });
     // A subagent that dies on an API error never ends the main turn, so no StopFailure fires
     // for it — its transcript is the only place that failure is recorded.
-    apiErrorEvents.push(...(agentDelta.apiErrorEvents ?? []));
+    apiErrorEvents.push(...(agentDelta.apiErrorEvents == null ? [] : agentDelta.apiErrorEvents));
     if (agentDelta.nextCursor !== agentFrom) {
       agentCursors[agentId] = agentDelta.nextCursor;
       agentCursorsDirty = true;
@@ -317,7 +324,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       error: event.error,
       errorDetails: null,
       lastAssistantMessage: event.text,
-      occurredAt: event.occurredAt ?? new Date().toISOString(),
+      occurredAt: event.occurredAt == null ? new Date().toISOString() : event.occurredAt,
     };
     // The audit run buffers these instead: one awaited POST per event across hundreds of
     // sessions is minutes of dead time, and follow-ups only make sense for sessions the server
@@ -360,11 +367,11 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     // Fleet utilization snapshot — deduped by (account, fetchedAt); best-effort like the
     // timeline. StopFailure also runs with emitTimeline, so a turn that died on a rate-limit
     // error still ships its snapshot — the moment it matters most.
-    const postSnapshot = deps.maybePostUsageSnapshot ?? _maybePostUsageSnapshot;
+    const postSnapshot = deps.maybePostUsageSnapshot == null ? _maybePostUsageSnapshot : deps.maybePostUsageSnapshot;
     try { await postSnapshot(token, { fetchImpl }); } catch { /* best-effort */ }
     // Live rate-limit rows the status line recorded between hooks — the observations no
     // hook was running to see.
-    const drainSnapshots = deps.drainStatuslineSnapshots ?? _drainStatuslineSnapshots;
+    const drainSnapshots = deps.drainStatuslineSnapshots == null ? _drainStatuslineSnapshots : deps.drainStatuslineSnapshots;
     try { await drainSnapshots(token, { fetchImpl }); } catch { /* best-effort */ }
   }
 
@@ -403,7 +410,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // rely on process.cwd() to find the transcript — it reads this mapping instead. Only
   // recorded once the transcript has content, so an empty session writes no state.
   if (nextCursor > 0 && (state.cwd !== cwd || state.transcriptPath !== transcript_path)) {
-    state.cwd = cwd ?? null;
+    state.cwd = cwd == null ? null : cwd;
     state.transcriptPath = transcript_path;
     state.updatedAt = new Date().toISOString();
     stateDirty = true;
@@ -456,8 +463,8 @@ function sweepHeldQueue(dir, result, now = Date.now()) {
 // expired = held files past the 3-day window, trackingDisabled = the server said the workspace
 // is dark (audit mode) and the flush stopped.
 export async function flushQueue(token, deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const getAccessToken = deps.getAccessToken ?? _getAccessToken;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
   const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, trackingDisabled: false, lastError: null };
   const dir = queueDir();
 
@@ -517,21 +524,21 @@ export async function flushQueue(token, deps = {}) {
         // (seat revoked, deactivated user) is reversible: keep the file, count it failed.
         let body = null;
         try { body = await res.json(); } catch { /* non-JSON body */ }
-        if (body?.code === 'TRACKING_DISABLED') {
-          try { markTrackingDisabled(body?.message ?? null); } catch { /* best-effort */ }
+        if (body != null && body.code === 'TRACKING_DISABLED') {
+          try { markTrackingDisabled(body.message == null ? null : body.message); } catch { /* best-effort */ }
           result.trackingDisabled = true;
-          result.lastError = body?.message ?? 'HTTP 403';
+          result.lastError = body.message == null ? 'HTTP 403' : body.message;
           sweepHeldQueue(dir, result);
           break;
         }
         result.failed += 1;
-        result.lastError = body?.message ?? `HTTP ${res.status}`;
+        result.lastError = body == null || body.message == null ? `HTTP ${res.status}` : body.message;
       } else if (res.status < 500) {
         // Permanent rejection — drop the file, but remember why.
         result.rejected += 1;
         try {
           const body = await res.json();
-          result.lastError = body?.message ?? `HTTP ${res.status}`;
+          result.lastError = body == null || body.message == null ? `HTTP ${res.status}` : body.message;
         } catch {
           result.lastError = `HTTP ${res.status}`;
         }

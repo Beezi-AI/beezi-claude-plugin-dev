@@ -1,11 +1,11 @@
-import os from 'node:os';
+import os from 'os';
 
 // Client id of this machine's registered OAuth app; set wherever credentials are
 // loaded, consumed by the HTTP helpers for the X-Beezi-Client header.
 let clientId = null;
 
 export function setMachineClientId(id) {
-  clientId = id ?? null;
+  clientId = id == null ? null : id;
 }
 
 // The current login's OAuth client id (dynamic registration mints a new one per login), used as

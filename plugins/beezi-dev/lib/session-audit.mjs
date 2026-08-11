@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'fs';
 import { getAccessToken as _getAccessToken } from './token.mjs';
 import { runCheckpoint as _runCheckpoint } from './checkpoint.mjs';
 import { listAllTranscripts as _listAllTranscripts, firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
@@ -25,6 +25,7 @@ import { computeSessionTimeline as _computeSessionTimeline } from './session-tim
 import { postSessionError as _postSessionError } from './session-error-report.mjs';
 import { resolveSessionTranscript } from './transcript.mjs';
 import { getMachineClientId } from './machine-identity.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 import { whoami as _whoami } from './whoami.mjs';
 import { credentialsFile } from './paths.mjs';
 import {
@@ -82,7 +83,10 @@ function liveSessionId(env, deps) {
   const fromEnv = env.CLAUDE_CODE_SESSION_ID;
   if (fromEnv) return fromEnv;
   try {
-    return (deps.resolveSessionTranscriptImpl ?? resolveSessionTranscript)(process.cwd(), { env })?.sessionId ?? null;
+    const resolveImpl = deps.resolveSessionTranscriptImpl == null ? resolveSessionTranscript : deps.resolveSessionTranscriptImpl;
+    const resolved = resolveImpl(process.cwd(), { env });
+    if (resolved == null || resolved.sessionId == null) return null;
+    return resolved.sessionId;
   } catch {
     return null;
   }
@@ -100,9 +104,10 @@ function liveSessionId(env, deps) {
 function linkedAtMs(tracking, deps) {
   const stamped = _linkedAtMs(tracking);
   if (stamped != null) return stamped;
-  const statImpl = deps.statImpl ?? ((p) => fs.statSync(p));
+  const statImpl = deps.statImpl == null ? ((p) => fs.statSync(p)) : deps.statImpl;
   try {
-    return statImpl(credentialsFile()).mtimeMs ?? null;
+    const stats = statImpl(credentialsFile());
+    return stats.mtimeMs == null ? null : stats.mtimeMs;
   } catch {
     return null;
   }
@@ -152,24 +157,24 @@ export function shouldFinalize(result, options = {}) {
 // live-only follow-up — and only for sessions the server judged accepted, so a failed session
 // stays fully retryable.
 export async function runAudit(deps = {}, options = {}) {
-  const getAccessToken = deps.getAccessToken ?? _getAccessToken;
-  const listTranscripts = deps.listTranscripts ?? _listAllTranscripts;
-  const recordedCwd = deps.firstRecordedCwd ?? _firstRecordedCwd;
-  const runCheckpoint = deps.runCheckpointImpl ?? _runCheckpoint;
-  const flushBackfillChunks = deps.flushBackfillChunksImpl ?? _flushBackfillChunks;
-  const completeBackfill = deps.completeBackfillImpl ?? _completeBackfill;
-  const loadLedger = deps.loadLedgerImpl ?? _loadLedger;
-  const saveLedger = deps.saveLedgerImpl ?? _saveLedger;
-  const computeSessionTimeline = deps.computeSessionTimelineImpl ?? _computeSessionTimeline;
-  const postSessionError = deps.postSessionErrorImpl ?? _postSessionError;
-  const readTracking = deps.readTrackingStateImpl ?? readTrackingState;
-  const markCompleted = deps.markBackfillCompletedImpl ?? markBackfillCompleted;
-  const whoamiImpl = deps.whoamiImpl ?? _whoami;
-  const recordWhoamiImpl = deps.recordWhoamiImpl ?? recordWhoami;
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const onProgress = deps.onProgress ?? (() => {});
-  const env = deps.env ?? process.env;
-  const now = deps.now ?? (() => Date.now());
+  const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
+  const listTranscripts = deps.listTranscripts == null ? _listAllTranscripts : deps.listTranscripts;
+  const recordedCwd = deps.firstRecordedCwd == null ? _firstRecordedCwd : deps.firstRecordedCwd;
+  const runCheckpoint = deps.runCheckpointImpl == null ? _runCheckpoint : deps.runCheckpointImpl;
+  const flushBackfillChunks = deps.flushBackfillChunksImpl == null ? _flushBackfillChunks : deps.flushBackfillChunksImpl;
+  const completeBackfill = deps.completeBackfillImpl == null ? _completeBackfill : deps.completeBackfillImpl;
+  const loadLedger = deps.loadLedgerImpl == null ? _loadLedger : deps.loadLedgerImpl;
+  const saveLedger = deps.saveLedgerImpl == null ? _saveLedger : deps.saveLedgerImpl;
+  const computeSessionTimeline = deps.computeSessionTimelineImpl == null ? _computeSessionTimeline : deps.computeSessionTimelineImpl;
+  const postSessionError = deps.postSessionErrorImpl == null ? _postSessionError : deps.postSessionErrorImpl;
+  const readTracking = deps.readTrackingStateImpl == null ? readTrackingState : deps.readTrackingStateImpl;
+  const markCompleted = deps.markBackfillCompletedImpl == null ? markBackfillCompleted : deps.markBackfillCompletedImpl;
+  const whoamiImpl = deps.whoamiImpl == null ? _whoami : deps.whoamiImpl;
+  const recordWhoamiImpl = deps.recordWhoamiImpl == null ? recordWhoami : deps.recordWhoamiImpl;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const onProgress = deps.onProgress == null ? (() => {}) : deps.onProgress;
+  const env = deps.env == null ? process.env : deps.env;
+  const now = deps.now == null ? (() => Date.now()) : deps.now;
 
   const result = {
     ok: false,
@@ -240,7 +245,7 @@ export async function runAudit(deps = {}, options = {}) {
 
   // Fast path: the local cache already knows the pull is sealed. --force skips the LOCAL
   // caches only — the server verdict below is never bypassed.
-  if (!options.force && trackingValid && tracking?.backfillCompleted === true) {
+  if (!options.force && trackingValid && tracking != null && tracking.backfillCompleted === true) {
     result.ok = true;
     result.reason = 'already-completed';
     result.upgradeAdvised = tracking.trackingMode != null && tracking.trackingMode !== TrackingMode.LIVE;
@@ -252,7 +257,7 @@ export async function runAudit(deps = {}, options = {}) {
   // transcript only to be 403'd on its first chunk. Offline/old servers answer null — proceed;
   // the chunk-level ALREADY_COMPLETED guard still stands behind us.
   const who = await whoamiImpl(token, { fetchImpl }).catch(() => null);
-  if (who?.valid) {
+  if (who != null && who.valid) {
     try { recordWhoamiImpl(who, identity); } catch { /* best-effort */ }
     if (who.backfillCompleted === true) {
       try { markCompleted(); } catch { /* best-effort */ }
@@ -277,7 +282,7 @@ export async function runAudit(deps = {}, options = {}) {
   // Live-tracking tenants: everything since the machine link was tracked live; re-sending it
   // would double-count once its per-session cursor was pruned. Dark-mode tenants never tracked
   // live, so every transcript is fair game.
-  const liveMode = trackingValid && tracking?.trackingMode === TrackingMode.LIVE;
+  const liveMode = trackingValid && tracking != null && tracking.trackingMode === TrackingMode.LIVE;
   const linkCutoffMs = liveMode ? linkedAtMs(tracking, deps) : null;
   const activeCutoffMs = now() - ACTIVE_SESSION_WINDOW_MS;
 
@@ -302,7 +307,7 @@ export async function runAudit(deps = {}, options = {}) {
       try { saveLedger(ledger); } catch { /* best-effort */ }
       try { markCompleted(); } catch { /* best-effort */ }
     } else {
-      result.lastError = sealed.reason ?? result.lastError;
+      result.lastError = sealed.reason == null ? result.lastError : sealed.reason;
     }
   };
 
@@ -340,7 +345,7 @@ export async function runAudit(deps = {}, options = {}) {
 
     const flushed = await flushBackfillChunks(batch, token, { fetchImpl }, { timeoutMs: AUDIT_TIMEOUT_MS });
     result.plannedChunks += flushed.chunks;
-    result.timelinesDropped += flushed.timelinesDropped ?? 0;
+    result.timelinesDropped += flushed.timelinesDropped == null ? 0 : flushed.timelinesDropped;
     result.reportsStored += flushed.stored;
     result.reportsSkipped += flushed.skipped;
     result.timelines += flushed.timelines;
@@ -354,7 +359,7 @@ export async function runAudit(deps = {}, options = {}) {
     const landed = [];
     for (const group of batch) {
       const verdict = flushed.bySession.get(group.sessionId);
-      const status = verdict?.status ?? BackfillSessionStatus.FAILED;
+      const status = verdict == null || verdict.status == null ? BackfillSessionStatus.FAILED : verdict.status;
       if (status === BackfillSessionStatus.ACCEPTED || status === BackfillSessionStatus.PARTIAL) {
         result.sessionsImported += 1;
         landed.push(group.sessionId);
@@ -457,8 +462,8 @@ export async function runAudit(deps = {}, options = {}) {
           skipLiveTrackingGate: true,
         },
       );
-      sessionErrors = checkpoint?.sessionErrors ?? [];
-      skipped = checkpoint?.skipped ?? null;
+      sessionErrors = checkpoint == null || checkpoint.sessionErrors == null ? [] : checkpoint.sessionErrors;
+      skipped = checkpoint == null || checkpoint.skipped == null ? null : checkpoint.skipped;
     } catch {
       // One unreadable transcript must not end the run — but it is no longer silent.
       result.unreadable += 1;
@@ -471,11 +476,11 @@ export async function runAudit(deps = {}, options = {}) {
       // Classify rather than drop on the floor. `empty` is the only benign outcome, so it is the
       // fallback ONLY once every reason worth reporting has been ruled out — telling a user that
       // a session we failed to upload "held no usage data" is the silent loss this exists to end.
-      if (skipped?.deltaFailed) {
+      if (skipped != null && skipped.deltaFailed) {
         result.unreadable += 1;
         noteUnreadable(entry.sessionId);
-      } else if ((skipped?.emitFailed ?? 0) > 0) result.emitFailed += 1;
-      else if ((skipped?.noRemote ?? 0) > 0) result.noRemote += 1;
+      } else if (skipped != null && skipped.emitFailed != null && skipped.emitFailed > 0) result.emitFailed += 1;
+      else if (skipped != null && skipped.noRemote != null && skipped.noRemote > 0) result.noRemote += 1;
       else result.empty += 1;
       continue;
     }

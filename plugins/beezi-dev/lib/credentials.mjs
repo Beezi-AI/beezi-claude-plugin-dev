@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import { credentialsFile } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 
@@ -24,7 +24,7 @@ const POWERSHELL = process.env.SystemRoot
 function defaultRun(file, args, input) {
   try {
     const stdout = execFileSync(file, args, {
-      input: input ?? undefined,
+      input: input == null ? undefined : input,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
@@ -32,7 +32,7 @@ function defaultRun(file, args, input) {
       timeout: 5000,
       killSignal: 'SIGKILL',
     });
-    return { ok: true, stdout: stdout ?? '' };
+    return { ok: true, stdout: stdout == null ? '' : stdout };
   } catch {
     return { ok: false, stdout: '' };
   }
@@ -228,8 +228,8 @@ function fileBackend() {
 
 // Preferred backend chain for the platform; the plaintext file is always the tail.
 function backends(deps) {
-  const run = deps.run ?? defaultRun;
-  const platform = deps.platform ?? process.platform;
+  const run = deps.run == null ? defaultRun : deps.run;
+  const platform = deps.platform == null ? process.platform : deps.platform;
   const file = fileBackend();
   if (platform === 'darwin') return [macBackend(run), file];
   if (platform === 'linux') return [secretToolBackend(run), file];
