@@ -17,6 +17,10 @@ import { statuslineUsageFile } from './paths.mjs';
 // Percentage-point move that is worth another row. Utilization creeps up with every request, so
 // recording each render would be thousands of rows a day describing one slow climb.
 const MATERIAL_DELTA_PCT = 5;
+// Even an unchanged reading earns a row this often. With only the delta gate, a slow climb
+// leaves multi-hour gaps that read as "not tracking"; the floor bounds the gap at 15 minutes.
+// Renders only happen while Claude Code is active, so a floor row is always a live observation.
+const RECORD_FLOOR_MS = 15 * 60 * 1000;
 // Hard ceiling on unposted rows, so a machine that never reaches the drain path cannot grow the
 // file without bound. Oldest are dropped: the newest observations are the ones still actionable.
 const MAX_PENDING = 40;
@@ -56,7 +60,10 @@ export function recordStatuslineUsage(payload, deps = {}) {
   let state = readJson(file);
   if (state == null) state = {};
   if (!isMaterial(fiveHour, state.lastFiveHour) && !isMaterial(sevenDay, state.lastSevenDay)) {
-    return { recorded: false, reason: 'immaterial' };
+    const lastRecordedMs = Date.parse(state.lastRecordedAt == null ? '' : state.lastRecordedAt) || 0;
+    if (now().getTime() - lastRecordedMs < RECORD_FLOOR_MS) {
+      return { recorded: false, reason: 'immaterial' };
+    }
   }
 
   // fetched_at is genuinely "now": unlike the cache, the status line reports what Claude Code
@@ -74,6 +81,7 @@ export function recordStatuslineUsage(payload, deps = {}) {
     version: 1,
     lastFiveHour: fiveHour == null ? (state.lastFiveHour == null ? null : state.lastFiveHour) : fiveHour,
     lastSevenDay: sevenDay == null ? (state.lastSevenDay == null ? null : state.lastSevenDay) : sevenDay,
+    lastRecordedAt: now().toISOString(),
     pending: pending.slice(-MAX_PENDING),
   });
   return { recorded: true };
