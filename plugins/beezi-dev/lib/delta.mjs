@@ -166,6 +166,25 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
       m.token_cache_creation += cacheCreation;
       m.requests += 1;
 
+      // Reasoning effort rides each assistant line as a top-level field, stable across a
+      // message's block-lines — reading it here (the dedup site) buckets each message exactly
+      // once. Older Claude Code versions omit it -> the 'unknown' bucket, so the buckets always
+      // partition the model tally above. Nested inside the model entry so summarize()'s models
+      // spread ships it in the report payload untouched (mirrors operations.mcp.by_server).
+      const effort = typeof line.effort === 'string' && line.effort !== '' ? line.effort : 'unknown';
+      if (m.by_effort == null) m.by_effort = {};
+      if (m.by_effort[effort] == null) {
+        m.by_effort[effort] = {
+          token_input: 0, token_output: 0, token_cache_read: 0, token_cache_creation: 0, requests: 0,
+        };
+      }
+      const eff = m.by_effort[effort];
+      eff.token_input += u.input_tokens || 0;
+      eff.token_output += u.output_tokens || 0;
+      eff.token_cache_read += u.cache_read_input_tokens || 0;
+      eff.token_cache_creation += cacheCreation;
+      eff.requests += 1;
+
       // Context the request ran with = prompt-side tokens. Sidechains (title generation etc.)
       // run tiny separate contexts and must not move the session's numbers.
       if (line.isSidechain !== true) {

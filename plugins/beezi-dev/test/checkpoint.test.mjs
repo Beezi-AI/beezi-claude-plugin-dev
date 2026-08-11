@@ -17,13 +17,14 @@ function setHome(dir) {
   process.env.BEEZI_HOME = dir;
 }
 
-function assistantLine(branch, model, usage, timestamp, cwd) {
+function assistantLine(branch, model, usage, timestamp, cwd, effort) {
   return {
     type: 'assistant',
     gitBranch: branch,
     ...(cwd === undefined ? {} : { cwd }),
     timestamp,
     message: { model, usage },
+    ...(effort === undefined ? {} : { effort }),
   };
 }
 
@@ -190,7 +191,7 @@ test('3. task-branch segment enqueued with correct segmentId, remote, branch, li
   setHome(dir2);
 
   const transcript2 = writeTranscript(dir2, [
-    assistantLine('feature/task-1', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
+    assistantLine('feature/task-1', 'model-a', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z', undefined, 'high'),
   ]);
 
   await runCheckpoint(
@@ -214,6 +215,11 @@ test('3. task-branch segment enqueued with correct segmentId, remote, branch, li
   assert.equal(payload.to_line, 1);
   assert.equal(payload.token_total, 150); // 100 + 50
   assert.ok(payload.models && payload.models['model-a'], 'models.model-a must exist');
+  assert.deepEqual(
+    payload.models['model-a'].by_effort,
+    { high: { token_input: 100, token_output: 50, token_cache_read: 0, token_cache_creation: 0, requests: 1 } },
+    'by_effort rides the wire inside the models entry',
+  );
 });
 
 // ─── test 4: non-task branch now enqueued (all-branches), cursor advances ────
@@ -879,7 +885,7 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
     assistantLine('main', 'claude-fable-5', { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:00.000Z'),
   ]);
   writeSubagentTranscript(dir, 'sess-20', 'agent-abc123', [
-    assistantLine('main', 'claude-sonnet-5', { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z'),
+    assistantLine('main', 'claude-sonnet-5', { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2024-01-01T10:00:30.000Z', undefined, 'xhigh'),
   ]);
   fs.writeFileSync(
     path.join(dir, 'sess-20', 'subagents', 'agent-abc123.meta.json'),
@@ -909,6 +915,10 @@ test('20. subagent transcript usage is enqueued as its own segment', async (t) =
   assert.equal(agent.payload.sessionId, 'sess-20', 'subagent work bills to the parent session');
   assert.equal(agent.payload.token_total, 280, 'subagent tokens counted (200+80)');
   assert.ok(agent.payload.models['claude-sonnet-5'], 'subagent model reported');
+  assert.equal(
+    agent.payload.models['claude-sonnet-5'].by_effort.xhigh.requests, 1,
+    'subagent enqueue path carries by_effort',
+  );
   assert.equal(agent.payload.branch, 'main');
   assert.equal(agent.payload.remote, 'https://host/org/repo.git');
   assert.equal(agent.payload.is_subagent, true, 'subagent segment is flagged');
