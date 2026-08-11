@@ -18,6 +18,11 @@ const NOT_LINKED_MESSAGE =
   'This machine is not linked to Beezi. Run /beezi:login in Claude Code, then retry.';
 const REJECTED_MESSAGE =
   "Beezi rejected this machine's credentials. Run /beezi:login to relink.";
+// While unlinked, poll for the credentials /beezi:login is about to store. A failed initialize
+// would mark this server "failed" for the whole session — stdio servers are never retried — so
+// the handshake must succeed even with no token, and this poll turns the eventual login into
+// live tools with no /mcp reconnect.
+const WATCH_INTERVAL_MS = 15_000;
 
 export function mcpUrl() {
   return process.env.BEEZI_MCP_URL == null ? `${apiBase()}/mcp` : process.env.BEEZI_MCP_URL;
@@ -56,6 +61,11 @@ export function createBridge(deps = {}) {
   let sessionId = null;
   let initializeMsg = null;
   let reinit = null; // in-flight transparent re-initialize, shared by concurrent 404s
+  let realInitDone = false; // the portal has actually seen initialize for this bridge
+  let watcher = null;
+  const setIntervalImpl = deps.setIntervalImpl == null ? setInterval : deps.setIntervalImpl;
+  const clearIntervalImpl = deps.clearIntervalImpl == null ? clearInterval : deps.clearIntervalImpl;
+  const watchIntervalMs = deps.watchIntervalMs == null ? WATCH_INTERVAL_MS : deps.watchIntervalMs;
 
   const isInitialize = (msg) => !Array.isArray(msg) && msg.method === 'initialize';
 
@@ -126,11 +136,63 @@ export function createBridge(deps = {}) {
         if (!res.ok) throw new Error(`re-initialize failed (HTTP ${res.status})`);
         await emit(res, { silent: true });
         await emit(await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, token));
+        realInitDone = true;
+        stopWatcher();
       })().finally(() => {
         reinit = null;
       });
     }
     return reinit;
+  }
+
+  function stopWatcher() {
+    if (watcher) {
+      clearIntervalImpl(watcher);
+      watcher = null;
+    }
+  }
+
+  function startWatcher() {
+    if (watcher) return;
+    watcher = setIntervalImpl(async () => {
+      const token = await getToken().catch(() => null);
+      if (!token) return;
+      try {
+        await reinitialize(token);
+        // The client accepted an empty tool list during the synthetic handshake; this makes
+        // it re-fetch, so the Beezi tools appear the moment the login lands.
+        writeMessage({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+      } catch { /* portal unreachable — keep watching */ }
+    }, watchIntervalMs);
+    if (watcher != null && typeof watcher.unref === 'function') watcher.unref();
+  }
+
+  // An unlinked machine still gets a healthy server: the handshake succeeds locally, the tool
+  // list is empty, and only actual calls explain what to do. Erroring initialize instead
+  // strands the very login flow that fixes the link.
+  function handleUnlinked(msg, ids) {
+    if (isInitialize(msg)) {
+      writeMessage({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: {
+          protocolVersion:
+            msg.params != null && msg.params.protocolVersion != null
+              ? msg.params.protocolVersion
+              : '2025-06-18',
+          capabilities: { tools: { listChanged: true } },
+          serverInfo: { name: 'beezi', version: '0.0.0' },
+          instructions: 'Beezi tools activate after /beezi:login links this machine.',
+        },
+      });
+      startWatcher();
+      return;
+    }
+    if (!Array.isArray(msg) && msg.method === 'tools/list' && msg.id !== undefined) {
+      writeMessage({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } });
+      return;
+    }
+    ids.forEach((id) => errorResponse(id, NOT_LINKED_MESSAGE));
   }
 
   async function serverErrorMessage(res) {
@@ -153,14 +215,24 @@ export function createBridge(deps = {}) {
 
   async function handleMessage(msg) {
     const ids = requestIds(msg);
-    let token = await getToken();
-    if (!token) {
-      ids.forEach((id) => errorResponse(id, NOT_LINKED_MESSAGE));
-      return;
-    }
     if (isInitialize(msg)) {
       initializeMsg = msg;
       sessionId = null;
+    }
+    let token = await getToken().catch(() => null);
+    if (!token) {
+      handleUnlinked(msg, ids);
+      return;
+    }
+    // Linked after a synthetic handshake: the portal has never seen initialize, so replay it
+    // before forwarding anything else — the same rebuild the 404 path uses.
+    if (!realInitDone && !isInitialize(msg) && initializeMsg) {
+      try {
+        await reinitialize(token);
+      } catch {
+        ids.forEach((id) => errorResponse(id, 'Beezi MCP request failed: the Beezi server is unreachable.'));
+        return;
+      }
     }
     try {
       let res = await post(msg, token);
@@ -180,6 +252,10 @@ export function createBridge(deps = {}) {
         }
       }
       if (res.ok) {
+        if (isInitialize(msg)) {
+          realInitDone = true;
+          stopWatcher();
+        }
         await emit(res);
         return;
       }
