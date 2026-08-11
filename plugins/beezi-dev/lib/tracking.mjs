@@ -59,10 +59,34 @@ export function matchesIdentity(state, identity) {
   return state.identity === identity;
 }
 
+// Merge `patch` over the stored state. Every mutator below goes through this: writing a bare
+// object instead drops whatever fields the caller did not know about, which is exactly how a
+// whoami refresh used to clobber the linkedAt stamp written at login.
+function patchTrackingState(patch, deps = {}) {
+  writeTrackingState({ ...(readTrackingState(deps) ?? {}), ...patch }, deps);
+}
+
+// When this machine was linked, as an ISO instant. The audit uses it to skip transcripts that live
+// tracking already owns; it used to be approximated by the credentials file's mtime, which is only
+// written by the DPAPI/plaintext fallbacks — on any machine with a real credential store (CredMan,
+// Keychain, secret-tool) that file never exists and the guard silently never fired.
+export function markLinked(deps = {}) {
+  patchTrackingState({ linkedAt: new Date().toISOString() }, deps);
+}
+
+// Takes the already-read state so callers that hold one don't re-read the file — and so the audit
+// can feed it the same state its other gates key off.
+export function linkedAtMs(state) {
+  const at = state?.linkedAt;
+  if (!at) return null;
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 // Persist the whoami verdict. `identity` is the current login's binding key (client id or email).
 export function recordWhoami(who, identity, deps = {}) {
   if (!who || who.valid !== true) return;
-  writeTrackingState(
+  patchTrackingState(
     {
       trackingMode: who.trackingMode ?? null,
       tenantTier: who.tenantTier ?? null,
@@ -78,10 +102,8 @@ export function recordWhoami(who, identity, deps = {}) {
 // A live endpoint answered 403 TRACKING_DISABLED: the server has spoken — go dark until the
 // next whoami says otherwise.
 export function markTrackingDisabled(reason, deps = {}) {
-  const state = readTrackingState(deps) ?? {};
-  writeTrackingState(
+  patchTrackingState(
     {
-      ...state,
       trackingMode: TrackingMode.DISABLED,
       fetchedAt: new Date().toISOString(),
       reason: reason ?? null,
@@ -92,11 +114,7 @@ export function markTrackingDisabled(reason, deps = {}) {
 
 // The pull sealed (locally observed or server-confirmed) — the audit fast path keys off this.
 export function markBackfillCompleted(deps = {}) {
-  const state = readTrackingState(deps) ?? {};
-  writeTrackingState(
-    { ...state, backfillCompleted: true, fetchedAt: new Date().toISOString() },
-    deps,
-  );
+  patchTrackingState({ backfillCompleted: true, fetchedAt: new Date().toISOString() }, deps);
 }
 
 export function clearTrackingState(deps = {}) {

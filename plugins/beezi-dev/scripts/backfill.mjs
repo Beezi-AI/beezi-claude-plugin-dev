@@ -20,8 +20,11 @@ async function main() {
 
   const result = await runAudit(
     {
+      // "read", not "sent": `processed` counts candidates PARSED, and a parsed session may still
+      // produce nothing to upload. Calling it "sent" is what made the final totals look like they
+      // had lost sessions when the arithmetic was simply against a different number.
       onProgress: ({ processed, total }) => {
-        console.log(`Beezi: ${processed}/${total} sessions sent…`);
+        console.log(`Beezi: ${processed}/${total} sessions read…`);
       },
     },
     options,
@@ -104,6 +107,13 @@ async function main() {
   if (result.itemErrors > 0) {
     parts.push(`${plural(result.itemErrors, 'report')} skipped — their repository is not connected to Beezi.`);
   }
+  // Sessions the server refused outright. Ledgered, so a re-run will not retry them — saying so
+  // is the only chance the user has to notice.
+  if (result.sessionsRejected > 0) {
+    parts.push(
+      `${plural(result.sessionsRejected, 'session')} were rejected by the server and will not be retried.`,
+    );
+  }
   if (result.reportsFailed > 0 || result.unattributed > 0 || result.permanentRejections > 0) {
     const reason = result.lastError ? ` (last error: ${result.lastError})` : '';
     parts.push(
@@ -112,17 +122,62 @@ async function main() {
   }
   console.log(parts.join(' '));
 
+  // Every candidate that produced nothing to upload. These used to be invisible: the run said it
+  // read N sessions and uploaded fewer, with no account of the difference.
+  if (result.empty > 0) {
+    console.log(
+      `  ${plural(result.empty, 'session')} held no usage data (no assistant tokens recorded) — nothing to upload.`,
+    );
+  }
+  if (result.noRemote > 0) {
+    console.log(
+      `  ${plural(result.noRemote, 'session')} could not be matched to a repository — not uploaded. ` +
+        'Their transcripts record no working directory.',
+    );
+  }
+  if (result.emitFailed > 0) {
+    console.log(
+      `  ${plural(result.emitFailed, 'session')} failed while being prepared — not uploaded.`,
+    );
+  }
+  if (result.unreadable > 0) {
+    console.log(`  ${plural(result.unreadable, 'session')} could not be read — not uploaded.`);
+  }
+  // The server's stored count against what we actually handed it. A silent shortfall here means
+  // reports were acknowledged but not persisted, which nothing else in this summary would show.
+  if (result.plannedReports > result.reportsStored + result.reportsSkipped) {
+    console.log(
+      `  Note: ${plural(result.plannedReports, 'report')} sent, ${result.reportsStored} stored ` +
+        `and ${result.reportsSkipped} skipped by the server.`,
+    );
+  }
+
   if (result.finalized) {
     console.log('✓ Beezi: your history pull is finalized.');
   } else if (options.sinceMs != null) {
     console.log('  Scoped run (--since): the pull stays open — a full run (no flags) finalizes it.');
-  } else if (!options.dryRun) {
+  } else if (result.retriableUnreadable > 0) {
+    console.log(
+      `  Your history is NOT finalized yet — ${plural(result.retriableUnreadable, 'session')} could not be read ` +
+        'this time. Re-run /beezi:login to retry them; if they fail again the pull finalizes without them.',
+    );
+  } else {
     console.log(
       '  Your history is NOT finalized yet — re-run /beezi:login once the remaining sessions can be delivered.',
     );
   }
   if (result.timelines > 0) {
     console.log('  ' + plural(result.timelines, 'session timeline') + ' attached.');
+  }
+  // One stanza, not two: `timelinesDropped` is a subset of the offered-minus-attached gap, so an
+  // if/else would suppress the unexplained remainder — the very gap these counters exist to show.
+  const notAttached = result.timelinesOffered - result.timelines;
+  if (notAttached > 0) {
+    console.log(
+      `  ${plural(notAttached, 'session timeline')} could not be attached` +
+        (result.timelinesDropped > 0 ? ' (the server did not accept them)' : '') +
+        ' — the usage itself was uploaded.',
+    );
   }
   if (!result.followupsAllowed) {
     console.log('  Rate-limit events are not collected in audit mode.');

@@ -14,6 +14,8 @@ import {
   markTrackingDisabled,
   markBackfillCompleted,
   clearTrackingState,
+  markLinked,
+  linkedAtMs,
 } from '../lib/tracking.mjs';
 import { trackingStateFile } from '../lib/paths.mjs';
 import { pruneStale } from '../lib/prune.mjs';
@@ -143,4 +145,38 @@ test('7. markTrackingDisabled flips the mode and keeps the rest; markBackfillCom
 
   clearTrackingState();
   assert.equal(readTrackingState(), null);
+});
+
+// The audit's "already tracked live" cutoff reads this stamp. It used to read the credentials
+// file's mtime, which the CredMan/Keychain/secret-tool backends never write — so on most machines
+// the cutoff was null and every transcript, live-tracked or not, was a backfill candidate.
+test('8. markLinked stamps the link instant and survives later whoami refreshes', (t) => {
+  makeHome(t);
+
+  assert.equal(linkedAtMs(readTrackingState()), null, 'no stamp before login');
+
+  const before = Date.now();
+  markLinked();
+  const stamped = linkedAtMs(readTrackingState());
+  assert.ok(stamped >= before, 'stamp is the link instant');
+
+  recordWhoami(
+    { valid: true, tenantTier: 'pro', trackingMode: TrackingMode.LIVE, backfillCompleted: false },
+    'client-1',
+  );
+  assert.equal(linkedAtMs(readTrackingState()), stamped, 'whoami refresh keeps the stamp');
+  assert.equal(readTrackingState().trackingMode, TrackingMode.LIVE, 'verdict still wins');
+
+  markTrackingDisabled('server said so');
+  assert.equal(linkedAtMs(readTrackingState()), stamped, 'dark-mode flip keeps the stamp');
+});
+
+test('9. linkedAtMs ignores a missing or unparseable stamp', () => {
+  assert.equal(linkedAtMs(null), null);
+  assert.equal(linkedAtMs({}), null);
+  assert.equal(linkedAtMs({ linkedAt: 'not-a-date' }), null);
+  assert.equal(
+    linkedAtMs({ linkedAt: '2026-08-10T00:00:00.000Z' }),
+    Date.parse('2026-08-10T00:00:00.000Z'),
+  );
 });
