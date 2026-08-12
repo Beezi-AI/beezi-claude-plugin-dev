@@ -58,7 +58,22 @@ Report its one-line summary. If the user dismisses the question or answers
 something not in the table, skip the capture — the link itself already
 succeeded, say so.
 
-Step 4 — upload past sessions (ALWAYS run this last, after Steps 2/3, on both
+Step 3b — live usage status line (after Step 3, before Step 4; both fresh
+links and already-linked machines). Ask the user ONE
+yes/no question: enable Beezi's live usage capture by wrapping their status
+line? Explain in one sentence: it records the plan-usage numbers Claude Code
+already computes for the status line — no extra requests — and any status line
+they already have keeps rendering unchanged (or a minimal default appears if
+they have none). If they agree, run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/statusline-install.mjs`
+
+Report its one-line output; if the status line does not change right away it
+applies on the next Claude Code session. If they decline, skip silently —
+usage is still captured from Claude Code's cache, just less often. To undo it
+later they can re-run this script with `--uninstall`.
+
+Step 4 — upload past sessions (ALWAYS run this last, after Steps 2/3/3b, on both
 fresh links and already-linked machines). Run EXACTLY this one command:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --via login`

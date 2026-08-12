@@ -62,7 +62,7 @@ async function main() {
   }
   if (result.halt === BackfillHalt.FORBIDDEN) {
     fail(
-      `Beezi: the server refused the upload (${result.lastError ?? 'forbidden'}). ` +
+      `Beezi: the server refused the upload (${result.lastError == null ? 'forbidden' : result.lastError}). ` +
         'Check your seat with your workspace admin, then re-run /beezi:login.',
     );
   }
@@ -94,7 +94,7 @@ async function main() {
   // saying "log in again to continue" is accurate — the next login's backfill picks them up.
   if (result.reportsFailed > 0 && result.sessionsImported === 0) {
     fail(
-      `Beezi: upload stopped — could not reach the server (${result.lastError ?? 'unknown error'}). ` +
+      `Beezi: upload stopped — could not reach the server (${result.lastError == null ? 'unknown error' : result.lastError}). ` +
         'Re-run /beezi:login to continue where it left off.',
     );
   }

@@ -1,7 +1,7 @@
-import os from 'node:os';
-import path from 'node:path';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import os from 'os';
+import path from 'path';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
 
 // Baked environment identity: scripts/make-variant.sh writes env.json into dev/staging variants;
 // the prod plugin ships { "name": "" }. Missing or unreadable reads as prod.
@@ -20,7 +20,9 @@ const ENV_JSON = readEnvJson();
 // so simultaneously installed variants never share tokens, queue or state. This is the only
 // switch: nothing keyed off it may be namespaced independently.
 export const BEEZI_ENV =
-  process.env.BEEZI_ENV ?? (typeof ENV_JSON.name === 'string' ? ENV_JSON.name : '');
+  process.env.BEEZI_ENV == null
+    ? (typeof ENV_JSON.name === 'string' ? ENV_JSON.name : '')
+    : process.env.BEEZI_ENV;
 
 // This variant's default API base; config.mjs owns the resolution order.
 export const ENV_API_BASE = typeof ENV_JSON.apiBase === 'string' ? ENV_JSON.apiBase : null;
@@ -31,7 +33,9 @@ export function envSuffix() {
 }
 
 export function beeziHome() {
-  return process.env.BEEZI_HOME ?? path.join(os.homedir(), `.beezi${envSuffix()}`);
+  return process.env.BEEZI_HOME == null
+    ? path.join(os.homedir(), `.beezi${envSuffix()}`)
+    : process.env.BEEZI_HOME;
 }
 
 export function queueDir() {

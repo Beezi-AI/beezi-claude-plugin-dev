@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 import { claudeProjectsDir } from './paths.mjs';
 
 // Claude Code names a session file after its globally-unique session id. Anchored, and the same
@@ -88,7 +88,7 @@ export function firstRecordedCwd(transcriptPath) {
     } catch {
       continue;
     }
-    if (typeof parsed?.cwd === 'string' && parsed.cwd) return parsed.cwd;
+    if (parsed != null && typeof parsed.cwd === 'string' && parsed.cwd) return parsed.cwd;
   }
   return null;
 }

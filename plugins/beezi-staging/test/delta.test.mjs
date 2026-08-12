@@ -12,8 +12,9 @@ function writeFixture(dir, lines) {
   return filePath;
 }
 
-// Helper: assistant line factory.
-function assistantLine(branch, model, usage, timestamp, isSidechain = false, cwd = '/some/path') {
+// Helper: assistant line factory. `effort` mirrors Claude Code's top-level field; omitted by
+// default so pre-effort fixtures stay byte-identical.
+function assistantLine(branch, model, usage, timestamp, isSidechain = false, cwd = '/some/path', effort = undefined) {
   return {
     type: 'assistant',
     gitBranch: branch,
@@ -21,6 +22,7 @@ function assistantLine(branch, model, usage, timestamp, isSidechain = false, cwd
     timestamp,
     isSidechain,
     message: { model, usage },
+    ...(effort != null ? { effort } : {}),
   };
 }
 
@@ -836,4 +838,125 @@ test('context — block-line dedup: same message id counts context once', (t) =>
   const stats = segments[0].stats;
   assert.equal(stats.context_peak_tokens, 100010);
   assert.equal(stats.token_input, 10);
+});
+
+test('effort — mixed efforts on one model bucket separately and partition the tally', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const file = writeFixture(dir, [
+    assistantLine('main', 'claude-opus-4-8', {
+      input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 10, cache_creation_input_tokens: 5,
+    }, '2024-01-01T10:00:00.000Z', false, '/some/path', 'high'),
+    assistantLine('main', 'claude-opus-4-8', {
+      input_tokens: 200, output_tokens: 75, cache_read_input_tokens: 20, cache_creation_input_tokens: 8,
+    }, '2024-01-01T10:01:00.000Z', false, '/some/path', 'max'),
+  ]);
+
+  const { segments } = computeDelta(file, 0);
+  const model = segments[0].stats.models['claude-opus-4-8'];
+
+  // Parent tally is unchanged by the split.
+  assert.equal(model.token_input, 300);
+  assert.equal(model.requests, 2);
+
+  const high = model.by_effort.high;
+  const max = model.by_effort.max;
+  assert.deepEqual(high, {
+    token_input: 100, token_output: 50, token_cache_read: 10, token_cache_creation: 5, requests: 1,
+  });
+  assert.deepEqual(max, {
+    token_input: 200, token_output: 75, token_cache_read: 20, token_cache_creation: 8, requests: 1,
+  });
+  assert.equal(Object.keys(model.by_effort).length, 2, 'no stray buckets');
+});
+
+test('effort — lines without the field land in the unknown bucket', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const file = writeFixture(dir, [
+    assistantLine('main', 'model-a', {
+      input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2024-01-01T10:00:00.000Z'),
+  ]);
+
+  const { segments } = computeDelta(file, 0);
+  const model = segments[0].stats.models['model-a'];
+  assert.deepEqual(model.by_effort.unknown, {
+    token_input: 100, token_output: 10, token_cache_read: 0, token_cache_creation: 0, requests: 1,
+  });
+});
+
+test('effort — known and missing efforts on one model: buckets sum to the model totals', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const file = writeFixture(dir, [
+    assistantLine('main', 'model-a', {
+      input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 3, cache_creation_input_tokens: 1,
+    }, '2024-01-01T10:00:00.000Z', false, '/some/path', 'xhigh'),
+    assistantLine('main', 'model-a', {
+      input_tokens: 40, output_tokens: 4, cache_read_input_tokens: 2, cache_creation_input_tokens: 0,
+    }, '2024-01-01T10:01:00.000Z'),
+  ]);
+
+  const { segments } = computeDelta(file, 0);
+  const model = segments[0].stats.models['model-a'];
+  const buckets = Object.values(model.by_effort);
+  const sum = (field) => buckets.reduce((acc, b) => acc + b[field], 0);
+  assert.ok(model.by_effort.xhigh, 'known bucket exists');
+  assert.ok(model.by_effort.unknown, 'unknown bucket exists');
+  assert.equal(sum('token_input'), model.token_input);
+  assert.equal(sum('token_output'), model.token_output);
+  assert.equal(sum('token_cache_read'), model.token_cache_read);
+  assert.equal(sum('token_cache_creation'), model.token_cache_creation);
+  assert.equal(sum('requests'), model.requests);
+});
+
+test('effort — block-line dedup: duplicate message id buckets once', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const dupLine = {
+    type: 'assistant',
+    gitBranch: 'main',
+    cwd: '/some/path',
+    timestamp: '2024-01-01T10:00:00.000Z',
+    effort: 'high',
+    message: {
+      id: 'msg_1',
+      model: 'claude-haiku-4-5',
+      usage: {
+        input_tokens: 100, output_tokens: 50,
+        cache_read_input_tokens: 10, cache_creation_input_tokens: 5,
+      },
+    },
+  };
+
+  const file = writeFixture(dir, [dupLine, dupLine, dupLine]);
+  const { segments } = computeDelta(file, 0);
+  const model = segments[0].stats.models['claude-haiku-4-5'];
+  assert.equal(model.by_effort.high.requests, 1, 'one bucketed request, not three');
+  assert.equal(model.by_effort.high.token_input, 100, 'bucket input counted once');
+  assert.equal(model.by_effort.unknown, undefined, 'no unknown bucket for effort-carrying lines');
+});
+
+test('effort — two models keep independent by_effort maps', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delta-'));
+  t.after(() => fs.rmSync(dir, { recursive: true }));
+
+  const file = writeFixture(dir, [
+    assistantLine('main', 'model-a', {
+      input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2024-01-01T10:00:00.000Z', false, '/some/path', 'high'),
+    assistantLine('main', 'model-b', {
+      input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2024-01-01T10:01:00.000Z', false, '/some/path', 'max'),
+  ]);
+
+  const { segments } = computeDelta(file, 0);
+  const { models } = segments[0].stats;
+  assert.deepEqual(Object.keys(models['model-a'].by_effort), ['high']);
+  assert.deepEqual(Object.keys(models['model-b'].by_effort), ['max']);
 });

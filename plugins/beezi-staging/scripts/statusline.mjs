@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from 'child_process';
 import { readHookInput } from '../lib/hook-input.mjs';
 
 // Beezi status line: a pass-through wrapper.
@@ -17,29 +17,31 @@ const raw = readHookInput();
 
 // Display resolves first and is never blocked by our bookkeeping: a throw, a corrupt state file
 // or a full disk must not blank someone's status bar.
-const chain = process.env.BEEZI_STATUSLINE_CHAIN;
-if (chain) {
-  const result = spawnSync(chain, {
-    input: JSON.stringify(raw ?? {}),
-    shell: true,
-    encoding: 'utf-8',
-    timeout: 2000,
-  });
-  if (result.stdout) process.stdout.write(result.stdout);
-} else if (process.env.BEEZI_STATUSLINE_SILENT !== '1') {
-  try {
-    const { renderDefaultStatusline } = await import('../lib/statusline-render.mjs');
-    const line = renderDefaultStatusline(raw);
-    if (line) process.stdout.write(line);
-  } catch {
-    /* rendering is cosmetic; capture below still runs */
+(async () => {
+  const chain = process.env.BEEZI_STATUSLINE_CHAIN;
+  if (chain) {
+    const result = spawnSync(chain, {
+      input: JSON.stringify(raw == null ? {} : raw),
+      shell: true,
+      encoding: 'utf-8',
+      timeout: 2000,
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+  } else if (process.env.BEEZI_STATUSLINE_SILENT !== '1') {
+    try {
+      const { renderDefaultStatusline } = await import('../lib/statusline-render.mjs');
+      const line = renderDefaultStatusline(raw);
+      if (line) process.stdout.write(line);
+    } catch {
+      /* rendering is cosmetic; capture below still runs */
+    }
   }
-}
 
-try {
-  const { recordStatuslineUsage } = await import('../lib/statusline-usage.mjs');
-  recordStatuslineUsage(raw);
-} catch {
-  /* best-effort: the status line's job is to render, not to report */
-}
-process.exit(0);
+  try {
+    const { recordStatuslineUsage } = await import('../lib/statusline-usage.mjs');
+    recordStatuslineUsage(raw);
+  } catch {
+    /* best-effort: the status line's job is to render, not to report */
+  }
+  process.exit(0);
+})();

@@ -1,5 +1,6 @@
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { usageSnapshotStateFile } from './paths.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
@@ -14,14 +15,15 @@ import {
 // inside limits[] would 400 the whole snapshot. Send exactly the known keys; JSON serialization
 // drops the undefined ones.
 function sanitizeLimit(l) {
+  const limit = l == null ? {} : l;
   return {
-    kind: l?.kind,
-    group: l?.group,
-    percent: l?.percent,
-    severity: l?.severity,
-    resets_at: l?.resets_at,
-    is_active: l?.is_active,
-    scope: l?.scope,
+    kind: limit.kind,
+    group: limit.group,
+    percent: limit.percent,
+    severity: limit.severity,
+    resets_at: limit.resets_at,
+    is_active: limit.is_active,
+    scope: limit.scope,
   };
 }
 
@@ -31,12 +33,13 @@ function sanitizeLimit(l) {
 // Code refetches, which is the truth about whose numbers these are.
 export function buildSnapshotPayload(utilization, account) {
   const sameAccount =
-    utilization.accountUuid != null && utilization.accountUuid === (account?.accountUuid ?? null);
+    utilization.accountUuid != null &&
+    utilization.accountUuid === (account == null || account.accountUuid == null ? null : account.accountUuid);
   return {
     fetched_at: new Date(utilization.fetchedAtMs).toISOString(),
     account_uuid: utilization.accountUuid,
-    subscription_type: sameAccount ? (account.subscriptionType ?? null) : null,
-    rate_limit_tier: sameAccount ? (account.rateLimitTier ?? null) : null,
+    subscription_type: sameAccount ? (account.subscriptionType == null ? null : account.subscriptionType) : null,
+    rate_limit_tier: sameAccount ? (account.rateLimitTier == null ? null : account.rateLimitTier) : null,
     subscription_plan: sameAccount
       ? normalizePlan(account.subscriptionType, account.rateLimitTier)
       : null,
@@ -53,10 +56,10 @@ export function buildSnapshotPayload(utilization, account) {
 // its own fetched_at, so the server's (account, fetched_at) unique key dedupes replays for free.
 // Rows are cleared only up to the last confirmed store, so a mid-drain failure retries the rest.
 export async function drainStatuslineSnapshots(token, deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const readPending = deps.readPendingStatuslineUsage ?? _readPendingStatuslineUsage;
-  const clearPending = deps.clearPendingStatuslineUsage ?? _clearPendingStatuslineUsage;
-  const readAccount = deps.readClaudeAccount ?? _readClaudeAccount;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const readPending = deps.readPendingStatuslineUsage == null ? _readPendingStatuslineUsage : deps.readPendingStatuslineUsage;
+  const clearPending = deps.clearPendingStatuslineUsage == null ? _clearPendingStatuslineUsage : deps.clearPendingStatuslineUsage;
+  const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   if (!token) return { posted: 0, reason: 'no-token' };
 
   const pending = readPending();
@@ -65,9 +68,9 @@ export async function drainStatuslineSnapshots(token, deps = {}) {
   let account = null;
   try { account = readAccount(); } catch { account = null; }
   const identity = {
-    account_uuid: account?.accountUuid ?? null,
-    subscription_type: account?.subscriptionType ?? null,
-    rate_limit_tier: account?.rateLimitTier ?? null,
+    account_uuid: account == null || account.accountUuid == null ? null : account.accountUuid,
+    subscription_type: account == null || account.subscriptionType == null ? null : account.subscriptionType,
+    rate_limit_tier: account == null || account.rateLimitTier == null ? null : account.rateLimitTier,
     subscription_plan: account
       ? normalizePlan(account.subscriptionType, account.rateLimitTier)
       : null,
@@ -97,9 +100,9 @@ export async function drainStatuslineSnapshots(token, deps = {}) {
 // retries at the next turn-end. Concurrent sessions can race and double-post; the server drops
 // duplicates on its unique key.
 export async function maybePostUsageSnapshot(token, deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const readUtilization = deps.readUsageUtilization ?? _readUsageUtilization;
-  const readAccount = deps.readClaudeAccount ?? _readClaudeAccount;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const readUtilization = deps.readUsageUtilization == null ? _readUsageUtilization : deps.readUsageUtilization;
+  const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   if (!token) return { reported: false, reason: 'no-token' };
 
   let utilization = null;
@@ -109,8 +112,9 @@ export async function maybePostUsageSnapshot(token, deps = {}) {
   const stateFile = usageSnapshotStateFile();
   // The whole state is carried forward, not just lastSent: usage-ping.mjs keeps its config-mtime
   // gate in this same file, and replacing the object would blow that marker away on every post.
-  const state = readJson(stateFile) ?? {};
-  const sent = state.lastSent ?? {};
+  const storedState = readJson(stateFile);
+  const state = storedState == null ? {} : storedState;
+  const sent = state.lastSent == null ? {} : state.lastSent;
   if (sent.accountUuid === utilization.accountUuid && sent.fetchedAtMs === utilization.fetchedAtMs) {
     return { reported: false, reason: 'already-sent' };
   }

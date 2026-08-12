@@ -1,5 +1,6 @@
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 import { getAccessToken as _getAccessToken } from './token.mjs';
 
 // The backfill route caps chunks at 100 array items and mounts a 5mb body limit; 50 items with
@@ -64,7 +65,7 @@ export function planChunks(sessionGroups, { maxItems = MAX_CHUNK_ITEMS, maxBytes
   };
 
   for (const group of sessionGroups) {
-    const reports = group.reports ?? [];
+    const reports = group.reports == null ? [] : group.reports;
     if (reports.length === 0) continue;
 
     if (reports.length > maxItems || wireBytes(reports) > maxBytes) {
@@ -126,8 +127,9 @@ export async function readResponseBody(res) {
   }
   try {
     const body = JSON.parse(raw);
-    const message = Array.isArray(body?.message) ? body.message[0] : (body?.message ?? null);
-    return { code: body?.code ?? null, message, raw: raw.slice(0, 2000), body };
+    const bodyMessage = body == null ? undefined : body.message;
+    const message = Array.isArray(bodyMessage) ? bodyMessage[0] : (bodyMessage == null ? null : bodyMessage);
+    return { code: body == null || body.code == null ? null : body.code, message, raw: raw.slice(0, 2000), body };
   } catch {
     return { code: null, message: null, raw: raw.slice(0, 2000) };
   }
@@ -141,12 +143,12 @@ export async function readResponseBody(res) {
 // Returns { chunks, stored, skipped, itemErrors, retryableFailures, permanentRejections,
 //           unattributed, bySession: Map, halt, lastError }.
 export async function flushBackfillChunks(sessionGroups, token, deps = {}, options = {}) {
-  const postJsonImpl = deps.postJsonImpl ?? postJson;
-  const getAccessToken = deps.getAccessToken ?? _getAccessToken;
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const onChunk = deps.onChunk ?? (() => {});
-  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const timeoutMs = options.timeoutMs ?? DEFAULT_BACKFILL_TIMEOUT_MS;
+  const postJsonImpl = deps.postJsonImpl == null ? postJson : deps.postJsonImpl;
+  const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const onChunk = deps.onChunk == null ? (() => {}) : deps.onChunk;
+  const sleep = deps.sleep == null ? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))) : deps.sleep;
+  const timeoutMs = options.timeoutMs == null ? DEFAULT_BACKFILL_TIMEOUT_MS : options.timeoutMs;
 
   const result = {
     chunks: 0,
@@ -186,7 +188,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
     postJsonImpl(
       url,
       token,
-      chunk.timelines?.length
+      chunk.timelines != null && chunk.timelines.length
         ? { sessions: chunk.reports, timelines: chunk.timelines }
         : { sessions: chunk.reports },
       { fetchImpl, timeoutMs },
@@ -197,7 +199,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
     // A split session downgrades: any non-accepted part taints the whole session.
     if (existing && existing.status !== BackfillSessionStatus.ACCEPTED) return;
     if (existing && status === BackfillSessionStatus.ACCEPTED) return;
-    result.bySession.set(sessionId, { status, reason: reason ?? null });
+    result.bySession.set(sessionId, { status, reason: reason == null ? null : reason });
   };
 
   const markChunk = (chunk, status, reason) => {
@@ -207,24 +209,29 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
   // Fold one judged 2xx response: a session is accepted unless errors[] names it; the server's
   // `skipped` already includes the errored items, so the counters are not disjoint.
   const mergeChunkResponse = (chunk, parsed) => {
-    result.stored += parsed.stored ?? 0;
-    result.skipped += parsed.skipped ?? 0;
-    result.timelines += parsed.timelines ?? 0;
+    result.stored += parsed.stored == null ? 0 : parsed.stored;
+    result.skipped += parsed.skipped == null ? 0 : parsed.skipped;
+    result.timelines += parsed.timelines == null ? 0 : parsed.timelines;
     const errors = Array.isArray(parsed.errors) ? parsed.errors : [];
     result.itemErrors += errors.length;
     const errorsBySession = new Map();
     for (const entry of errors) {
-      if (!entry?.sessionId) continue;
-      errorsBySession.set(entry.sessionId, [...(errorsBySession.get(entry.sessionId) ?? []), entry]);
+      if (entry == null || !entry.sessionId) continue;
+      const existing = errorsBySession.get(entry.sessionId);
+      errorsBySession.set(entry.sessionId, [...(existing == null ? [] : existing), entry]);
     }
     const sentBySession = new Map();
     for (const report of chunk.reports) {
-      sentBySession.set(report.sessionId, (sentBySession.get(report.sessionId) ?? 0) + 1);
+      const count = sentBySession.get(report.sessionId);
+      sentBySession.set(report.sessionId, (count == null ? 0 : count) + 1);
     }
     for (const sessionId of new Set(chunk.sessionIds)) {
-      const failedSegments = errorsBySession.get(sessionId)?.length ?? 0;
-      const sent = sentBySession.get(sessionId) ?? 0;
-      const reason = errorsBySession.get(sessionId)?.[0]?.reason ?? null;
+      const sessionErrorList = errorsBySession.get(sessionId);
+      const failedSegments = sessionErrorList == null ? 0 : sessionErrorList.length;
+      const sentCount = sentBySession.get(sessionId);
+      const sent = sentCount == null ? 0 : sentCount;
+      const firstError = sessionErrorList == null ? undefined : sessionErrorList[0];
+      const reason = firstError == null || firstError.reason == null ? null : firstError.reason;
       if (failedSegments === 0) setSession(sessionId, BackfillSessionStatus.ACCEPTED);
       else if (failedSegments >= sent) setSession(sessionId, BackfillSessionStatus.REJECTED, reason);
       else setSession(sessionId, BackfillSessionStatus.PARTIAL, reason);
@@ -253,7 +260,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
       } catch (error) {
         // A timeout and a socket reset need different follow-up (a 60s stall points at the
         // server, a reset at the connection) — keep them apart in the ledger and summary.
-        transportError = error?.name === 'AbortError' ? 'timeout' : 'network';
+        transportError = error != null && error.name === 'AbortError' ? 'timeout' : 'network';
         if (attempt === 0) await sleep(RETRY_BACKOFF_MS);
         continue;
       }
@@ -306,11 +313,11 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
         // defensively treat it as not-allowed rather than inventing a new state.
         result.halt = BackfillHalt.NOT_ALLOWED;
       } else {
-        markChunk(chunk, BackfillSessionStatus.FAILED, message ?? `HTTP ${res.status}`);
+        markChunk(chunk, BackfillSessionStatus.FAILED, message == null ? `HTTP ${res.status}` : message);
         result.retryableFailures += 1;
         result.halt = BackfillHalt.FORBIDDEN;
       }
-      result.lastError = message ?? `HTTP ${res.status}`;
+      result.lastError = message == null ? `HTTP ${res.status}` : message;
       return false;
     }
 
@@ -323,7 +330,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
       return false;
     }
 
-    if (res.status === 400 && chunk.timelines?.length && raw.includes('timelines')) {
+    if (res.status === 400 && chunk.timelines != null && chunk.timelines.length && raw.includes('timelines')) {
       // A server predating the in-band timelines 400s the whole chunk on the unknown field
       // (forbidNonWhitelisted). Retry once without them — losing timelines beats losing the
       // usage, and the next login (post-deploy) delivers nothing new only because the ledger
@@ -343,7 +350,7 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
       for (const report of chunk.reports) {
         (splitIds.has(report.sessionId) ? first : second).reports.push(report);
       }
-      for (const timeline of chunk.timelines ?? []) {
+      for (const timeline of (chunk.timelines == null ? [] : chunk.timelines)) {
         (splitIds.has(timeline.sessionId) ? first : second).timelines.push(timeline);
       }
       first.sessionIds = chunk.sessionIds.filter((id) => splitIds.has(id));
@@ -355,9 +362,12 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
 
     if (res.status < 500) {
       // 400 single-session floor, 413, and the rest of the permanent 4xx family.
-      markChunk(chunk, BackfillSessionStatus.REJECTED, message ?? raw.slice(0, 200) ?? `HTTP ${res.status}`);
+      let rejectionReason = message;
+      if (rejectionReason == null) rejectionReason = raw.slice(0, 200);
+      if (rejectionReason == null) rejectionReason = `HTTP ${res.status}`;
+      markChunk(chunk, BackfillSessionStatus.REJECTED, rejectionReason);
       result.permanentRejections += 1;
-      result.lastError = message ?? `HTTP ${res.status}`;
+      result.lastError = message == null ? `HTTP ${res.status}` : message;
       return true;
     }
 
@@ -380,15 +390,15 @@ export async function flushBackfillChunks(sessionGroups, token, deps = {}, optio
 // Seal this user's pull for the calling tool. Idempotent server-side (snapshot_taken_at is
 // COALESCEd), so retrying a lost response is safe.
 export async function completeBackfill(token, deps = {}, options = {}) {
-  const postJsonImpl = deps.postJsonImpl ?? postJson;
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_BACKFILL_TIMEOUT_MS;
+  const postJsonImpl = deps.postJsonImpl == null ? postJson : deps.postJsonImpl;
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const timeoutMs = options.timeoutMs == null ? DEFAULT_BACKFILL_TIMEOUT_MS : options.timeoutMs;
   const url = `${apiBase()}${ENDPOINTS.sessionsBackfillComplete}`;
   try {
     const res = await postJsonImpl(url, token, {}, { fetchImpl, timeoutMs });
     if (res.status >= 200 && res.status < 300) return { completed: true, code: null };
     const { code, message } = await readResponseBody(res);
-    return { completed: false, code, reason: message ?? `HTTP ${res.status}` };
+    return { completed: false, code, reason: message == null ? `HTTP ${res.status}` : message };
   } catch {
     return { completed: false, code: null, reason: 'network' };
   }

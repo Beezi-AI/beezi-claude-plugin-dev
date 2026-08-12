@@ -1,8 +1,9 @@
-import fs from 'node:fs';
+import fs from 'fs';
 import { listSubagentTranscripts } from './subagents.mjs';
 import { IDLE_GAP_SEC } from './delta.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
 
 // Work done while a plan permission mode is active is `planning`. Matched loosely (substring) so a
 // schema tweak — 'plan', 'plan_mode', 'planning' — still classifies as planning instead of silently
@@ -31,7 +32,7 @@ function parseTranscript(transcriptPath) {
 }
 
 function tsOf(line) {
-  return line?.timestamp ? new Date(line.timestamp).getTime() : null;
+  return line != null && line.timestamp ? new Date(line.timestamp).getTime() : null;
 }
 
 // The active permission mode, from either a dedicated `type:'permission-mode'` change line or the
@@ -40,10 +41,10 @@ function tsOf(line) {
 // Neither the change line nor most work lines are timestamped/plan-stamped, so the mode is tracked
 // forward from whichever line last set it.
 function permissionModeOf(line) {
-  if (line?.type === 'permission-mode' && typeof line.permissionMode === 'string') {
+  if (line != null && line.type === 'permission-mode' && typeof line.permissionMode === 'string') {
     return line.permissionMode;
   }
-  return typeof line?.permissionMode === 'string' ? line.permissionMode : null;
+  return line != null && typeof line.permissionMode === 'string' ? line.permissionMode : null;
 }
 
 // A Ctrl+C / Esc interrupt is written as a type:'user' line whose text is
@@ -53,10 +54,11 @@ function permissionModeOf(line) {
 // human thinking.
 const INTERRUPT_PREFIX = '[Request interrupted by user';
 function isInterruptMarker(line) {
-  const c = line?.message?.content;
+  const message = line == null ? undefined : line.message;
+  const c = message == null ? undefined : message.content;
   if (!Array.isArray(c)) return false;
   return c.some(
-    (b) => b?.type === 'text' && typeof b.text === 'string' && b.text.startsWith(INTERRUPT_PREFIX),
+    (b) => b != null && b.type === 'text' && typeof b.text === 'string' && b.text.startsWith(INTERRUPT_PREFIX),
   );
 }
 
@@ -69,30 +71,30 @@ function startsWithPrefix(content, prefix) {
   if (typeof content === 'string') return content.trimStart().startsWith(prefix);
   if (Array.isArray(content)) {
     return content.some(
-      (b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trimStart().startsWith(prefix),
+      (b) => b != null && b.type === 'text' && typeof b.text === 'string' && b.text.trimStart().startsWith(prefix),
     );
   }
   return false;
 }
 function isTaskNotification(line) {
-  if (line?.type !== 'user') return false;
-  return startsWithPrefix(line.message?.content, TASK_NOTIFICATION_PREFIX);
+  if (line == null || line.type !== 'user') return false;
+  return startsWithPrefix(line.message == null ? undefined : line.message.content, TASK_NOTIFICATION_PREFIX);
 }
 
 // A genuine user turn-start, as opposed to a tool_result echo (Claude Code writes those as
 // type:'user' too), an interrupt marker, a subagent completion notification, or an injected meta
 // line. The gap BEFORE such a line is time the agent spent waiting on the human.
 function isRealUserPrompt(line) {
-  if (line?.type !== 'user') return false;
+  if (line == null || line.type !== 'user') return false;
   if (line.isMeta || line.isCompactSummary) return false;
   if (line.toolUseResult !== undefined) return false;
   if (isInterruptMarker(line)) return false;
   if (isTaskNotification(line)) return false;
-  const c = line.message?.content;
+  const c = line.message == null ? undefined : line.message.content;
   if (typeof c === 'string') return c.trim().length > 0;
   if (Array.isArray(c)) {
-    if (c.some((b) => b?.type === 'tool_result')) return false;
-    return c.some((b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0);
+    if (c.some((b) => b != null && b.type === 'tool_result')) return false;
+    return c.some((b) => b != null && b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0);
   }
   return false;
 }
@@ -108,7 +110,7 @@ function buildPeriods(lines) {
     const pm = permissionModeOf(line);
     if (pm != null) currentMode = pm;
     // A permission-mode change line has no timestamp — it flips the mode but isn't an anchor.
-    if (line?.type === 'permission-mode') continue;
+    if (line != null && line.type === 'permission-mode') continue;
     const ms = tsOf(line);
     if (ms == null) continue;
     anchors.push({
@@ -153,9 +155,10 @@ function buildPeriods(lines) {
 // presenting a finished plan, and it sits on a timestamped line (unlike mode lines). Mirrors the
 // content-block scan inlined in operations.mjs / code-changes.mjs.
 function hasExitPlanMode(line) {
-  const content = line?.message?.content;
+  const message = line == null ? undefined : line.message;
+  const content = message == null ? undefined : message.content;
   if (!Array.isArray(content)) return false;
-  return content.some((b) => b?.type === 'tool_use' && b.name === 'ExitPlanMode');
+  return content.some((b) => b != null && b.type === 'tool_use' && b.name === 'ExitPlanMode');
 }
 
 // Discrete plan-mode markers, complementing the continuous `planning` periods:
@@ -178,7 +181,7 @@ function buildPlanEvents(lines) {
       if (nowPlan && !inPlan) pendingStart = true; // stamp on the next timestamped line
       inPlan = nowPlan;
     }
-    if (line?.type === 'permission-mode') continue; // no timestamp — mode flip only
+    if (line != null && line.type === 'permission-mode') continue; // no timestamp — mode flip only
     const ms = tsOf(line);
     if (ms == null) continue;
     if (pendingStart) {
@@ -269,8 +272,8 @@ export function computeSessionTimeline(transcriptPath, sessionId) {
 // POST the session timeline to Beezi. Session-scoped (upserted by sessionId), fire-and-forget by
 // convention — callers swallow the result. Mirrors session-error-report.mjs.
 export async function postSessionTimeline(payload, token, deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
-  if (!payload?.sessionId || !Array.isArray(payload?.periods)) {
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  if (payload == null || !payload.sessionId || !Array.isArray(payload.periods)) {
     return { reported: false, reason: 'missing-fields' };
   }
   if (!token) return { reported: false, reason: 'no-token' };

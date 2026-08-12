@@ -40,7 +40,7 @@ export function resolveBillingSource(env = process.env, account = null, signals 
   const fromEnv = detectBillingSource(env);
   if (fromEnv !== BillingSource.UNKNOWN) return fromEnv;
   if (account) return BillingSource.SUBSCRIPTION;
-  if (signals?.hasManagedApiKey || signals?.hasApiKeyHelper) return BillingSource.ANTHROPIC_API_KEY;
+  if (signals != null && (signals.hasManagedApiKey || signals.hasApiKeyHelper)) return BillingSource.ANTHROPIC_API_KEY;
   return BillingSource.UNKNOWN;
 }
 
@@ -52,7 +52,7 @@ const API_KEY_BALANCE_TEXT = /credit balance is too low|low api[- ]key balance/i
 
 export function isApiKeyBillingEvidence(apiErrorEvents = []) {
   return apiErrorEvents.some(
-    (e) => e?.error === 'billing_error' && API_KEY_BALANCE_TEXT.test(String(e?.text ?? '')),
+    (e) => e != null && e.error === 'billing_error' && API_KEY_BALANCE_TEXT.test(String(e.text == null ? '' : e.text)),
   );
 }
 
@@ -79,10 +79,10 @@ export function detectThirdPartyProvider(env = process.env) {
 // Max multiplier; subscriptionType names the product. Substring match so new
 // default_claude_max_* tiers degrade gracefully. Raw fields remain the source of truth.
 export function normalizePlan(subscriptionType, rateLimitTier) {
-  const tier = String(rateLimitTier ?? '').toLowerCase();
+  const tier = String(rateLimitTier == null ? '' : rateLimitTier).toLowerCase();
   if (tier.includes('max_20x')) return 'max_20x';
   if (tier.includes('max_5x')) return 'max_5x';
-  const type = String(subscriptionType ?? '').toLowerCase();
+  const type = String(subscriptionType == null ? '' : subscriptionType).toLowerCase();
   if (type === 'enterprise') return 'enterprise';
   if (type === 'team') return 'team';
   if (type === 'max') return 'max';

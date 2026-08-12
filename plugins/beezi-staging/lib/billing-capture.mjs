@@ -54,6 +54,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
     const plan = String(args.plan).trim().toLowerCase();
     if (plan === SELF_REPORTED_API_KEY) {
       const envSource = detectBillingSource(env);
+      const capturedVia = safeField(args.via);
       return {
         version: 1,
         // An env that positively names a provider still wins; otherwise take the user's word.
@@ -63,7 +64,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
         plan: null,
         credentialsExpiresAt: null,
         capturedAt: now.toISOString(),
-        capturedBy: safeField(args.via) ?? 'manual',
+        capturedBy: capturedVia == null ? 'manual' : capturedVia,
         selfReported: true,
       };
     }
@@ -78,6 +79,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
     const envSource = detectBillingSource(env);
     const source = envSource === BillingSource.UNKNOWN ? BillingSource.SUBSCRIPTION : envSource;
     const isSub = source === BillingSource.SUBSCRIPTION;
+    const capturedVia = safeField(args.via);
     return {
       version: 1,
       source,
@@ -88,13 +90,13 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
       plan: isSub ? plan : null,
       credentialsExpiresAt: null,
       capturedAt: now.toISOString(),
-      capturedBy: safeField(args.via) ?? 'manual',
+      capturedBy: capturedVia == null ? 'manual' : capturedVia,
       selfReported: true,
     };
   }
   const subscriptionType = safeField(args.subscriptionType);
   const rateLimitTier = safeField(args.rateLimitTier);
-  const via = safeField(args.via) ?? 'manual';
+  const via = safeField(args.via);
   // A readable oauthAccount is positive subscription evidence; without it (and without an env
   // signal) the source stays unknown rather than being assumed.
   const source = resolveBillingSource(env, account);
@@ -110,7 +112,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
     plan: isSub ? normalizePlan(subscriptionType, rateLimitTier) : null,
     credentialsExpiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
     capturedAt: now.toISOString(),
-    capturedBy: via,
+    capturedBy: via == null ? 'manual' : via,
   };
 }
 
@@ -119,7 +121,8 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
 // data and restart the refresh-nudge loop the selfReported exemption exists to end.
 export function shouldKeepExisting(freshConfig, existingConfig) {
   return freshConfig.plan === 'unknown'
-    && existingConfig?.selfReported === true
+    && existingConfig != null
+    && existingConfig.selfReported === true
     && Boolean(existingConfig.plan)
     && existingConfig.plan !== 'unknown';
 }
