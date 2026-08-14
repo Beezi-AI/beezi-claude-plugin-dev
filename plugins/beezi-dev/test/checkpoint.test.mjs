@@ -1622,6 +1622,54 @@ test('41. audit-built payloads carry the transcript-derived started_at/ended_at'
   assert.equal(sunk[0].ended_at, '2025-11-02T10:30:00.000Z');
 });
 
+// …and that span stops at the last real turn. Claude Code appends an away_summary recap once the
+// human walks off (the last timestamped record in 107 of 231 local transcripts), so a backfilled
+// session used to be reported as ending tens of minutes deep into its own idle tail.
+test('41b. the away recap does not push the payload ended_at into the idle tail', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5 }, '2025-11-02T09:00:00.000Z', dir),
+    assistantLine('main', 'model-a', { input_tokens: 4, output_tokens: 2 }, '2025-11-02T09:01:00.000Z', dir),
+    { type: 'system', subtype: 'away_summary', content: 'recap', gitBranch: 'main', cwd: dir, timestamp: '2025-11-02T09:50:00.000Z' },
+  ]);
+
+  const sunk = [];
+  await runCheckpoint(
+    { session_id: 'span-away', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git') },
+    { sink: (p) => sunk.push(p), skipFlush: true, persistState: false, skipLiveTrackingGate: true },
+  );
+
+  assert.equal(sunk.length, 1);
+  assert.equal(sunk[0].started_at, '2025-11-02T09:00:00.000Z');
+  assert.equal(sunk[0].ended_at, '2025-11-02T09:01:00.000Z', 'ends at the last turn, not the recap');
+  // The billed clock is untouched by the span filter — still the full 60s of real work.
+  assert.equal(sunk[0].duration_sec, 60);
+});
+
+// A window holding nothing BUT bookkeeping has no anchors at all, so it has no span to report.
+// It must not reach the wire regardless: no tokens and no active clock means nothing to bill.
+test('41c. a bookkeeping-only window emits no payload', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    { type: 'system', subtype: 'away_summary', content: 'recap', gitBranch: 'main', cwd: dir, timestamp: '2025-11-02T09:50:00.000Z' },
+    { type: 'queue-operation', operation: 'remove', timestamp: '2025-11-02T09:50:01.000Z' },
+  ]);
+
+  const sunk = [];
+  await runCheckpoint(
+    { session_id: 'span-bookkeeping', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git') },
+    { sink: (p) => sunk.push(p), skipFlush: true, persistState: false, skipLiveTrackingGate: true },
+  );
+
+  assert.equal(sunk.length, 0, 'no tokens and no active clock — nothing to report');
+});
+
 // ─── usage stamp + context strip + snapshot post ─────────────────────────────
 
 const UTIL_FIXTURE = {

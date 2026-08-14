@@ -1,6 +1,6 @@
 import fs from 'fs';
 import { listSubagentTranscripts } from './subagents.mjs';
-import { IDLE_GAP_SEC } from './delta.mjs';
+import { IDLE_GAP_SEC, isTimingAnchor } from './delta.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
@@ -16,7 +16,21 @@ const STATE = {
   PLANNING: 'planning',
   WAITING_USER: 'waiting_user',
   IDLE: 'idle',
+  BREAK: 'break',
 };
+
+// Past this, the session was not waited on — it was abandoned and later resumed, usually
+// overnight. Charted as `break` so a client can collapse it to a marker instead of drawing
+// hours of empty axis: 16 such bands account for 45% of all charted time locally, and 10 of
+// them cross a calendar day.
+//
+// Duration is the whole test; crossing midnight deliberately is NOT one. A 23:50→00:20 pause is
+// the human stepping away for half an hour and must stay `waiting_user`, while 18:00→10:00 is a
+// break whether or not a date changed — and a date test would drag timezone and DST handling in
+// for nothing. 6h sits in the empty part of the distribution (one single band falls between 3h
+// and 6h locally), so it separates "long lunch and a meeting" from "came back tomorrow" without
+// balancing on a knife edge.
+export const BREAK_GAP_SEC = 6 * 60 * 60;
 
 // Parse a JSONL transcript into an array of records; blank/malformed lines are skipped.
 function parseTranscript(transcriptPath) {
@@ -81,6 +95,58 @@ function isTaskNotification(line) {
   return startsWithPrefix(line.message == null ? undefined : line.message.content, TASK_NOTIFICATION_PREFIX);
 }
 
+// Tools whose entire job is to block on the human. Their tool_result arrives when the person
+// answers, so the gap before it is time spent waiting on them — not idle, and not planning. It
+// reads as anything else only because the answer comes back as a tool_result, which
+// isRealUserPrompt (correctly) refuses to treat as a turn-start.
+//
+//   AskUserQuestion — the agent asked; all 15 local waits (5.4h) used to chart as idle.
+//   ExitPlanMode    — the agent presented a plan and is blocked until the human approves or
+//                     rejects it. 36 local waits: 32 charted as `planning` (the plan permission
+//                     mode is still active, so they fell through to it) and 4 as idle once the
+//                     wait passed the 5-minute gap. Presenting a plan ends the planning; what
+//                     follows is the human deciding, so it belongs to them. This does move ~1.8h
+//                     out of `planning` — that is the point, not a side effect.
+const USER_DECISION_TOOLS = { AskUserQuestion: true, ExitPlanMode: true };
+
+// The tool_result Claude Code writes when the human DECLINES a permission prompt. Any tool can
+// come back this way, so it is matched on the marker text rather than a tool name.
+//
+// Not to be confused with the stream-closed teardown in delta.mjs, which is the opposite fact: it
+// means nobody was there. This one proves the human WAS there and answered — locally after 9 and
+// 95 minutes of deliberation, both charted as idle.
+const PERMISSION_DECLINED_PREFIX = "The user doesn't want to proceed with this tool use";
+
+// Map every tool_use id in the transcript to its tool name, so a tool_result can be traced back
+// to the tool that produced it (the result block carries only `tool_use_id`).
+function buildToolUseNames(lines) {
+  const names = new Map();
+  for (const line of lines) {
+    const message = line == null ? undefined : line.message;
+    const content = message == null ? undefined : message.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b != null && b.type === 'tool_use' && b.id && typeof b.name === 'string') names.set(b.id, b.name);
+    }
+  }
+  return names;
+}
+
+// Is this line the human answering something the agent put to them — a question, a plan waiting on
+// approval, or a permission prompt they declined?
+function isUserDecision(line, toolUseNames) {
+  if (line == null || line.type !== 'user') return false;
+  const message = line.message == null ? undefined : line.message;
+  const content = message == null ? undefined : message.content;
+  if (!Array.isArray(content)) return false;
+  for (const b of content) {
+    if (b == null || b.type !== 'tool_result') continue;
+    if (b.tool_use_id && USER_DECISION_TOOLS[toolUseNames.get(b.tool_use_id)] === true) return true;
+    if (typeof b.content === 'string' && b.content.indexOf(PERMISSION_DECLINED_PREFIX) === 0) return true;
+  }
+  return false;
+}
+
 // A genuine user turn-start, as opposed to a tool_result echo (Claude Code writes those as
 // type:'user' too), an interrupt marker, a subagent completion notification, or an injected meta
 // line. The gap BEFORE such a line is time the agent spent waiting on the human.
@@ -105,18 +171,23 @@ function isRealUserPrompt(line) {
 // same-state runs into periods.
 function buildPeriods(lines) {
   let currentMode = 'default';
+  const toolUseNames = buildToolUseNames(lines);
   const anchors = [];
   for (const line of lines) {
     const pm = permissionModeOf(line);
     if (pm != null) currentMode = pm;
     // A permission-mode change line has no timestamp — it flips the mode but isn't an anchor.
     if (line != null && line.type === 'permission-mode') continue;
+    // Nor is a line Claude Code stamped while nobody was working (away recaps, resume
+    // bookkeeping) — anchoring on those closed the session with a band of pure dead time.
+    if (!isTimingAnchor(line)) continue;
     const ms = tsOf(line);
     if (ms == null) continue;
     anchors.push({
       ts: ms,
       isPrompt: isRealUserPrompt(line),
       isTaskNotif: isTaskNotification(line),
+      isUserDecision: isUserDecision(line, toolUseNames),
       mode: currentMode,
     });
   }
@@ -128,16 +199,26 @@ function buildPeriods(lines) {
     const cur = anchors[i];
     if (cur.ts <= prev.ts) continue;
     let state;
-    // Waiting on the human always wins, at any duration — a prompt is a prompt whether the human
-    // answered in 5 seconds or came back after lunch.
-    if (cur.isPrompt) state = STATE.WAITING_USER;
     // A gap that ENDS at a subagent notification is the agent blocked on its own subagent, at any
     // duration: background subagents hand back their tool_result in under a second, so the wait is
     // not the tool_use→tool_result window, it is the stretch of main-thread silence that the
-    // notification breaks. The `>=` gap fallback matches delta.mjs, which accrues a gap only while
-    // it is strictly under the threshold. With `>` an exactly-300s gap read as WORKING here but was
-    // dropped there.
-    else if (cur.isTaskNotif || cur.ts - prev.ts >= IDLE_GAP_SEC * 1000) state = STATE.IDLE;
+    // notification breaks. Checked FIRST so a long-running background agent is never mistaken for
+    // the human walking away — no local band ≥6h overlaps a live subagent today, but one that did
+    // would be real work.
+    if (cur.isTaskNotif) state = STATE.IDLE;
+    // Abandoned and resumed, rather than waited on. This outranks the prompt rule below: these
+    // gaps DO end at a real prompt (the human returning), which is exactly why they used to be
+    // charted as one 29-hour `waiting_user` band.
+    else if (cur.ts - prev.ts >= BREAK_GAP_SEC * 1000) state = STATE.BREAK;
+    // Waiting on the human wins at any duration up to that — a prompt is a prompt whether the
+    // human answered in 5 seconds or came back after lunch. A decision counts the same: an answered
+    // question, an approved or rejected plan, a declined permission all arrive as a tool_result
+    // rather than a turn-start, but the wait was still theirs. Note this outranks the plan-mode
+    // check below, so a plan sitting unapproved is the human's time, not more planning.
+    else if (cur.isPrompt || cur.isUserDecision) state = STATE.WAITING_USER;
+    // The `>=` gap fallback matches delta.mjs, which accrues a gap only while it is strictly under
+    // the threshold. With `>` an exactly-300s gap read as WORKING here but was dropped there.
+    else if (cur.ts - prev.ts >= IDLE_GAP_SEC * 1000) state = STATE.IDLE;
     else state = isPlanMode(cur.mode) ? STATE.PLANNING : STATE.WORKING;
 
     const last = merged[merged.length - 1];
@@ -250,6 +331,9 @@ export function computeSessionTimeline(transcriptPath, sessionId) {
     if (t > maxTs) maxTs = t;
   };
   for (const line of lines) {
+    // Same anchor rule as buildPeriods, or the axis would still run out to the away recap and
+    // leave the chart with a long empty tail past the final period.
+    if (!isTimingAnchor(line)) continue;
     const t = tsOf(line);
     if (t != null) track(t);
   }
