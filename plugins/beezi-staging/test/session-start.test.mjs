@@ -488,6 +488,31 @@ test('14e. unknown billing source — nudges the user instead of silently guessi
   assert.equal(writes[0].plan, 'max_20x', 'the plan stays dormant for a switch back');
 });
 
+test('14f. a custom gateway names itself in the nudge — the user is asked what it bills', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const prev = process.env.ANTHROPIC_BASE_URL;
+  process.env.ANTHROPIC_BASE_URL = 'https://gw.corp.example';
+  t.after(() => {
+    if (prev === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = prev;
+  });
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-gateway' }), {
+    getAccessToken: async () => 'tok',
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    resolveSource: () => 'unknown',
+    readBillingConfig: () => null,
+    writeBillingConfig: () => {},
+  });
+
+  // The generic "cannot determine" wording leaves the user with nothing to act on; naming the
+  // gateway tells them why we cannot know and that only they can answer it.
+  assert.match(result ?? '', /gateway|custom API endpoint/i);
+  assert.match(result ?? '', /\/beezi:login/);
+});
+
 // ─── tenant tracking policy (whoami capture + gating + hints) ────────────────
 
 import { readTrackingState, writeTrackingState, TrackingMode } from '../lib/tracking.mjs';
