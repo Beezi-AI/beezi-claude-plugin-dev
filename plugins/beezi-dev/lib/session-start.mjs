@@ -25,7 +25,7 @@ import {
   shouldBackfill,
   TrackingMode,
 } from './tracking.mjs';
-import { BillingSource } from './billing.mjs';
+import { BillingSource, hasCustomGateway } from './billing.mjs';
 import {
   readBillingConfig as _readBillingConfig,
   writeBillingConfig as _writeBillingConfig,
@@ -197,8 +197,13 @@ export async function runSessionStart(input, deps = {}) {
       message = message ? `${message}\n${nudge}` : nudge;
     } else if (billingSource === BillingSource.UNKNOWN) {
       // Reported honestly as `unknown` rather than guessed. Only the user can resolve it, and
-      // without this they would never learn their usage is landing unattributed.
-      const nudge = 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
+      // without this they would never learn their usage is landing unattributed. A custom gateway
+      // gets its own wording: there the machine is not missing a signal, it has one it cannot
+      // interpret — the route may forward this machine's subscription credential or bill the
+      // gateway's own — so the nudge names the question the user is being asked to settle.
+      const nudge = hasCustomGateway()
+        ? 'Beezi: this machine sends Claude Code through a custom API endpoint (gateway), so its billing cannot be read locally — usage is reported as "unknown". Run /beezi:login to say whether your Claude subscription or the gateway pays.'
+        : 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
       message = message ? `${message}\n${nudge}` : nudge;
     }
   }

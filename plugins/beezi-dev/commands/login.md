@@ -24,37 +24,62 @@ linked). Run EXACTLY this one command, unmodified:
 It reads only the non-secret account info from `~/.claude.json`. Report its
 one-line summary. If it could not resolve the plan, continue to Step 3.
 
-Step 3 — ask the user their tier (ONLY when Step 2 printed
-`no Claude subscription info found`, `plan=unknown`, or
-`keeping the self-reported plan`; skip this step entirely when Step 2 printed
-a known plan, or when its output shows `source=anthropic_api_key` or
-`source=third_party` — those machines do not bill a subscription, so a tier
-question does not apply).
+Step 3 — ask the user how this machine pays. Two questions live here; which
+ones you ask depends on Step 2's output.
+
+Ask NOTHING and skip to Step 3b when Step 2 printed a known plan (for example
+`plan=max_20x`) with no `gateway=custom`, or when its output shows
+`source=anthropic_api_key` or `source=third_party` — those machines are already
+settled.
+
+Step 3a — the gateway question. Ask this FIRST, and only when Step 2's output
+contains `gateway=custom`. This machine sends Claude Code to a custom API
+endpoint, and nothing local can tell whether that endpoint forwards the user's
+own Claude credential or bills its own. Ask with the AskUserQuestion tool:
+"This machine sends Claude Code through a custom API endpoint. What pays for
+that usage?" with exactly these options: "My Claude subscription (the endpoint
+just forwards it)", "The gateway or provider's own billing", "An Anthropic API
+key".
+
+- "The gateway or provider's own billing" → value `gateway`. Final; do not ask
+  the tier question.
+- "An Anthropic API key" → value `api_key`. Final; do not ask the tier question.
+- "My Claude subscription" → continue to Step 3c and use the tier they pick.
+  The tier is NOT known from Step 2 on these machines (it prints `plan=n/a`),
+  so the tier question always has to be asked here.
+
+Step 3c — the tier question. Ask it when Step 2 printed
+`no Claude subscription info found`, `plan=unknown`, or `keeping the
+self-reported plan` and there was no `gateway=custom`; or when Step 3a was asked
+and the user answered "My Claude subscription".
 
 Ask with the AskUserQuestion tool: "How does this machine pay for Claude?"
 with exactly these options: "Pro", "Max 5x", "Max 20x", "Team or Enterprise",
 "I use an API key (no subscription)". If they pick "Team or Enterprise", ask one
-follow-up question with options "Team" and "Enterprise".
+follow-up question with options "Team" and "Enterprise". Omit the API-key option
+when you are here from Step 3a — they have already ruled it out.
 
 The API-key option matters: without it a machine paying per-token gets pinned to
 a subscription tier, and its spend and errors are then reported under that plan.
 
 Map the final answer through this table — no other values are valid:
 
-| Answer                | value        |
-| --------------------- | ------------ |
-| Pro                   | `pro`        |
-| Max 5x                | `max_5x`     |
-| Max 20x               | `max_20x`    |
-| Team                  | `team`       |
-| Enterprise            | `enterprise` |
-| I use an API key      | `api_key`    |
+| Answer                                | value        |
+| ------------------------------------- | ------------ |
+| Pro                                   | `pro`        |
+| Max 5x                                | `max_5x`     |
+| Max 20x                               | `max_20x`    |
+| Team                                  | `team`       |
+| Enterprise                            | `enterprise` |
+| I use an API key                      | `api_key`    |
+| The gateway or provider's own billing | `gateway`    |
 
-Then run EXACTLY this command, substituting only `<value>`:
+Run the capture EXACTLY ONCE, with the single value the questions above landed
+on, substituting only `<value>`:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --plan <value> --via login-user`
 
-Report its one-line summary. If the user dismisses the question or answers
+Report its one-line summary. If the user dismisses a question or answers
 something not in the table, skip the capture — the link itself already
 succeeded, say so.
 
