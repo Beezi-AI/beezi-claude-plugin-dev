@@ -222,6 +222,26 @@ export function installStatusline(deps = {}) {
     : { ok: true, message: 'Beezi: status line installed — live usage capture is on (folder · model · plan usage).' };
 }
 
+// True when this machine took the wrapper but its status line no longer runs one. Claude Code's
+// own /statusline (and the statusline-setup agent, and any hand-edit) replaces
+// settings.json → statusLine outright, and nothing here re-installs: the capture just stops, with
+// no symptom the user could connect to it. Detecting it is all we do — re-writing a status-line
+// setting the user changed on purpose is exactly the consent this module is careful about, so the
+// caller nudges and the fix stays /beezi:login.
+//
+// Never installed (or properly uninstalled) reads as fine: only a machine that agreed once is
+// owed the notice. Another variant's shim also reads as fine — the capture is running, just not
+// out of this home.
+export function statuslineCaptureDetached(deps = {}) {
+  const platform = deps.platform == null ? process.platform : deps.platform;
+  if (readJson(originalFile()) == null) return false;
+  const { settings, error } = readSettings();
+  if (error) return false;
+  const command = commandOf(settings.statusLine);
+  if (commandUsesShim(command, statuslineShimFile(platform))) return false;
+  return beeziShimPath(command) == null;
+}
+
 // Puts back whatever /beezi:login replaced, but only while settings still point at our shim —
 // a status line the user changed since is theirs, not ours to touch.
 export function uninstallStatusline(deps = {}) {

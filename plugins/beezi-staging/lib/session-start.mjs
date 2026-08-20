@@ -26,6 +26,7 @@ import {
   TrackingMode,
 } from './tracking.mjs';
 import { BillingSource, hasCustomGateway } from './billing.mjs';
+import { statuslineCaptureDetached as _statuslineCaptureDetached } from './statusline-install.mjs';
 import {
   readBillingConfig as _readBillingConfig,
   writeBillingConfig as _writeBillingConfig,
@@ -124,6 +125,8 @@ export async function runSessionStart(input, deps = {}) {
   const writeBillingConfig = deps.writeBillingConfig == null ? _writeBillingConfig : deps.writeBillingConfig;
   const isStale = deps.isStale == null ? _isStale : deps.isStale;
   const recordWhoamiImpl = deps.recordWhoamiImpl == null ? recordWhoami : deps.recordWhoamiImpl;
+  const statuslineCaptureDetached =
+    deps.statuslineCaptureDetached == null ? _statuslineCaptureDetached : deps.statuslineCaptureDetached;
 
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
@@ -204,6 +207,15 @@ export async function runSessionStart(input, deps = {}) {
       const nudge = hasCustomGateway()
         ? 'Beezi: this machine sends Claude Code through a custom API endpoint (gateway), so its billing cannot be read locally — usage is reported as "unknown". Run /beezi:login to say whether your Claude subscription or the gateway pays.'
         : 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
+      message = message ? `${message}\n${nudge}` : nudge;
+    }
+
+    // The status-line wrapper is the only source of LIVE plan-usage readings, and it is a
+    // settings.json entry anything can overwrite. Silence here would read as "still tracking".
+    let detached = false;
+    try { detached = statuslineCaptureDetached(); } catch { /* best-effort */ }
+    if (detached) {
+      const nudge = 'Beezi: your status line no longer runs Beezi’s wrapper, so live plan-usage capture is off. Run /beezi:login to wrap it again.';
       message = message ? `${message}\n${nudge}` : nudge;
     }
   }

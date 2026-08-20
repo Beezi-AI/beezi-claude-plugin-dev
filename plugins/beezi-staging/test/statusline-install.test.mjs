@@ -7,6 +7,7 @@ import {
   installStatusline,
   uninstallStatusline,
   statuslineShimFile,
+  statuslineCaptureDetached,
 } from '../lib/statusline-install.mjs';
 
 function useTmpDirs(t) {
@@ -224,4 +225,50 @@ test('installStatusline — variants pointing at each other never loop', (t) => 
   assert.equal(r.ok, true);
   const shim = fs.readFileSync(statuslineShimFile(), 'utf-8');
   assert.ok(!shim.includes('BEEZI_STATUSLINE_CHAIN'), 'a cycle of shims resolves to nothing to wrap');
+});
+
+// statuslineCaptureDetached — the wrapper is a settings.json entry that /statusline, the
+// statusline-setup agent or a hand-edit can replace at any time, taking live capture with it.
+
+test('statuslineCaptureDetached — a machine that never installed is not nagged', (t) => {
+  const { settings } = useTmpDirs(t);
+  fs.writeFileSync(settings, JSON.stringify({ statusLine: { type: 'command', command: '~/my-line.sh' } }));
+  assert.equal(statuslineCaptureDetached(), false);
+});
+
+test('statuslineCaptureDetached — settings still pointing at our shim reads as attached', (t) => {
+  useTmpDirs(t);
+  installStatusline(deps);
+  assert.equal(statuslineCaptureDetached(), false);
+});
+
+test('statuslineCaptureDetached — a status line set after install reads as detached', (t) => {
+  const { settings } = useTmpDirs(t);
+  installStatusline(deps);
+  // What /statusline writes: the shim is gone from settings, our original record is not.
+  fs.writeFileSync(settings, JSON.stringify({ statusLine: { type: 'command', command: '~/.claude/my-new-line.sh' } }));
+  assert.equal(statuslineCaptureDetached(), true);
+});
+
+test('statuslineCaptureDetached — a status line REMOVED after install reads as detached', (t) => {
+  const { settings } = useTmpDirs(t);
+  installStatusline(deps);
+  fs.writeFileSync(settings, JSON.stringify({ model: 'opus' }));
+  assert.equal(statuslineCaptureDetached(), true);
+});
+
+test('statuslineCaptureDetached — another variant taking over is still capture, not detachment', (t) => {
+  const { beezi, settings } = useTmpDirs(t);
+  installStatusline(deps);
+  // A second Beezi variant installs over us: its shim runs the capture, so ours must stay quiet.
+  const sibling = variant(path.dirname(beezi), '.beezi-staging', { type: 'command', command: statuslineShimFile() });
+  fs.writeFileSync(settings, JSON.stringify({ statusLine: { type: 'command', command: sibling } }));
+  assert.equal(statuslineCaptureDetached(), false);
+});
+
+test('statuslineCaptureDetached — an unreadable settings.json is never reported as detached', (t) => {
+  const { settings } = useTmpDirs(t);
+  installStatusline(deps);
+  fs.writeFileSync(settings, '{ not json');
+  assert.equal(statuslineCaptureDetached(), false);
 });
