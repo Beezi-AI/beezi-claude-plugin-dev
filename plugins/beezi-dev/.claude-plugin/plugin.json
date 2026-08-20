@@ -1,6 +1,6 @@
 {
   "name": "beezi-dev",
-  "version": "0.9.2-dev.4695",
+  "version": "0.9.3-dev.4727",
   "description": "Reports Claude Code session token analytics for Beezi task branches and gives you a personal usage summary on demand. — dev environment build.",
   "author": {
     "name": "Beezi"

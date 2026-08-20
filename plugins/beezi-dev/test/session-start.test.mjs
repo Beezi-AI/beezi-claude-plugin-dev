@@ -641,3 +641,54 @@ test('21. completed pull on a live tenant → no audit hint', async (t) => {
 
   assert.equal(message, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
 });
+
+// ─── status-line capture detachment ──────────────────────────────────────────
+
+test('status line detached → session start says live capture is off', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-sl-detached' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchOk({ connected: true, projectName: 'Acme' }),
+    gitImpl: fakeGit('https://host/repo.git'),
+    statuslineCaptureDetached: () => true,
+  });
+
+  assert.equal(
+    result,
+    'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.\n'
+      + 'Beezi: your status line no longer runs Beezi’s wrapper, so live plan-usage capture is off. Run /beezi:login to wrap it again.',
+  );
+});
+
+test('status line still wrapped → session start stays quiet about it', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-sl-attached' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchOk({ connected: true, projectName: 'Acme' }),
+    gitImpl: fakeGit('https://host/repo.git'),
+    statuslineCaptureDetached: () => false,
+  });
+
+  assert.equal(result, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
+});
+
+test('status line check that throws never breaks session start', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-sl-throws' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchOk({ connected: true, projectName: 'Acme' }),
+    gitImpl: fakeGit('https://host/repo.git'),
+    statuslineCaptureDetached: () => { throw new Error('unreadable settings'); },
+  });
+
+  assert.equal(result, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
+});
