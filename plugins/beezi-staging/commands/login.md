@@ -5,6 +5,27 @@ allowed-tools: Bash(node:*), AskUserQuestion
 
 Do NOT read, open, or inspect any files yourself. Run only the given commands.
 
+Step 0 — preflight FIRST, before anything else. Run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/login-preflight.mjs`
+
+It checks the three things that make the link fail halfway: plan mode, auto mode (its
+permission classifier denies this plugin's node scripts), and a state directory this
+session cannot write to (a sandboxed Bash session only allows writes inside the working
+directory).
+
+If its output starts with `✗`, STOP: show those lines to the user verbatim and run no
+other command — not the sign-in, not the plan capture, not the backfill. A flow that dies
+partway leaves this machine half-linked.
+
+If this command does not run at all — denied by the permission classifier, or blocked by
+plan mode — that IS the answer, and the same rule applies: STOP. Do not retry it, do not
+try PowerShell or another shell, do not run any later step. Tell the user their session's
+permission mode is gating the plugin's scripts, that they should press Shift+Tab to switch
+to normal mode, and run /beezi:login again.
+
+If its output starts with `✓`, continue to Step 1.
+
 Step 1 — sign in (opens the browser; blocks until the sign-in completes):
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/login.mjs`
@@ -14,6 +35,13 @@ itself once they approve there. Show the user the command's output. If it says
 the machine is **already linked**, tell the user — then still continue with
 Step 2 below, so a user whose subscription tier changed can still refresh it.
 Never echo any token or credential.
+
+If the sign-in fails with a network or connection error, do NOT retry and do NOT continue
+to Step 2. The preflight only proves this session can write files, not that it can reach
+the network — a sandboxed session with filesystem isolation off still blocks outbound
+requests. Tell the user the sign-in could not reach Beezi, that a sandboxed session may be
+network-isolated, and to run /beezi:login outside the sandbox. Capturing a plan for a
+machine that never linked is worse than stopping.
 
 Step 2 — capture the subscription plan for analytics (run this after a
 successful Step 1 link, OR when Step 1 reported the machine was already
