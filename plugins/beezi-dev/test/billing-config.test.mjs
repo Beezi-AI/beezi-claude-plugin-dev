@@ -13,6 +13,8 @@ import {
   resolveSource,
   hasFreshApiKeyEvidence,
   recordApiKeyEvidence,
+  isFreshCliCapture,
+  hasRecentStatuslineObservation,
 } from '../lib/billing-config.mjs';
 
 function withTempHome(fn) {
@@ -101,9 +103,10 @@ const SUB_CONFIG = Object.freeze({
   plan: 'max_5x',
 });
 
-// Always injected: the real reader would hit the developer's own ~/.claude.json.
-const withAccount = { readClaudeAccount: () => ({ subscriptionType: 'max' }) };
-const noAccount = { readClaudeAccount: () => null };
+// Always injected: the real readers would hit the developer's own ~/.claude.json and
+// ~/.beezi/statusline-usage.json.
+const withAccount = { readClaudeAccount: () => ({ subscriptionType: 'max' }), hasStatuslineObservation: () => false };
+const noAccount = { readClaudeAccount: () => null, hasStatuslineObservation: () => false };
 
 test('resolveBilling — a readable account resolves subscription and emits the plan fields', () => {
   assert.deepEqual(resolveBilling(SUB_CONFIG, {}, withAccount), {
@@ -122,7 +125,7 @@ test('resolveBilling — no account and no env signal reports unknown, not a gue
 });
 
 test('resolveBilling — an unreadable ~/.claude.json degrades to unknown rather than throwing', () => {
-  const throwing = { readClaudeAccount: () => { throw new Error('EACCES'); } };
+  const throwing = { readClaudeAccount: () => { throw new Error('EACCES'); }, hasStatuslineObservation: () => false };
   assert.deepEqual(resolveBilling(SUB_CONFIG, {}, throwing), { billing_source: 'unknown' });
 });
 
@@ -214,7 +217,7 @@ test('syncBillingSource — realigns back to subscription with the plan still in
 
 test('recordApiKeyEvidence — stamps a machine with no billing.json at all', () => {
   const rec = recordApiKeyEvidence(null, new Date(1_000_000_000_000));
-  assert.equal(rec.version, 1);
+  assert.equal(rec.version, 2);
   assert.equal(rec.apiKeyEvidenceAt, new Date(1_000_000_000_000).toISOString());
 });
 
@@ -351,4 +354,84 @@ test('resolveBilling — an undeclared gateway machine reports unknown and nothi
     resolveBilling({ source: 'subscription', plan: 'team' }, { ANTHROPIC_BASE_URL: 'https://gw.corp.example' }, withAccount),
     { billing_source: 'unknown' },
   );
+});
+
+// ─── CLI-observed captures and statusline observations as subscription evidence ──
+
+const NOW = 1_000_000_000_000;
+const cliCapture = (over = {}) => ({
+  version: 2,
+  source: 'subscription',
+  subscriptionType: 'max',
+  rateLimitTier: null,
+  plan: 'max',
+  capturedAt: new Date(NOW - 60_000).toISOString(),
+  detectedVia: 'cli_status',
+  ...over,
+});
+
+test('isFreshCliCapture — a recent cli_status/merged capture with a real plan counts', () => {
+  assert.equal(isFreshCliCapture(cliCapture(), NOW), true);
+  assert.equal(isFreshCliCapture(cliCapture({ detectedVia: 'merged' }), NOW), true);
+});
+
+test('isFreshCliCapture — stale, self-reported, planless, or differently-sourced captures do not', () => {
+  assert.equal(isFreshCliCapture(null, NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ capturedAt: new Date(NOW - 8 * DAY).toISOString() }), NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ selfReported: true }), NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ plan: 'unknown' }), NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ plan: null }), NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ detectedVia: 'oauth_account' }), NOW), false);
+  assert.equal(isFreshCliCapture(cliCapture({ detectedVia: null }), NOW), false);
+  // Clock-skewed future stamp must not pin the source.
+  assert.equal(isFreshCliCapture(cliCapture({ capturedAt: new Date(NOW + DAY).toISOString() }), NOW), false);
+});
+
+test('resolveSource — a fresh CLI capture resolves subscription for a machine with no oauthAccount', () => {
+  assert.equal(resolveSource(cliCapture(), {}, { ...noAccount, now: NOW }), 'subscription');
+});
+
+test('resolveSource — a stale CLI capture is no longer evidence', () => {
+  const config = cliCapture({ capturedAt: new Date(NOW - 8 * DAY).toISOString() });
+  assert.equal(resolveSource(config, {}, { ...noAccount, now: NOW }), 'unknown');
+});
+
+test('resolveSource — a recent statusline observation resolves subscription', () => {
+  const deps = { readClaudeAccount: () => null, hasStatuslineObservation: () => true };
+  assert.equal(resolveSource(null, {}, deps), 'subscription');
+});
+
+test('resolveSource — a custom gateway is never answered by CLI captures or observations', () => {
+  const gatewayEnv2 = { ANTHROPIC_BASE_URL: 'https://gw.corp.example' };
+  assert.equal(resolveSource(cliCapture(), gatewayEnv2, { ...noAccount, now: NOW }), 'unknown');
+  const deps = { readClaudeAccount: () => null, hasStatuslineObservation: () => true };
+  assert.equal(resolveSource(null, gatewayEnv2, deps), 'unknown');
+});
+
+test('resolveSource — a throwing observation reader degrades silently', () => {
+  const deps = { readClaudeAccount: () => null, hasStatuslineObservation: () => { throw new Error('EACCES'); } };
+  assert.equal(resolveSource(null, {}, deps), 'unknown');
+});
+
+test('hasRecentStatuslineObservation — freshness window on lastRecordedAt', () => {
+  const read = (state) => ({ readJson: () => state });
+  assert.equal(hasRecentStatuslineObservation(NOW, read({ lastRecordedAt: new Date(NOW - 60_000).toISOString() })), true);
+  assert.equal(hasRecentStatuslineObservation(NOW, read({ lastRecordedAt: new Date(NOW - 8 * DAY).toISOString() })), false);
+  assert.equal(hasRecentStatuslineObservation(NOW, read({ lastRecordedAt: new Date(NOW + DAY).toISOString() })), false);
+  assert.equal(hasRecentStatuslineObservation(NOW, read({})), false);
+  assert.equal(hasRecentStatuslineObservation(NOW, read(null)), false);
+  assert.equal(hasRecentStatuslineObservation(NOW, { readJson: () => { throw new Error('bad'); } }), false);
+});
+
+test('v1 configs read back untouched — every reader tolerates the old schema', () => {
+  withTempHome(() => {
+    const v1 = { version: 1, source: 'subscription', plan: 'max_20x', capturedAt: new Date(NOW).toISOString() };
+    writeBillingConfig(v1);
+    assert.deepEqual(readBillingConfig(), v1);
+    assert.equal(isFreshCliCapture(readBillingConfig(), NOW), false, 'no detectedVia — not CLI evidence');
+    assert.deepEqual(
+      subscriptionReportFields('subscription', readBillingConfig()),
+      { subscription_type: null, rate_limit_tier: null, subscription_plan: 'max_20x' },
+    );
+  });
 });

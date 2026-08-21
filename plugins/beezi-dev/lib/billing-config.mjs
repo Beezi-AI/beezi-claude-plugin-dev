@@ -1,12 +1,17 @@
-import { billingConfigFile } from './paths.mjs';
+import { billingConfigFile, statuslineUsageFile } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import {
   BillingSource,
   detectBillingSource as detectBillingSourceFromEnv,
   resolveBillingSource,
   detectThirdPartyProvider,
+  hasCustomGateway,
 } from './billing.mjs';
 import { readClaudeAccount, readClaudeAuthSignals } from './claude-account.mjs';
+
+// v2 adds detectedVia (provenance of the plan tuple) and accountAnchor (identity for
+// account-switch detection). Readers stay v1-tolerant: both fields simply read as undefined.
+export const BILLING_CONFIG_VERSION = 2;
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000; // refresh plan info at least weekly
 
@@ -72,7 +77,32 @@ export function hasFreshApiKeyEvidence(config, now = Date.now()) {
 // the evidence has to survive even on a machine that never ran /beezi:login.
 export function recordApiKeyEvidence(config, now = new Date()) {
   if (hasFreshApiKeyEvidence(config, now.getTime())) return null;
-  return { version: 1, ...(config == null ? {} : config), apiKeyEvidenceAt: now.toISOString() };
+  return { version: BILLING_CONFIG_VERSION, ...(config == null ? {} : config), apiKeyEvidenceAt: now.toISOString() };
+}
+
+// A CLI-observed capture (claude auth status) is dated machine evidence, not user testimony. It
+// counts as subscription proof while fresh — the reconcile re-verifies it weekly — which is the
+// one scoped exception to "billing.json's own source is never an input": the file here carries a
+// dated OBSERVATION, and the freshness window keeps a switch from asserting itself forever.
+export function isFreshCliCapture(config, now = Date.now(), freshMs = STALE_MS) {
+  if (config == null || config.selfReported === true) return false;
+  if (config.detectedVia !== 'cli_status' && config.detectedVia !== 'merged') return false;
+  if (!config.plan || config.plan === 'unknown') return false;
+  const capturedAt = Date.parse(config.capturedAt == null ? '' : config.capturedAt);
+  if (Number.isNaN(capturedAt)) return false;
+  return now - capturedAt <= freshMs && capturedAt <= now;
+}
+
+// Official statusline docs: the `rate_limits` payload "appears only for Claude.ai subscribers
+// (Pro/Max)" — so a recent observation recorded by the status-line wrapper is positive
+// subscription-source evidence (source only, never a plan).
+export function hasRecentStatuslineObservation(now = Date.now(), deps = {}) {
+  const read = deps.readJson == null ? readJson : deps.readJson;
+  let state = null;
+  try { state = read(statuslineUsageFile()); } catch { state = null; }
+  const at = Date.parse(state == null || state.lastRecordedAt == null ? '' : state.lastRecordedAt);
+  if (Number.isNaN(at)) return false;
+  return now - at <= STALE_MS && at <= now;
 }
 
 // The single source-of-truth resolution, shared by the session-start hook and every checkpoint so
@@ -92,6 +122,18 @@ export function resolveSource(config, env = process.env, deps = {}) {
   try { signals = readSignals(); } catch { signals = null; }
   const fromDisk = resolveBillingSource(env, account, signals);
   if (fromDisk !== BillingSource.UNKNOWN) return fromDisk;
+  // Cheap file evidence for the surfaces that never write oauthAccount (VS Code extension GUI
+  // login, desktop SSO, setup-token): a fresh CLI-observed capture, then a recent status-line
+  // rate-limit observation. Both stay file-read-only — this runs on the checkpoint hot path.
+  // A custom gateway still resolves UNKNOWN: what the route bills stays the user's question, and
+  // this evidence must not answer it for them.
+  if (!hasCustomGateway(env)) {
+    if (isFreshCliCapture(config, now)) return BillingSource.SUBSCRIPTION;
+    const hasObservation = deps.hasStatuslineObservation == null
+      ? hasRecentStatuslineObservation
+      : deps.hasStatuslineObservation;
+    try { if (hasObservation(now)) return BillingSource.SUBSCRIPTION; } catch { /* best-effort */ }
+  }
   // Weakest evidence, deliberately last: what the user told /beezi:login. It is the only thing
   // that works on a machine exposing no observable signal at all, which is why the nudge points
   // there — but it is unverifiable testimony, so anything above overrules it, and an API-key

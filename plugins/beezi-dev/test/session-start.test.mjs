@@ -50,8 +50,14 @@ function baseInput(overrides = {}) {
 // that nudge can't bleed into their expected string.
 const quietBilling = {
   resolveSource: () => 'subscription',
-  readBillingConfig: () => ({ source: 'subscription', plan: 'pro', capturedAt: new Date().toISOString() }),
+  // anchorCheckedAt sits safely in the past: a stamp minted after the reconcile's own `now`
+  // would trip its future-stamp guard and read as heartbeat-due.
+  readBillingConfig: () => ({ source: 'subscription', plan: 'pro', capturedAt: new Date().toISOString(), anchorCheckedAt: new Date(Date.now() - 60_000).toISOString() }),
   isStale: () => false,
+  // The reconcile's re-capture layer must stay inert in unit tests: the real readers hit this
+  // machine's ~/.claude.json and spawn the actual `claude` CLI.
+  resolveClaudeSubscription: () => null,
+  readClaudeAccountAnchor: () => null,
 };
 
 // ─── test 1: no token ────────────────────────────────────────────────────────
@@ -369,6 +375,7 @@ test('14b. billing source changed since last session — billing.json is realign
     plan: 'max_5x',
     selfReported: true,
     capturedAt: new Date().toISOString(),
+    anchorCheckedAt: new Date(Date.now() - 60_000).toISOString(),
   };
   const writes = [];
 
@@ -403,7 +410,7 @@ test('14c. billing source unchanged — billing.json is left alone', async (t) =
     fetchImpl: fakeFetchWhoamiOkNoRepo(),
     gitImpl: () => { throw new Error('not a git repo'); },
     resolveSource: () => 'subscription',
-    readBillingConfig: () => ({ source: 'subscription', plan: 'pro', capturedAt: new Date().toISOString() }),
+    readBillingConfig: () => ({ source: 'subscription', plan: 'pro', capturedAt: new Date().toISOString(), anchorCheckedAt: new Date(Date.now() - 60_000).toISOString() }),
     writeBillingConfig: (cfg) => writes.push(cfg),
     isStale: () => false,
   });
@@ -439,7 +446,7 @@ test('15. records cwd + transcript_path in state; resume refreshes mapping witho
 
   await runSessionStart(
     baseInput({ session_id: 'sess-map', cwd: '/launch/dir', transcript_path: '/projects/enc/sess-map.jsonl' }),
-    { getAccessToken: async () => 'tok', fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
+    { getAccessToken: async () => 'tok', ...quietBilling, fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
   );
 
   let state = readStateFile(dir, 'sess-map');
@@ -453,7 +460,7 @@ test('15. records cwd + transcript_path in state; resume refreshes mapping witho
   fs.writeFileSync(path.join(stateDirPath, 'sess-map.json'), JSON.stringify({ ...state, cursor: 42 }), 'utf-8');
   await runSessionStart(
     baseInput({ session_id: 'sess-map', cwd: '/resume/dir', transcript_path: '/projects/enc/sess-map.jsonl' }),
-    { getAccessToken: async () => 'tok', fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
+    { getAccessToken: async () => 'tok', ...quietBilling, fetchImpl: fakeFetchOk({ connected: false }), gitImpl: fakeGit('https://host/repo.git') },
   );
 
   state = readStateFile(dir, 'sess-map');
@@ -476,16 +483,20 @@ test('14e. unknown billing source — nudges the user instead of silently guessi
     readBillingConfig: () => ({ source: 'subscription', plan: 'max_20x', selfReported: true }),
     writeBillingConfig: (cfg) => writes.push(cfg),
     isStale: () => true,
+    resolveClaudeSubscription: () => null,
+    readClaudeAccountAnchor: () => null,
   });
 
   assert.match(result ?? '', /unknown/);
   assert.match(result ?? '', /\/beezi:login/);
   // The stale subscription nudge must NOT also fire — the plan is no longer the problem.
   assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
-  // And the file is realigned off the subscription claim it can no longer support.
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].source, 'unknown');
-  assert.equal(writes[0].plan, 'max_20x', 'the plan stays dormant for a switch back');
+  // And the file is realigned off the subscription claim it can no longer support. (The reconcile
+  // may first stamp its heartbeat on the kept record; the realign write is the one that matters.)
+  assert.ok(writes.length >= 1);
+  const last = writes[writes.length - 1];
+  assert.equal(last.source, 'unknown');
+  assert.equal(last.plan, 'max_20x', 'the plan stays dormant for a switch back');
 });
 
 test('14f. a custom gateway names itself in the nudge — the user is asked what it bills', async (t) => {
@@ -505,6 +516,8 @@ test('14f. a custom gateway names itself in the nudge — the user is asked what
     resolveSource: () => 'unknown',
     readBillingConfig: () => null,
     writeBillingConfig: () => {},
+    resolveClaudeSubscription: () => null,
+    readClaudeAccountAnchor: () => null,
   });
 
   // The generic "cannot determine" wording leaves the user with nothing to act on; naming the
@@ -582,6 +595,8 @@ test('18. audit mode suppresses the billing nudges', async (t) => {
     isStale: () => true,
     fetchImpl: fetch.impl,
     gitImpl: fakeGit('https://host/repo.git'),
+    resolveClaudeSubscription: () => null,
+    readClaudeAccountAnchor: () => null,
   });
 
   assert.ok(!String(message).includes('/beezi:refresh'), 'stale-plan nudge is noise for a dark tenant');

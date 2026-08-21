@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildSnapshotPayload, maybePostUsageSnapshot } from '../lib/usage-snapshot-report.mjs';
+import { buildSnapshotPayload, maybePostUsageSnapshot, drainStatuslineSnapshots } from '../lib/usage-snapshot-report.mjs';
 
 const UTILIZATION = {
   fetchedAtMs: 1785953089424,
@@ -129,4 +129,59 @@ test('maybePostUsageSnapshot — no token / no utilization → skipped, nothing 
     assert.equal(res.reason, 'no-utilization');
     assert.equal(calls.length, 0);
   });
+});
+
+// ─── drainStatuslineSnapshots — plan fields on surfaces without oauthAccount ──
+
+const PENDING_ROW = {
+  fetched_at: '2026-08-21T09:00:00.000Z',
+  five_hour_pct: 10,
+  five_hour_resets_at: '2026-08-21T12:00:00.000Z',
+  seven_day_pct: 30,
+  seven_day_resets_at: '2026-08-25T00:00:00.000Z',
+};
+
+test('drain — a fresh CLI-observed billing.json supplies the plan when oauthAccount is unreadable', async () => {
+  const calls = [];
+  let cleared = 0;
+  const res = await drainStatuslineSnapshots('tok', {
+    fetchImpl: okFetch(calls),
+    readPendingStatuslineUsage: () => [PENDING_ROW],
+    clearPendingStatuslineUsage: (n) => { cleared = n; },
+    readClaudeAccount: () => null,
+    readBillingConfig: () => ({
+      version: 2,
+      source: 'subscription',
+      subscriptionType: 'max',
+      rateLimitTier: null,
+      plan: 'max',
+      capturedAt: new Date().toISOString(),
+      detectedVia: 'cli_status',
+    }),
+  });
+  assert.equal(res.posted, 1);
+  assert.equal(cleared, 1);
+  assert.equal(calls[0].body.subscription_type, 'max');
+  assert.equal(calls[0].body.subscription_plan, 'max');
+  assert.equal(calls[0].body.account_uuid, null, 'no identity fallback — null stays honest');
+});
+
+test('drain — a self-reported or stale billing.json does NOT donate plan fields', async () => {
+  const calls = [];
+  const res = await drainStatuslineSnapshots('tok', {
+    fetchImpl: okFetch(calls),
+    readPendingStatuslineUsage: () => [PENDING_ROW],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => null,
+    readBillingConfig: () => ({
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      selfReported: true,
+      capturedAt: new Date().toISOString(),
+    }),
+  });
+  assert.equal(res.posted, 1);
+  assert.equal(calls[0].body.subscription_plan, null);
+  assert.equal(calls[0].body.subscription_type, null);
 });
