@@ -89,6 +89,9 @@ function detectTimezone() {
 // options exist to redirect its side effects: `sink` (payloads to the caller instead of the disk
 // queue), `skipFlush` (no per-session HTTP), `collectSessionErrors` (buffer API-error reports
 // instead of POSTing them one at a time). All default to today's hook behavior.
+//
+// `startCursor` (/beezi:sync) replaces the whole locally-tracked read position with the server's
+// own coverage — see the three reads it overrides below.
 export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
   const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
@@ -175,6 +178,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const skipped = { noRemote: 0, emitFailed: 0, deltaFailed: false };
   const emptyResult = { enqueued: 0, flush: null, sessionErrors: collectedErrors, skipped };
   const state = loadState(session_id);
+  // The server is the authority on what actually landed: a local cursor can sit at EOF while the
+  // upload was lost, and a re-linked or fresh machine has no state at all. Null = trust local state.
+  const startCursor = options.startCursor == null ? null : options.startCursor;
+  const cursor = startCursor == null ? state.cursor : startCursor;
   // When the session file is unreadable (name resolves to null), keep the last name we sent
   // rather than overwriting the stored name with null.
   const sessionName =
@@ -183,7 +190,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     : null;
   let delta;
   try {
-    delta = computeDelta(transcript_path, state.cursor, { cwd, repoRootOf, branchAt: branchOf });
+    delta = computeDelta(transcript_path, cursor, { cwd, repoRootOf, branchAt: branchOf });
   } catch {
     skipped.deltaFailed = true;
     return emptyResult;
@@ -241,7 +248,11 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // may only bill the part no earlier segment claimed. Summing them instead multiplied a session's
   // reported time by roughly (1 + number of parallel agents). Persisted across checkpoints because
   // a subagent's lines can land in a later window than the main lines covering the same minutes.
-  let covered = mergeIntervals(Array.isArray(state.coveredIntervals) ? state.coveredIntervals : []);
+  // Under startCursor the emitted window is disjoint in line space from what the server holds, so its
+  // clock is time the server never billed. Seeding from local state would zero the duration on a
+  // re-send whose narrow rows then get superseded away — the time would vanish from the aggregate.
+  const seedIntervals = startCursor == null && Array.isArray(state.coveredIntervals) ? state.coveredIntervals : [];
+  let covered = mergeIntervals(seedIntervals);
   let coveredDirty = false;
 
   const enqueueSegments = (segs, segmentScope, extra = null, { includeContext = true } = {}) => {
@@ -302,7 +313,9 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // appear in the main transcript, so each agent file gets its own delta window with its
   // own cursor. Line numbers are per-file: scope the segmentId by agent id so they can't
   // collide with main-transcript segments (or each other) on the server upsert.
-  const agentCursors = state.agentCursors == null ? {} : state.agentCursors;
+  // Restarted from 0 under startCursor: there is no per-agent coverage to resume from, and a full
+  // re-send is the WIDE direction, which the server's containment supersede absorbs.
+  const agentCursors = startCursor != null || state.agentCursors == null ? {} : state.agentCursors;
   let agentCursorsDirty = false;
   // Each subagent's display name is the `description` of the Task block that spawned it; join via
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
