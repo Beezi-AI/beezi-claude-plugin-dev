@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, buildConfig, shouldKeepExisting } from '../lib/billing-capture.mjs';
+import { parseArgs, buildConfig, shouldKeepExisting, reconcileBillingConfig } from '../lib/billing-capture.mjs';
 
 test('parseArgs recognizes --from-claude as a boolean flag', () => {
   const a = parseArgs(['--from-claude', '--via', 'login']);
@@ -33,7 +33,7 @@ test('buildConfig — subscription env yields plan + raw fields', () => {
     new Date('2026-07-07T00:00:00.000Z'),
     { subscriptionType: 'pro' },
   );
-  assert.equal(cfg.version, 1);
+  assert.equal(cfg.version, 2);
   assert.equal(cfg.source, 'subscription');
   assert.equal(cfg.subscriptionType, 'pro');
   assert.equal(cfg.rateLimitTier, 'default_claude_max_5x');
@@ -80,7 +80,7 @@ test('buildConfig — each self-reported plan derives type, keeps tier null, mar
   ];
   for (const [plan, type] of cases) {
     const cfg = buildConfig({ plan, via: 'login-user' }, {}, new Date('2026-07-14T00:00:00.000Z'));
-    assert.equal(cfg.version, 1);
+    assert.equal(cfg.version, 2);
     assert.equal(cfg.source, 'subscription');
     assert.equal(cfg.plan, plan);
     assert.equal(cfg.subscriptionType, type);
@@ -238,4 +238,343 @@ test('shouldKeepExisting — keeps a declared gateway when the fresh capture lea
 test('shouldKeepExisting — a fresh capture that names a provider overwrites the declaration', () => {
   const fresh = { source: 'third_party', plan: null };
   assert.equal(shouldKeepExisting(fresh, { selfReported: true, source: 'third_party', plan: null }), false);
+});
+
+// ─── reconcileBillingConfig (session-start self-healing) ─────────────────────
+
+const T0 = new Date('2026-08-21T10:00:00.000Z');
+const iso = (msAgo) => new Date(T0.getTime() - msAgo).toISOString();
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Harness: in-memory config store + spy-able readers; realistic defaults everywhere.
+function harness({ existing = null, sub = null, fileAnchor = null, env = {}, stale = false } = {}) {
+  const writes = [];
+  let store = existing;
+  const subCalls = { count: 0 };
+  return {
+    writes,
+    subCalls,
+    deps: {
+      readBillingConfig: () => store,
+      writeBillingConfig: (cfg) => { writes.push(cfg); store = cfg; },
+      resolveSource: (cfg) => (cfg != null && cfg.plan && cfg.plan !== 'unknown' ? 'subscription' : 'unknown'),
+      isStale: () => stale,
+      resolveClaudeSubscription: () => { subCalls.count += 1; return sub; },
+      readClaudeAccountAnchor: () => fileAnchor,
+      env,
+      now: T0,
+    },
+  };
+}
+
+const CLI_SUB = Object.freeze({
+  accountUuid: null,
+  subscriptionType: 'max',
+  rateLimitTier: null,
+  expiresAt: null,
+  billingType: null,
+  seatTier: null,
+  organizationType: null,
+  detectedVia: 'cli_status',
+  anchor: { value: 'b@corp.co', source: 'email' },
+});
+
+test('reconcile — stuck machine heals: source unknown + a CLI answer → captured without user action', () => {
+  const h = harness({
+    existing: { version: 1, source: 'unknown', capturedAt: iso(30 * DAY_MS) },
+    sub: CLI_SUB,
+  });
+  const { config, source } = reconcileBillingConfig(h.deps);
+  assert.equal(h.subCalls.count, 1);
+  assert.equal(config.plan, 'max');
+  assert.equal(config.source, 'subscription');
+  assert.equal(config.capturedBy, 'session-start');
+  assert.equal(config.detectedVia, 'cli_status');
+  assert.equal(config.version, 2);
+  assert.deepEqual(
+    { value: config.accountAnchor.value, source: config.accountAnchor.source },
+    { value: 'b@corp.co', source: 'email' },
+  );
+  assert.equal(source, 'subscription');
+});
+
+test('reconcile — steady state spawns nothing and writes nothing', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max',
+      subscriptionType: 'max',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+  });
+  reconcileBillingConfig(h.deps);
+  assert.equal(h.subCalls.count, 0, 'no trigger — the CLI must not be spawned');
+  assert.equal(h.writes.length, 0);
+});
+
+test('reconcile — account switch: a different email anchor wipes the self-reported plan and re-captures', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'pro',
+      subscriptionType: 'pro',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS),
+      accountAnchor: { value: 'a@corp.co', source: 'email', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: CLI_SUB, // account B: max, b@corp.co
+  });
+  const { config } = reconcileBillingConfig(h.deps);
+  assert.equal(h.subCalls.count, 1, 'the stale heartbeat re-checks the anchor');
+  assert.equal(config.plan, 'max', 'account B observed plan replaces account A testimony');
+  assert.equal(config.selfReported, undefined);
+  assert.equal(config.accountAnchor.value, 'b@corp.co');
+});
+
+test('reconcile — account switch with a degraded capture still wipes: the unknown-nudge asks account B', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'uid-A', source: 'user_id', updatedAt: iso(DAY_MS) },
+    },
+    fileAnchor: { value: 'uid-B', source: 'user_id' }, // cheap precheck already sees the switch
+    sub: null, // and the CLI has no answer
+  });
+  const { config, source } = reconcileBillingConfig(h.deps);
+  assert.equal(config.plan, null, 'account A plan must not survive onto account B');
+  assert.equal(config.accountAnchor.value, 'uid-B');
+  assert.equal(source, 'unknown');
+});
+
+test('reconcile — cross-source anchor difference is inconclusive: self-reported plan survives, anchor adopted', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS),
+      accountAnchor: { value: 'uid-A', source: 'user_id', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: { ...CLI_SUB, subscriptionType: null, anchor: { value: 'b@corp.co', source: 'email' } },
+  });
+  const { config } = reconcileBillingConfig(h.deps);
+  assert.equal(config.plan, 'max_20x', 'testimony survives an inconclusive identity check');
+  assert.equal(config.selfReported, true);
+  assert.deepEqual(
+    { value: config.accountAnchor.value, source: config.accountAnchor.source },
+    { value: 'b@corp.co', source: 'email' },
+  );
+  assert.equal(config.anchorCheckedAt, T0.toISOString(), 'heartbeat stamped so the next check is a week out');
+});
+
+test('reconcile — v1 config grandfathering: first pass adopts an anchor; an observed plan beats testimony', () => {
+  const h = harness({
+    existing: {
+      version: 1,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+    },
+    sub: { ...CLI_SUB, subscriptionType: 'max', anchor: { value: 'b@corp.co', source: 'email' } },
+  });
+  const { config } = reconcileBillingConfig(h.deps);
+  // selfReported testimony beats an observed capture only when the capture learned nothing —
+  // here the CLI DID learn 'max', so shouldKeepExisting lets the observation through.
+  assert.equal(config.plan, 'max');
+  assert.equal(config.accountAnchor.value, 'b@corp.co');
+  assert.equal(config.version, 2);
+});
+
+test('reconcile — a degraded capture never overwrites a good record without a switch', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      capturedAt: iso(8 * DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'uid-A', source: 'user_id', updatedAt: iso(DAY_MS) },
+    },
+    stale: true, // stale plan nudge territory
+    sub: null, // but nothing readable right now
+    fileAnchor: { value: 'uid-A', source: 'user_id' },
+  });
+  const { config } = reconcileBillingConfig(h.deps);
+  assert.equal(config.plan, 'max_20x', 'nulls must not replace a real capture');
+  assert.equal(config.capturedAt, iso(8 * DAY_MS), 'capturedAt untouched — the plan was not re-read');
+});
+
+test('reconcile — no config and no signal: nothing invented, source unknown', () => {
+  const h = harness({});
+  const { config, source } = reconcileBillingConfig(h.deps);
+  assert.equal(config, null);
+  assert.equal(source, 'unknown');
+  assert.equal(h.subCalls.count, 1, 'a machine with no record keeps trying');
+});
+
+test('reconcile — every dependency throwing still returns and never throws', () => {
+  const boom = () => { throw new Error('boom'); };
+  const r = reconcileBillingConfig({
+    readBillingConfig: boom,
+    writeBillingConfig: boom,
+    resolveSource: boom,
+    isStale: boom,
+    resolveClaudeSubscription: boom,
+    readClaudeAccountAnchor: boom,
+    now: T0,
+  });
+  assert.equal(r.config, null);
+  assert.equal(r.source, 'unknown');
+});
+
+// ─── forced mode (/beezi:login and /beezi:refresh go through the same reconcile) ──
+
+test('reconcile force — captures even in a steady state the automatic path would skip', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'pro',
+      subscriptionType: 'pro',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    sub: CLI_SUB,
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(h.subCalls.count, 1, 'the user asked — always re-read');
+  assert.equal(outcome, 'captured');
+  assert.equal(config.plan, 'max');
+  assert.equal(config.capturedBy, 'refresh');
+});
+
+test('reconcile force — no signal at all keeps the record and reports no-signal', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    sub: null,
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(outcome, 'no-signal');
+  assert.equal(config.plan, 'max_20x', 'nothing readable — the record survives');
+  assert.equal(config.anchorCheckedAt, T0.toISOString(), 'heartbeat still stamped');
+});
+
+test('reconcile force — an unresolvable tier keeps a protected self-reported plan (outcome kept)', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    // Tuple that normalizes to 'unknown': shouldKeepExisting must protect the testimony.
+    sub: { ...CLI_SUB, subscriptionType: 'mystery_tier' },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(outcome, 'kept');
+  assert.equal(config.plan, 'max_20x');
+  assert.equal(config.selfReported, true);
+});
+
+test('reconcile force — historical refresh contract: plan=unknown still overwrites an unprotected record', () => {
+  // This is what routes /beezi:login to its tier question (Step 3c matches `plan=unknown`).
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max',
+      subscriptionType: 'max',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    sub: { ...CLI_SUB, subscriptionType: 'mystery_tier' },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(outcome, 'captured');
+  assert.equal(config.plan, 'unknown');
+});
+
+test('reconcile force — account switch reports switched and drops the testimony', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'pro',
+      subscriptionType: 'pro',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'a@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    sub: CLI_SUB, // b@corp.co
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'login' });
+  assert.equal(outcome, 'switched');
+  assert.equal(config.plan, 'max');
+  assert.equal(config.selfReported, undefined);
+  assert.equal(config.accountAnchor.value, 'b@corp.co');
+});
+
+test('reconcile — automatic mode still refuses the plan=unknown overwrite force allows', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max',
+      subscriptionType: 'max',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS), // heartbeat trigger
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: { ...CLI_SUB, subscriptionType: 'mystery_tier' },
+  });
+  const { config } = reconcileBillingConfig(h.deps);
+  assert.equal(config.plan, 'max', 'a session-start pass must not degrade a good record');
+});
+
+test('reconcile — buildConfig stamps detectedVia and the anchor on a CLI capture', () => {
+  const cfg = buildConfig(
+    { subscriptionType: 'max', rateLimitTier: null, expiresAt: null, via: 'session-start' },
+    {},
+    T0,
+    CLI_SUB,
+    CLI_SUB.anchor,
+  );
+  assert.equal(cfg.version, 2);
+  assert.equal(cfg.detectedVia, 'cli_status');
+  assert.deepEqual(cfg.accountAnchor, { value: 'b@corp.co', source: 'email', updatedAt: T0.toISOString() });
+  assert.equal(cfg.plan, 'max');
+  assert.equal(JSON.stringify(cfg).includes('sk-ant'), false);
 });

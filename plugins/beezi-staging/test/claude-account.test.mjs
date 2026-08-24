@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { readClaudeAccount, readClaudeAuthSignals } from '../lib/claude-account.mjs';
+import { readClaudeAccount, readClaudeAuthSignals, readClaudeAccountAnchor } from '../lib/claude-account.mjs';
 
 const withAccount = (oauthAccount) => ({
   exists: () => true,
@@ -136,4 +136,27 @@ test('readClaudeAuthSignals — unreadable/malformed files yield no signals rath
     readClaudeAuthSignals(fakeFs({})),
     { hasManagedApiKey: false, hasApiKeyHelper: false },
   );
+});
+
+// ─── readClaudeAccountAnchor ─────────────────────────────────────────────────
+
+test('readClaudeAccountAnchor — prefers oauthAccount.accountUuid over userID', () => {
+  const a = readClaudeAccountAnchor(fakeFs({
+    [AT('.claude.json')]: JSON.stringify({ oauthAccount: { accountUuid: 'acc-1' }, userID: 'uid-9' }),
+  }));
+  assert.deepEqual(a, { value: 'acc-1', source: 'account_uuid' });
+});
+
+test('readClaudeAccountAnchor — falls back to the top-level userID (modern surfaces without oauthAccount)', () => {
+  const a = readClaudeAccountAnchor(fakeFs({
+    [AT('.claude.json')]: JSON.stringify({ numStartups: 3, userID: 'uid-9' }),
+  }));
+  assert.deepEqual(a, { value: 'uid-9', source: 'user_id' });
+});
+
+test('readClaudeAccountAnchor — null when neither identity exists or values are non-strings', () => {
+  assert.equal(readClaudeAccountAnchor(fakeFs({ [AT('.claude.json')]: JSON.stringify({ numStartups: 3 }) })), null);
+  assert.equal(readClaudeAccountAnchor(fakeFs({ [AT('.claude.json')]: JSON.stringify({ userID: 42 }) })), null);
+  assert.equal(readClaudeAccountAnchor(fakeFs({ [AT('.claude.json')]: '{not json' })), null);
+  assert.equal(readClaudeAccountAnchor(fakeFs({})), null);
 });

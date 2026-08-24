@@ -31,9 +31,9 @@ import {
   readBillingConfig as _readBillingConfig,
   writeBillingConfig as _writeBillingConfig,
   resolveSource as _resolveSource,
-  syncBillingSource,
   isStale as _isStale,
 } from './billing-config.mjs';
+import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
 // Also records where the session lives (cwd + transcript path) so /beezi:track can find
@@ -176,20 +176,26 @@ export async function runSessionStart(input, deps = {}) {
     if (dirty || removed > 0) saveRepoMap(map);
   } catch { /* best-effort */ }
 
-  // The user may have switched auth method since the last session (exporting an API key over a
-  // subscription login, or back). Env is authoritative, so realign billing.json to it before the
-  // staleness check reads it — otherwise the stored source stays wrong until the next
-  // /beezi:login or /beezi:refresh. Best-effort: a disk failure must not break session start.
+  // Reconcile billing.json against reality: realign the source to the env (the user may have
+  // switched auth method since the last session), and re-capture the plan when the record is
+  // missing, stuck on `unknown`, stale, or belongs to a different Claude account. All the logic
+  // lives in reconcileBillingConfig; best-effort — a failure must not break session start.
+  const reconcileBilling = deps.reconcileBilling == null
+    ? (() => _reconcileBillingConfig({
+      readBillingConfig,
+      writeBillingConfig,
+      resolveSource,
+      isStale,
+      resolveClaudeSubscription: deps.resolveClaudeSubscription,
+      readClaudeAccountAnchor: deps.readClaudeAccountAnchor,
+    }))
+    : deps.reconcileBilling;
   let billingConfig = null;
   let billingSource = BillingSource.UNKNOWN;
   try {
-    billingConfig = readBillingConfig();
-    billingSource = resolveSource(billingConfig);
-    const synced = syncBillingSource(billingConfig, billingSource);
-    if (synced) {
-      writeBillingConfig(synced);
-      billingConfig = synced;
-    }
+    const reconciled = reconcileBilling();
+    billingConfig = reconciled.config;
+    billingSource = reconciled.source;
   } catch { /* best-effort */ }
 
   let message = systemMessage;

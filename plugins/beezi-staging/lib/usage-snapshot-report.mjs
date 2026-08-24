@@ -5,6 +5,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { usageSnapshotStateFile } from './paths.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
+import { readBillingConfig as _readBillingConfig, isFreshCliCapture } from './billing-config.mjs';
 import { normalizePlan } from './billing.mjs';
 import {
   readPendingStatuslineUsage as _readPendingStatuslineUsage,
@@ -67,6 +68,22 @@ export async function drainStatuslineSnapshots(token, deps = {}) {
 
   let account = null;
   try { account = readAccount(); } catch { account = null; }
+  // Surfaces that never write oauthAccount (VS Code extension login, setup-token) leave the live
+  // read null; a fresh CLI-observed capture in billing.json then supplies the plan fields. This
+  // path must not spawn the CLI itself — the reconcile keeps that capture fresh. account_uuid has
+  // no such fallback: when unknown it stays honestly null.
+  if (account == null) {
+    const readBilling = deps.readBillingConfig == null ? _readBillingConfig : deps.readBillingConfig;
+    let billing = null;
+    try { billing = readBilling(); } catch { billing = null; }
+    if (isFreshCliCapture(billing)) {
+      account = {
+        accountUuid: null,
+        subscriptionType: billing.subscriptionType,
+        rateLimitTier: billing.rateLimitTier,
+      };
+    }
+  }
   const identity = {
     account_uuid: account == null || account.accountUuid == null ? null : account.accountUuid,
     subscription_type: account == null || account.subscriptionType == null ? null : account.subscriptionType,

@@ -67,6 +67,37 @@ export function readClaudeAuthSignals(deps = {}) {
   return { hasManagedApiKey, hasApiKeyHelper };
 }
 
+// File-derived account identity for change detection, best source first: oauthAccount's
+// accountUuid (pseudonymous, but can survive an account switch stale — see the CLI email anchor
+// in claude-auth-status.mjs, which outranks this), then the top-level userID (an opaque hash
+// Claude Code writes on every surface, including logins that never populate oauthAccount).
+// Returns { value, source } or null. Non-secret either way.
+export function readClaudeAccountAnchor(deps = {}) {
+  const readFile = deps.readFile == null ? ((p) => fs.readFileSync(p, 'utf-8')) : deps.readFile;
+  const exists = deps.exists == null ? ((p) => fs.existsSync(p)) : deps.exists;
+  const env = deps.env == null ? process.env : deps.env;
+  const homedir = deps.homedir == null ? os.homedir() : deps.homedir;
+
+  for (const p of configCandidates(env, homedir)) {
+    if (!exists(p)) continue;
+    let cfg;
+    try {
+      cfg = JSON.parse(readFile(p));
+    } catch {
+      continue;
+    }
+    if (cfg == null || typeof cfg !== 'object') continue;
+    const account = cfg.oauthAccount;
+    if (account != null && typeof account === 'object' && typeof account.accountUuid === 'string' && account.accountUuid) {
+      return { value: account.accountUuid, source: 'account_uuid' };
+    }
+    if (typeof cfg.userID === 'string' && cfg.userID) {
+      return { value: cfg.userID, source: 'user_id' };
+    }
+  }
+  return null;
+}
+
 // Read ONLY the non-secret oauthAccount subscription fields. Never opens `.credentials.json`,
 // never returns or exposes access/refresh tokens. Returns null when no account info exists.
 export function readClaudeAccount(deps = {}) {

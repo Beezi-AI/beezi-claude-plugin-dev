@@ -23,6 +23,10 @@ export const ENDPOINTS = Object.freeze({
   // server's upsert keys, and /complete seals the one-time pull.
   sessionsBackfill: "/sessions/backfill",
   sessionsBackfillComplete: "/sessions/backfill/complete",
+  // Repeatable history sync (/beezi:sync). /coverage reports how far each session already reaches,
+  // and the client resumes from there so a re-send is never narrower than what is stored.
+  sessionsSync: "/sessions/sync",
+  sessionsCoverage: "/sessions/coverage",
   sessionErrors: "/sessions/errors",
   sessionsTimeline: "/sessions/timeline",
   reposStatus: "/repos/status",

@@ -49,8 +49,9 @@ linked). Run EXACTLY this one command, unmodified:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --from-claude --via login`
 
-It reads only the non-secret account info from `~/.claude.json`. Report its
-one-line summary. If it could not resolve the plan, continue to Step 3.
+It asks Claude Code itself for the non-secret subscription info (`claude auth
+status`) and reads the non-secret account metadata from `~/.claude.json` — never
+any token, never the credentials file. Report its one-line summary. If it could not resolve the plan, continue to Step 3.
 
 Step 3 — ask the user how this machine pays. Two questions live here; which
 ones you ask depends on Step 2's output.

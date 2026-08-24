@@ -8,9 +8,10 @@ do not read or inspect any files yourself:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs --from-claude --via refresh`
 
-The script reads only the non-secret account info from `~/.claude.json` (never any
-token, never the credentials file) and stores the plan. Report its one-line output
-verbatim. If it says nothing was captured, tell the user their Claude subscription
+The script asks Claude Code itself for the non-secret subscription info
+(`claude auth status`) and reads the non-secret account metadata from
+`~/.claude.json` (never any token, never the credentials file), then stores the
+plan. Report its one-line output verbatim. If it says nothing was captured, tell the user their Claude subscription
 info was not found. If the output says the self-reported plan was kept, report
 that verbatim to the user. If the output contains `gateway=custom`, tell the user
 this machine goes through a custom API endpoint, so only they can say what it
