@@ -205,6 +205,302 @@ test('plan mode with no ExitPlanMode yields a lone plan_start', (t) => {
   assert.deepEqual(tl.plan_events, [{ type: 'plan_start', at: ts(15) }]);
 });
 
+// --- Skill-based planning (plan/spec/brainstorm skill → last plan-.md write) ---
+
+const skillLine = (skillName, tSec) => ({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', id: `s${tSec}`, name: 'Skill', input: { skill: skillName } }] },
+  timestamp: ts(tSec),
+});
+const writeLine = (filePath, tSec) => ({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', id: `w${tSec}`, name: 'Write', input: { file_path: filePath, content: 'x' } }] },
+  timestamp: ts(tSec),
+});
+const prompt = (tSec) => ({ type: 'user', message: { content: 'do X' }, timestamp: ts(tSec) });
+
+function timelineOf(t, name, lines) {
+  const dir = makeTmpDir(t);
+  const transcriptPath = path.join(dir, `${name}.jsonl`);
+  writeJsonl(transcriptPath, lines);
+  return computeSessionTimeline(transcriptPath, name);
+}
+
+test('a planning skill plus a plan .md write emits plan_start/plan_ready', (t) => {
+  const tl = timelineOf(t, 'skill-plan', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/docs/design.md', 30),
+    writeLine('/r/docs/design.md', 50),
+    // Implementation starts — the cycle closes at the LAST plan write before it...
+    writeLine('/r/src/app.js', 70),
+    // ...and a plan edit after the close (checkbox ticking) is ignored.
+    writeLine('/r/docs/design.md', 90),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(50) },
+  ]);
+});
+
+test('a plan .md write with no preceding planning skill is ignored', (t) => {
+  const tl = timelineOf(t, 'no-entry', [
+    prompt(0),
+    writeLine('/r/docs/design.md', 30),
+    writeLine('/r/src/app.js', 60),
+  ]);
+  assert.deepEqual(tl.plan_events, []);
+});
+
+test('only .md files end a cycle — other extensions never trigger', (t) => {
+  const tl = timelineOf(t, 'not-md', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/design.txt', 20),
+    writeLine('/r/plan.mdx', 30),
+    writeLine('/r/spec.json', 40),
+    writeLine('/r/src/app.js', 50),
+  ]);
+  assert.deepEqual(tl.plan_events, [{ type: 'plan_start', at: ts(10) }]);
+  assert.ok(!tl.periods.some((p) => p.state === 'planning'), 'a lone plan_start paints no band');
+});
+
+test('executing-plans is not an entry point', (t) => {
+  const tl = timelineOf(t, 'executing', [
+    prompt(0),
+    skillLine('superpowers:executing-plans', 10),
+    writeLine('/r/docs/plan-v2.md', 30),
+    writeLine('/r/src/app.js', 50),
+  ]);
+  assert.deepEqual(tl.plan_events, []);
+});
+
+test('an execution skill closes an open cycle', (t) => {
+  const tl = timelineOf(t, 'exec-close', [
+    prompt(0),
+    skillLine('superpowers:writing-plans', 10),
+    writeLine('/r/docs/design.md', 20),
+    // Execution begins even though its code edits may live in subagent transcripts.
+    skillLine('superpowers:executing-plans', 30),
+    writeLine('/r/docs/design.md', 40),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+  ]);
+});
+
+test('built-in and skill plan cycles coexist in one session, ordered', (t) => {
+  const tl = timelineOf(t, 'coexist', [
+    prompt(0),
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(10) },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(20) },
+    { type: 'permission-mode', permissionMode: 'default' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'b' }] }, timestamp: ts(30) },
+    skillLine('superpowers:writing-plans', 40),
+    writeLine('/r/docs/plan.md', 60),
+    writeLine('/r/src/app.js', 80),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+    { type: 'plan_start', at: ts(40) },
+    { type: 'plan_ready', at: ts(60) },
+  ]);
+});
+
+test('a planning skill invoked inside built-in plan mode does not double-emit', (t) => {
+  const tl = timelineOf(t, 'suppressed', [
+    prompt(0),
+    { type: 'permission-mode', permissionMode: 'plan' },
+    // The skill line is the next timestamped line, so the built-in plan_start anchors to it —
+    // exactly the collision that suppression exists for.
+    skillLine('superpowers:writing-plans', 20),
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(40) },
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(20) },
+    { type: 'plan_ready', at: ts(40) },
+  ]);
+});
+
+test('built-in plan mode starting closes an open skill cycle', (t) => {
+  const tl = timelineOf(t, 'builtin-closes', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/docs/design.md', 20),
+    { type: 'permission-mode', permissionMode: 'plan' },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(30) },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: {} }] }, timestamp: ts(40) },
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+    { type: 'plan_start', at: ts(30) },
+    { type: 'plan_ready', at: ts(40) },
+  ]);
+});
+
+test('a planning skill with no plan document yields a lone plan_start and no band', (t) => {
+  const tl = timelineOf(t, 'lone', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(30) },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'b' }] }, timestamp: ts(60) },
+  ]);
+  assert.deepEqual(tl.plan_events, [{ type: 'plan_start', at: ts(10) }]);
+  assert.ok(!tl.periods.some((p) => p.state === 'planning'));
+});
+
+test('two skill-plan cycles emit one ordered pair each', (t) => {
+  const tl = timelineOf(t, 'two-cycles', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/docs/x-design.md', 20),
+    writeLine('/r/src/app.js', 30),
+    skillLine('superpowers:writing-plans', 40),
+    writeLine('/r/docs/x-plan.md', 50),
+    writeLine('/r/src/app.js', 60),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+    { type: 'plan_start', at: ts(40) },
+    { type: 'plan_ready', at: ts(50) },
+  ]);
+});
+
+test('multiple plan documents in one cycle — plan_ready is the last write across any of them', (t) => {
+  const tl = timelineOf(t, 'multi-doc', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/docs/design.md', 20),
+    writeLine('/r/docs/plan.md', 40),
+    writeLine('/r/src/app.js', 60),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(40) },
+  ]);
+});
+
+test('a date-slug file directly in an exact plans/ folder matches', (t) => {
+  const tl = timelineOf(t, 'plans-folder', [
+    prompt(0),
+    skillLine('superpowers:writing-plans', 10),
+    // writing-plans output: no keyword in the basename, folder named exactly 'plans'.
+    writeLine('/r/docs/superpowers/plans/2026-08-17-fast-connect.md', 30),
+    writeLine('/r/src/app.js', 50),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(30) },
+  ]);
+});
+
+test('a keyword-substring folder name does not match — exact folder names only', (t) => {
+  const tl = timelineOf(t, 'sdd-dir', [
+    prompt(0),
+    skillLine('superpowers:writing-plans', 10),
+    writeLine('/r/docs/superpowers/plans/x.md', 20),
+    // sdd execution artifact: folder CONTAINS 'design' but is not exactly a plan folder — it is
+    // an "other" edit, so it must not extend the cycle, and must CLOSE it instead.
+    writeLine('/r/.superpowers/sdd/2026-08-17-fast-connect-design/progress.md', 40),
+    writeLine('/r/.superpowers/sdd/2026-08-17-fast-connect-design/task-1-report.md', 60),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(20) },
+  ]);
+});
+
+test('a .claude housekeeping write is neutral — neither plan doc nor cycle close', (t) => {
+  const tl = timelineOf(t, 'housekeeping', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    writeLine('/r/docs/specs/api-design.md', 20),
+    // Memory save mid-brainstorm — must not close the cycle (a real session lost 15 minutes of
+    // design authoring to exactly this write).
+    writeLine('C:\\Users\\x\\.claude\\projects\\p\\memory\\MEMORY.md', 30),
+    writeLine('/r/docs/specs/api-design.md', 50),
+    writeLine('/r/src/app.js', 70),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(50) },
+  ]);
+});
+
+test('the skill-plan window paints a planning band; work after the close is working', (t) => {
+  const tl = timelineOf(t, 'band', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(30) },
+    writeLine('/r/docs/design.md', 50),
+    writeLine('/r/src/app.js', 70),
+  ]);
+  const planning = tl.periods.find((p) => p.state === 'planning');
+  // The lead-up anchor at ts(10) already sits inside the [10,50] interval, so the band opens at
+  // the prompt — matching how built-in plan mode dates the interval ENDING at a plan anchor.
+  assert.deepEqual([planning.started_at, planning.ended_at], [ts(0), ts(50)]);
+  const working = tl.periods.find((p) => p.state === 'working');
+  assert.deepEqual([working.started_at, working.ended_at], [ts(50), ts(70)]);
+});
+
+test('a real user prompt inside a skill-plan window still reads waiting_user', (t) => {
+  const tl = timelineOf(t, 'precedence', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] }, timestamp: ts(30) },
+    prompt(60),
+    writeLine('/r/docs/design.md', 90),
+    writeLine('/r/src/app.js', 120),
+  ]);
+  const waits = tl.periods.filter((p) => p.state === 'waiting_user');
+  assert.equal(waits.length, 1);
+  assert.deepEqual([waits[0].started_at, waits[0].ended_at], [ts(30), ts(60)]);
+  assert.ok(tl.periods.some((p) => p.state === 'planning'));
+});
+
+test('Windows backslash paths are matched by basename', (t) => {
+  const tl = timelineOf(t, 'backslash', [
+    prompt(0),
+    skillLine('superpowers:brainstorming', 10),
+    // Both match: notes.md sits directly in an exact 'plans' folder, api-design.md by basename;
+    // plan_ready is the LAST of them, and neither reads as an implementation edit.
+    writeLine('C:\\repo\\docs\\plans\\notes.md', 20),
+    writeLine('C:\\repo\\docs\\plans\\api-design.md', 40),
+    writeLine('C:\\repo\\src\\a.js', 60),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(40) },
+  ]);
+});
+
+test('skill ids and filenames match case-insensitively', (t) => {
+  const tl = timelineOf(t, 'case', [
+    prompt(0),
+    skillLine('Superpowers:Brainstorming', 10),
+    writeLine('/r/DESIGN.MD', 30),
+    writeLine('/r/src/app.js', 50),
+  ]);
+  assert.deepEqual(tl.plan_events, [
+    { type: 'plan_start', at: ts(10) },
+    { type: 'plan_ready', at: ts(30) },
+  ]);
+});
+
+test('a non-planning skill is not an entry point — design is a document keyword only', (t) => {
+  const tl = timelineOf(t, 'non-plan-skill', [
+    prompt(0),
+    skillLine('frontend-design:frontend-design', 10),
+    writeLine('/r/docs/design.md', 30),
+  ]);
+  assert.deepEqual(tl.plan_events, []);
+});
+
 test('the pre-prompt lead-in is dropped — the session starts when the human first speaks', (t) => {
   const dir = makeTmpDir(t);
   const transcriptPath = path.join(dir, 'clear.jsonl');

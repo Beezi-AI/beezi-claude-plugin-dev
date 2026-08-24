@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import { listSubagentTranscripts } from './subagents.mjs';
 import { IDLE_GAP_SEC, isTimingAnchor } from './delta.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
@@ -109,6 +110,116 @@ function isTaskNotification(line) {
 //                     out of `planning` — that is the point, not a side effect.
 const USER_DECISION_TOOLS = { AskUserQuestion: true, ExitPlanMode: true };
 
+// Skills whose job is to PRODUCE a plan. Matched on the segment after the last ':', tokenized on
+// non-alphanumerics, by token PREFIX — 'plans' matches 'plan', 'brainstorming' matches
+// 'brainstorm', but 'inspect' does NOT match 'spec' and 'explanation' does NOT match 'plan',
+// which a raw substring test gets wrong both times. Last segment only, so a plugin namespaced
+// 'planner' cannot make every one of its skills a planning entry.
+const PLAN_SKILL_HINTS = ['plan', 'spec', 'brainstorm'];
+// ...and skills that CONSUME one. 'superpowers:executing-plans' matches 'plan' on every rule
+// above and is the exact opposite of planning: it edits the plan document during implementation
+// (ticking checkboxes), so reading it as an entry point drags plan_ready to the end of the
+// session. Matched the same way, and it also CLOSES an open cycle — execution has begun even
+// when its code edits happen in subagent transcripts this walk never sees.
+const PLAN_SKILL_EXCLUSIONS = ['execut', 'implement'];
+
+// A produced plan document: '.md' exactly, keyword in the BASENAME — or sitting directly in a
+// folder whose name is EXACTLY plan(s)/spec(s)/design(s): superpowers' writing-plans emits
+// docs/superpowers/plans/<date>-<slug>.md with no keyword in the basename at all. Exact folder
+// names only, never substring — sdd execution dirs (.superpowers/sdd/<date>-<slug>-design/)
+// hold progress.md/task-N-report.md artifacts whose code edits happen in subagent transcripts,
+// so a substring dir match would keep the cycle open forever.
+const PLAN_DOC_HINTS = ['design', 'spec', 'plan'];
+const PLAN_DIR_NAMES = { plan: true, plans: true, spec: true, specs: true, design: true, designs: true };
+const PLAN_DOC_EXT = '.md';
+
+// Mirrors code-changes.mjs's EDIT_TOOLS (not imported: that module doesn't export it, and this
+// file already mirrors rather than shares the block-scan idiom — see hasExitPlanMode).
+const EDIT_TOOLS = { Edit: true, MultiEdit: true, Write: true, NotebookEdit: true };
+
+// Forward slashes, so a Windows path parses with path.posix. Mirrors repo-timeline.mjs's norm().
+// Bare path.basename on a POSIX runtime returns the WHOLE 'C:\...\plans\foo.md' string, which
+// would silently turn basename matching into directory matching.
+function normPath(p) {
+  return typeof p === 'string' ? p.replace(/\\/g, '/') : p;
+}
+
+function leafTokens(skillId) {
+  if (typeof skillId !== 'string' || skillId === '') return [];
+  const i = skillId.lastIndexOf(':');
+  const leaf = i === -1 ? skillId : skillId.slice(i + 1);
+  return leaf.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== '');
+}
+
+function anyTokenStartsWith(tokens, hints) {
+  for (const t of tokens) {
+    for (const h of hints) {
+      if (t.indexOf(h) === 0) return true;
+    }
+  }
+  return false;
+}
+
+function isPlanningSkill(skillId) {
+  const tokens = leafTokens(skillId);
+  if (tokens.length === 0) return false;
+  if (anyTokenStartsWith(tokens, PLAN_SKILL_EXCLUSIONS)) return false;
+  return anyTokenStartsWith(tokens, PLAN_SKILL_HINTS);
+}
+
+function isExcludedPlanSkill(skillId) {
+  return anyTokenStartsWith(leafTokens(skillId), PLAN_SKILL_EXCLUSIONS);
+}
+
+function isPlanDocPath(filePath) {
+  if (typeof filePath !== 'string' || filePath === '') return false;
+  const p = normPath(filePath);
+  const base = path.posix.basename(p).toLowerCase();
+  if (path.posix.extname(base) !== PLAN_DOC_EXT) return false;
+  for (const h of PLAN_DOC_HINTS) {
+    if (base.indexOf(h) !== -1) return true;
+  }
+  const parent = path.posix.basename(path.posix.dirname(p)).toLowerCase();
+  return PLAN_DIR_NAMES[parent] === true;
+}
+
+// Agent housekeeping under a .claude directory — memory saves, scratchpads, settings. Neither a
+// plan document nor implementation starting: a MEMORY.md save mid-brainstorm closed a real
+// cycle 15 minutes before the design doc was finished. Neutral — neither advances nor closes.
+function isHousekeepingPath(filePath) {
+  return normPath(filePath).toLowerCase().indexOf('/.claude/') !== -1;
+}
+
+// Does this line carry a Skill tool_use matching `match`? Skill tool_use lines are timestamped
+// assistant lines, so unlike the permission-mode change line no forward anchoring is needed.
+function hasSkillMatching(line, match) {
+  const message = line == null ? undefined : line.message;
+  const content = message == null ? undefined : message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (b) => b != null && b.type === 'tool_use' && b.name === 'Skill'
+      && b.input != null && match(b.input.skill),
+  );
+}
+
+// { plan, other }: did this line write a matching plan document, and/or edit anything else?
+// A message with parallel tool calls can do both.
+function fileEditsOn(line) {
+  const out = { plan: false, other: false };
+  const message = line == null ? undefined : line.message;
+  const content = message == null ? undefined : message.content;
+  if (!Array.isArray(content)) return out;
+  for (const b of content) {
+    if (b == null || b.type !== 'tool_use' || EDIT_TOOLS[b.name] !== true) continue;
+    const input = b.input == null ? {} : b.input;
+    const fp = input.file_path == null ? input.notebook_path : input.file_path;
+    if (typeof fp !== 'string' || fp === '' || isHousekeepingPath(fp)) continue;
+    if (isPlanDocPath(fp)) out.plan = true;
+    else out.other = true;
+  }
+  return out;
+}
+
 // The tool_result Claude Code writes when the human DECLINES a permission prompt. Any tool can
 // come back this way, so it is matched on the marker text rather than a tool name.
 //
@@ -169,7 +280,16 @@ function isRealUserPrompt(line) {
 // change lines and the permissionMode field on user lines; assistant work lines inherit the last
 // value). Classify each interval between consecutive timestamped anchors, then merge adjacent
 // same-state runs into periods.
-function buildPeriods(lines) {
+function buildPeriods(lines, skillPlanIntervals) {
+  // A skill-plan window (buildSkillPlanCycles) classifies as `planning` too — same rank as the
+  // plan permission mode, so everything above it in the chain still outranks it.
+  const inSkillPlan = (ms) => {
+    if (!Array.isArray(skillPlanIntervals)) return false;
+    for (const iv of skillPlanIntervals) {
+      if (ms >= iv.startMs && ms <= iv.endMs) return true;
+    }
+    return false;
+  };
   let currentMode = 'default';
   const toolUseNames = buildToolUseNames(lines);
   const anchors = [];
@@ -219,7 +339,7 @@ function buildPeriods(lines) {
     // The `>=` gap fallback matches delta.mjs, which accrues a gap only while it is strictly under
     // the threshold. With `>` an exactly-300s gap read as WORKING here but was dropped there.
     else if (cur.ts - prev.ts >= IDLE_GAP_SEC * 1000) state = STATE.IDLE;
-    else state = isPlanMode(cur.mode) ? STATE.PLANNING : STATE.WORKING;
+    else state = (isPlanMode(cur.mode) || inSkillPlan(cur.ts)) ? STATE.PLANNING : STATE.WORKING;
 
     const last = merged[merged.length - 1];
     if (last && last.state === state) last.endMs = cur.ts;
@@ -277,6 +397,65 @@ function buildPlanEvents(lines) {
   return events;
 }
 
+// Skill-based planning, complementing the built-in permissionMode/ExitPlanMode cycle above —
+// planning done via skills (superpowers:brainstorming, superpowers:writing-plans, spec skills)
+// never touches the plan permission mode, so it used to chart as uninterrupted `working`:
+//   plan_start — a `Skill` tool_use for a plan/spec/brainstorm skill (exact timestamp).
+//   plan_ready — the LAST matching plan-.md write before the cycle closes, i.e. the plan as it
+//     stood when implementation began. Not the first write: a plan is authored over many edits.
+// A cycle closes on the first of: an edit to a NON-matching file after at least one plan write
+// (implementation started; the ≥1 gate keeps a scratchpad write during research from closing the
+// cycle before there is anything to be ready), another planning-skill invoke, an execution skill,
+// built-in plan mode starting (that mechanism owns its window — and skill entries inside it are
+// suppressed, or the same window would double-emit), or end of transcript. A still-open cycle at
+// EOF emits plan_ready at the last write so far; each Stop recompute slides it later until
+// implementation begins — the server upserts, so this converges rather than drifts.
+// No entry point → a matching .md write is ignored entirely.
+// Returns the events plus the [start, ready] intervals buildPeriods paints as `planning`; a lone
+// plan_start gets NO interval — an unclosed brainstorm must not paint the rest of the session.
+function buildSkillPlanCycles(lines) {
+  const events = [];
+  const intervals = [];
+  let inBuiltinPlan = false;
+  let cycle = null; // { startMs, lastPlanMs }
+
+  const close = () => {
+    if (cycle == null) return;
+    if (cycle.lastPlanMs != null) {
+      events.push({ type: 'plan_ready', at: new Date(cycle.lastPlanMs).toISOString() });
+      intervals.push({ startMs: cycle.startMs, endMs: cycle.lastPlanMs });
+    }
+    cycle = null;
+  };
+
+  for (const line of lines) {
+    const pm = permissionModeOf(line);
+    if (pm != null) {
+      const nowPlan = isPlanMode(pm);
+      if (nowPlan && !inBuiltinPlan) close();
+      inBuiltinPlan = nowPlan;
+    }
+    if (line != null && line.type === 'permission-mode') continue; // no timestamp — mode flip only
+    const ms = tsOf(line);
+    if (ms == null) continue;
+
+    if (!inBuiltinPlan && hasSkillMatching(line, isPlanningSkill)) {
+      close(); // a new planning skill ends the previous cycle
+      events.push({ type: 'plan_start', at: new Date(ms).toISOString() });
+      cycle = { startMs: ms, lastPlanMs: null };
+      continue;
+    }
+    if (cycle == null) continue;
+    if (hasSkillMatching(line, isExcludedPlanSkill)) { close(); continue; }
+
+    const edits = fileEditsOn(line);
+    if (edits.plan) cycle.lastPlanMs = ms;
+    if (edits.other && cycle.lastPlanMs != null) close();
+  }
+  close(); // end of transcript
+  return { events, intervals };
+}
+
 // One active span per subagent transcript (first→last timestamp). Parallel subagents overlap in
 // time; the client packs them into lanes.
 function buildSubagents(transcriptPath, sessionId) {
@@ -318,8 +497,11 @@ export function computeSessionTimeline(transcriptPath, sessionId) {
   lines = dropLeadIn(lines);
   if (lines === null) return null;
 
-  const periods = buildPeriods(lines);
-  const plan_events = buildPlanEvents(lines);
+  const skillPlan = buildSkillPlanCycles(lines);
+  const periods = buildPeriods(lines, skillPlan.intervals);
+  const plan_events = buildPlanEvents(lines)
+    .concat(skillPlan.events)
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   const subagents = buildSubagents(transcriptPath, sessionId);
 
   // Axis domain = earliest/latest timestamp across main + subagent activity. Single-pass min/max
