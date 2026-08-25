@@ -33,6 +33,9 @@ export const ENDPOINTS = Object.freeze({
   whoami: "/me/claude-code/whoami",
   machine: "/me/claude-code/machine",
   usageSnapshot: "/me/claude-code/usage",
+  // Vendor-generic on purpose (Codex reports here too): the server reads the vendor off the
+  // X-Beezi-Agent header postJson already sends.
+  accountSync: "/me/cli-agent/account",
 });
 
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";

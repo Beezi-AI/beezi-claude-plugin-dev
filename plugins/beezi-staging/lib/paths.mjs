@@ -65,6 +65,13 @@ export function trackingStateFile() {
   return path.join(beeziHome(), 'tracking.json');
 }
 
+// Last-sent account check-in marker: { version, lastSyncedHash, lastSyncedAt }. Root-level for
+// the same pruneStale() reason as the audit ledger and the tracking cache — an expiring marker
+// would re-POST the same unchanged account payload on every session start.
+export function accountSyncStateFile() {
+  return path.join(beeziHome(), 'account-sync.json');
+}
+
 export function credentialsFile() {
   return path.join(beeziHome(), 'credentials.json');
 }
