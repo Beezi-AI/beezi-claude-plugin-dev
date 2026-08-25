@@ -1017,6 +1017,27 @@ function writeSubagentTranscript(transcriptDir, sessionId, agentId, lines) {
   return p;
 }
 
+// Workflow-tool agents shard under subagents/workflows/<wf_id>/, and the run's own state file
+// (a sibling of subagents/) is the only place their names are recorded.
+function writeWorkflowSubagentTranscript(transcriptDir, sessionId, wfId, agentId, lines) {
+  const dir = path.join(transcriptDir, sessionId, 'subagents', 'workflows', wfId);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${agentId}.jsonl`);
+  fs.writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n'), 'utf-8');
+  fs.writeFileSync(
+    path.join(dir, `${agentId}.meta.json`),
+    JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }),
+    'utf-8',
+  );
+  return p;
+}
+
+function writeWorkflowState(transcriptDir, sessionId, wfId, state) {
+  const dir = path.join(transcriptDir, sessionId, 'workflows');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${wfId}.json`), JSON.stringify(state), 'utf-8');
+}
+
 test('20. subagent transcript usage is enqueued as its own segment', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
@@ -1144,6 +1165,107 @@ test('21. per-agent cursor — second run only processes new subagent lines', as
 });
 
 // ─── parallel subagents: reported time is the union, not the sum ─────────────
+
+const WF_USAGE = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+
+test('20c. workflow subagent usage is enqueued with its run-derived name', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', WF_USAGE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeWorkflowSubagentTranscript(dir, 'sess-20c', 'wf_abc123', 'agent-w1', [
+    assistantLine('main', 'claude-sonnet-5', WF_USAGE, '2024-01-01T10:00:30.000Z'),
+  ]);
+  writeWorkflowState(dir, 'sess-20c', 'wf_abc123', {
+    workflowName: 'code-review',
+    workflowProgress: [{ type: 'workflow_agent', agentId: 'w1', label: 'verify:UserRow.tsx(1)' }],
+  });
+
+  await runCheckpoint(
+    { session_id: 'sess-20c', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  const agent = readQueue(dir).find(i => i.payload.agent_id === 'agent-w1');
+  assert.ok(agent, 'the workflow agent must be discovered at all');
+  assert.equal(agent.payload.is_subagent, true);
+  assert.equal(agent.payload.agent_type, 'workflow-subagent');
+  assert.equal(agent.payload.spawn_depth, 1);
+  assert.equal(agent.payload.agent_name, 'code-review:verify:UserRow.tsx(1)');
+  assert.ok(agent.payload.token_total > 0, 'its tokens are reported');
+  // The id stays bare, so the segment scope matches an ordinary subagent's.
+  assert.ok(agent.payload.segmentId.startsWith('sess-20c:agent-w1:'));
+});
+
+test('20d. workflow agent cursors persist under the bare id', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', WF_USAGE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeWorkflowSubagentTranscript(dir, 'sess-20d', 'wf_abc123', 'agent-w1', [
+    assistantLine('main', 'claude-sonnet-5', WF_USAGE, '2024-01-01T10:00:30.000Z'),
+  ]);
+
+  const deps = { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) };
+  await runCheckpoint({ session_id: 'sess-20d', transcript_path: transcript, cwd: dir }, deps);
+
+  const state = readState(dir, 'sess-20d');
+  assert.equal(state.agentCursors['agent-w1'], 1, 'cursor keyed by the bare agent id');
+
+  const before = readQueue(dir).length;
+  await runCheckpoint({ session_id: 'sess-20d', transcript_path: transcript, cwd: dir }, deps);
+  assert.equal(readQueue(dir).length, before, 'a second checkpoint re-enqueues nothing');
+});
+
+test('20e. a workflow agent with no state file still reports its usage', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', WF_USAGE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeWorkflowSubagentTranscript(dir, 'sess-20e', 'wf_abc123', 'agent-w1', [
+    assistantLine('main', 'claude-sonnet-5', WF_USAGE, '2024-01-01T10:00:30.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-20e', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  const agent = readQueue(dir).find(i => i.payload.agent_id === 'agent-w1');
+  assert.ok(agent);
+  assert.equal(agent.payload.agent_name, null, 'no name, but never a lost segment');
+  assert.ok(agent.payload.token_total > 0);
+});
+
+test('20f. a workflow run journal is not reported as an agent', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'claude-fable-5', WF_USAGE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeWorkflowSubagentTranscript(dir, 'sess-20f', 'wf_abc123', 'agent-w1', [
+    assistantLine('main', 'claude-sonnet-5', WF_USAGE, '2024-01-01T10:00:30.000Z'),
+  ]);
+  fs.writeFileSync(
+    path.join(dir, 'sess-20f', 'subagents', 'workflows', 'wf_abc123', 'journal.jsonl'),
+    JSON.stringify({ type: 'started', agentId: 'w1' }),
+    'utf-8',
+  );
+
+  await runCheckpoint(
+    { session_id: 'sess-20f', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'), fetchImpl: fakeFetch(503) },
+  );
+
+  assert.equal(readQueue(dir).filter(i => i.payload.agent_id === 'journal').length, 0);
+});
 
 test('25. parallel subagents overlapping the main thread bill only uncovered wall clock', async (t) => {
   const dir = makeTmpDir(t);

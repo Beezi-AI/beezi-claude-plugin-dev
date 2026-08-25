@@ -20,7 +20,11 @@ import {
 } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
-import { listSubagentTranscripts, buildTaskDescriptionMap } from './subagents.mjs';
+import {
+  listSubagentTranscripts,
+  buildTaskDescriptionMap,
+  createWorkflowNameResolver,
+} from './subagents.mjs';
 import { claimIntervals, mergeIntervals, subtractIntervals, totalMs } from './active-time.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 import { claudeMdLines } from './claude-md.mjs';
@@ -337,18 +341,23 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // Each subagent's display name is the `description` of the Task block that spawned it; join via
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
   const taskDescriptions = buildTaskDescriptionMap(transcript_path);
-  for (const { agentId, path: agentPath, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
+  const workflowNameOf = createWorkflowNameResolver(transcript_path, session_id);
+  for (const { agentId, path: agentPath, workflowId, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
     const agentFrom = agentCursors[agentId] == null ? 0 : agentCursors[agentId];
     let agentDelta;
     try {
       agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
     } catch { continue; }
     const taskDescription = toolUseId ? taskDescriptions.get(toolUseId) : null;
+    // A workflow agent has no spawning Task block, so its run's state file names it instead.
+    const workflowName = workflowNameOf(workflowId, agentId);
     enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
       is_subagent: true,
       agent_id: agentId,
       agent_type: clamp(agentType, AGENT_TYPE_MAX),
-      agent_name: toolUseId ? clamp(taskDescription == null ? null : taskDescription, AGENT_NAME_MAX) : null,
+      agent_name: workflowName != null
+        ? clamp(workflowName, AGENT_NAME_MAX)
+        : (toolUseId ? clamp(taskDescription == null ? null : taskDescription, AGENT_NAME_MAX) : null),
       spawn_depth: spawnDepth,
     }, { includeContext: false });
     // A subagent that dies on an API error never ends the main turn, so no StopFailure fires
