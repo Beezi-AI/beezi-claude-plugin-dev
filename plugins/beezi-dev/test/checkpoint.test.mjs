@@ -354,6 +354,146 @@ test('7. zero-work task-branch segment not enqueued', async (t) => {
   assert.equal(state.cursor, 1, 'cursor advanced past zero-work line');
 });
 
+// ─── tests 7b/7c: emitted payloads must tile the window ─────────────────────
+
+test('7b. reflog + untimestamped head → one payload starting at line 1', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const captured = [];
+  const fetchImpl = async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 503 }; };
+
+  // HEAD is main, but the work happened after a checkout to feature/task-1. The two
+  // untimestamped meta lines used to resolve to main and split off into their own dropped
+  // segment, so the first uploaded line was 3 and the server's coverage prefix stuck at 0.
+  const reflog = 'a1 HEAD@{2026-07-03T09:00:00+00:00}: checkout: moving from main to feature/task-1';
+  const transcript = writeTranscript(dir, [
+    { type: 'mode', mode: 'auto', sessionId: 'sess-7b' },
+    { type: 'file-history-snapshot', messageId: 'm1' },
+    assistantLine('ignored', 'model-a', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2026-07-03T10:00:00.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-7b', transcript_path: transcript, cwd: dir },
+    { getAccessToken: async () => 'tok', gitImpl: fakeGitRepo('main', 'https://host/org/repo.git', reflog), fetchImpl },
+  );
+
+  assert.equal(captured.length, 1, 'one payload');
+  assert.equal(captured[0].from_line, 1, 'must start at line 1 or coverage can never advance');
+  assert.equal(captured[0].to_line, 3);
+  assert.equal(captured[0].branch, 'feature/task-1', 'bills the branch the work ran on');
+});
+
+test('7c. a segment dropped for zero work is absorbed by the next payload', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const captured = [];
+  const fetchImpl = async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 503 }; };
+
+  const repoA = path.join(dir, 'repo-a');
+  const repoB = path.join(dir, 'repo-b');
+  // The meta line pins the active repo to A and bills nothing, so its run is dropped; the work
+  // below it lives in B. Line 1 is then covered by no payload at all unless it is carried over.
+  const transcript = writeTranscript(dir, [
+    { type: 'mode', mode: 'auto', sessionId: 'sess-7c', cwd: repoA },
+    repoAssistantLine(repoB, 'x', 'model-a', { input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2026-07-03T10:05:00.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-7c', transcript_path: transcript, cwd: repoB },
+    {
+      getAccessToken: async () => 'tok',
+      gitImpl: fakeGitByRoot({
+        [repoA]: { branch: 'a', remote: 'https://host/org/a.git' },
+        [repoB]: { branch: 'b', remote: 'https://host/org/b.git' },
+      }),
+      fetchImpl,
+    },
+  );
+
+  assert.equal(captured.length, 1, 'one payload');
+  assert.equal(captured[0].from_line, 1, "repo A's dropped range is carried onto repo B's payload");
+  assert.equal(captured[0].to_line, 2);
+  assert.equal(captured[0].remote, 'https://host/org/b.git');
+  assert.equal(captured[0].token_input, 20, "stats stay repo B's own");
+});
+
+test('7d. an absorbed range does not leak past the payload that took it', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const captured = [];
+  const fetchImpl = async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 503 }; };
+
+  const repoA = path.join(dir, 'repo-a');
+  const repoB = path.join(dir, 'repo-b');
+  const repoC = path.join(dir, 'repo-c');
+  const transcript = writeTranscript(dir, [
+    { type: 'mode', mode: 'auto', sessionId: 'sess-7d', cwd: repoA },
+    repoAssistantLine(repoB, 'x', 'model-a', { input_tokens: 20, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2026-07-03T10:05:00.000Z'),
+    repoAssistantLine(repoC, 'x', 'model-a', { input_tokens: 30, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, '2026-07-03T10:10:00.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-7d', transcript_path: transcript, cwd: repoB },
+    {
+      getAccessToken: async () => 'tok',
+      gitImpl: fakeGitByRoot({
+        [repoA]: { branch: 'a', remote: 'https://host/org/a.git' },
+        [repoB]: { branch: 'b', remote: 'https://host/org/b.git' },
+        [repoC]: { branch: 'c', remote: 'https://host/org/c.git' },
+      }),
+      fetchImpl,
+    },
+  );
+
+  const ranges = captured
+    .map((p) => [p.from_line, p.to_line])
+    .sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(ranges, [[1, 2], [3, 3]], 'the drop is taken once, then forgotten');
+  // segmentId has to move with from_line or the re-send mints a second row for the same lines.
+  const first = captured.find((p) => p.from_line === 1);
+  assert.equal(first.segmentId, 'sess-7d:1-2');
+});
+
+test('7e. payloads tile the transcript across a repo hop', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const captured = [];
+  const fetchImpl = async (_url, opts) => { captured.push(JSON.parse(opts.body)); return { status: 503 }; };
+
+  const repoA = path.join(dir, 'repo-a');
+  const repoB = path.join(dir, 'repo-b');
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const transcript = writeTranscript(dir, [
+    { type: 'mode', mode: 'auto', sessionId: 'sess-7e', cwd: repoA },
+    repoAssistantLine(repoA, 'x', 'model-a', usage, '2026-07-03T10:00:00.000Z'),
+    repoAssistantLine(repoB, 'x', 'model-a', usage, '2026-07-03T10:05:00.000Z'),
+    repoAssistantLine(repoA, 'x', 'model-a', usage, '2026-07-03T10:10:00.000Z'),
+  ]);
+
+  await runCheckpoint(
+    { session_id: 'sess-7e', transcript_path: transcript, cwd: repoA },
+    {
+      getAccessToken: async () => 'tok',
+      gitImpl: fakeGitByRoot({
+        [repoA]: { branch: 'a', remote: 'https://host/org/a.git' },
+        [repoB]: { branch: 'b', remote: 'https://host/org/b.git' },
+      }),
+      fetchImpl,
+    },
+  );
+
+  const ranges = captured.map((p) => [p.from_line, p.to_line]).sort((a, b) => a[0] - b[0]);
+  assert.equal(ranges[0][0], 1, 'coverage can only advance from line 1');
+  assert.equal(ranges.at(-1)[1], 4, 'the last line must be claimed by some payload');
+  for (let i = 1; i < ranges.length; i++) {
+    assert.equal(ranges[i][0], ranges[i - 1][1] + 1, `gap before payload ${i}`);
+  }
+});
+
 // ─── test 8: remote sanitized ───────────────────────────────────────────────
 
 test('8. remote sanitized — user:pass@ stripped from payload', async (t) => {

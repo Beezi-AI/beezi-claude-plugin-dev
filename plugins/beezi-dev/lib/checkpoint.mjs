@@ -256,6 +256,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let coveredDirty = false;
 
   const enqueueSegments = (segs, segmentScope, extra = null, { includeContext = true } = {}) => {
+    // Range of the dropped segments so far, folded into the next payload we do send — the cursor
+    // consumes them either way, and a line in no payload is a hole coverage can never step over.
+    // Per call: the main transcript and each subagent file number their lines independently.
+    let carryFrom = null;
     for (const seg of segs) {
       // Main-transcript segments run through here first and so keep their full span; subagents bill
       // only the residual. Deterministic, and it puts the time on the thread that was blocked for
@@ -265,11 +269,20 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       const durationSec = intervals
         ? Math.round(totalMs(subtractIntervals(intervals, covered)) / 1000)
         : seg.stats.duration_sec;
-      if (seg.stats.token_total === 0 && durationSec === 0) continue;
+      if (seg.stats.token_total === 0 && durationSec === 0) {
+        if (carryFrom == null) carryFrom = seg.fromLine;
+        continue;
+      }
       const resolvedRemote = resolveRemote(seg.repoRoot);
       const remote = resolvedRemote == null ? localRemote(seg.repoRoot == null ? cwd : seg.repoRoot) : resolvedRemote;
       // Nothing left to name the work by — only reachable when the session has no cwd either.
-      if (!remote) { skipped.noRemote += 1; continue; }
+      if (!remote) {
+        if (carryFrom == null) carryFrom = seg.fromLine;
+        skipped.noRemote += 1;
+        continue;
+      }
+      // Widens the claimed span only; every stat below stays this segment's own.
+      const fromLine = carryFrom == null ? seg.fromLine : Math.min(carryFrom, seg.fromLine);
       // A single write failure must not abort the window (which would leave the cursor
       // unadvanced and re-process everything forever) — skip that segment and continue.
       // A subagent's context window is not the session's — its context fields never ship.
@@ -280,11 +293,11 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       const mdLines = resolveClaudeMdLines(seg.repoRoot);
       try {
         const payload = {
-          segmentId: `${segmentScope}:${seg.fromLine}-${seg.toLine}`,
+          segmentId: `${segmentScope}:${fromLine}-${seg.toLine}`,
           sessionId: session_id,
           remote,
           branch: clamp(seg.branch, BRANCH_MAX),
-          from_line: seg.fromLine,
+          from_line: fromLine,
           to_line: seg.toLine,
           ...billingFields,
           ...usageStamp,
@@ -296,6 +309,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           duration_sec: durationSec,
         };
         emit(payload);
+        carryFrom = null;
         // Claim only what actually reached the queue: a failed write must not swallow the window
         // for every later segment too.
         if (intervals != null && intervals.length) {
@@ -304,7 +318,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
         }
         lastPayload = payload;
         enqueued += 1;
-      } catch { skipped.emitFailed += 1; /* keep going; the cursor still advances below */ }
+      } catch {
+        carryFrom = fromLine;
+        skipped.emitFailed += 1; /* keep going; the cursor still advances below */
+      }
     }
   };
   enqueueSegments(segments, session_id);

@@ -178,6 +178,9 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
   const apiErrorEvents = [];
   let run = null;
   let activeRoot = cwd != null ? repoRootOf(cwd) : null;
+  // Last-touch-wins like activeRoot: a line that resolves no branch inherits rather than invents.
+  let activeBranch = null;
+  let lastToLine = null;
 
   const closeRun = () => {
     if (run) {
@@ -198,7 +201,10 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
       }
       segments.push({
         repoRoot: run.repoRoot,
-        branch: run.branch,
+        // Only site that passes a null ms: branchAt answers it with the repo's head branch.
+        branch: run.branch != null
+          ? run.branch
+          : (branchAt ? branchAt(run.repoRoot, null) : '(unknown)'),
         fromLine: run.fromLine,
         toLine: run.toLine,
         // Deliberately outside `stats` (which is spread wholesale into the report payload): the
@@ -206,6 +212,7 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
         activeIntervals,
         stats,
       });
+      lastToLine = run.toLine;
       run = null;
     }
   };
@@ -222,18 +229,28 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
     const sigDir = toolDir || (typeof line.cwd === 'string' ? line.cwd : null);
     if (sigDir) {
       const sigRoot = repoRootOf(sigDir);
-      if (sigRoot) activeRoot = sigRoot; // last-touch-wins; unresolvable -> carry forward
+      if (sigRoot) {
+        if (sigRoot !== activeRoot) activeBranch = null; // only a real move drops the branch
+        activeRoot = sigRoot; // last-touch-wins; unresolvable -> carry forward
+      }
     }
 
-    const ms = line.timestamp ? new Date(line.timestamp).getTime() : null;
+    // NaN collapses to null: an unparseable stamp resolves the reflog's oldest branch, not none.
+    const stamp = line.timestamp ? new Date(line.timestamp).getTime() : NaN;
+    const ms = Number.isFinite(stamp) ? stamp : null;
     const branch = branchAt
-      ? branchAt(activeRoot, ms)
-      : (line.gitBranch || '(unknown)');
+      ? (ms == null ? activeBranch : branchAt(activeRoot, ms))
+      : (line.gitBranch || activeBranch);
+    if (branch != null) activeBranch = branch;
 
-    if (!run || run.repoRoot !== activeRoot || run.branch !== branch) {
+    if (!run || run.repoRoot !== activeRoot || (branch != null && run.branch != null && run.branch !== branch)) {
       closeRun();
-      run = { repoRoot: activeRoot, branch, fromLine: lineNo, toLine: lineNo, models: {}, timestamps: [], anchors: [], lines: [] };
+      // Open flush against the last run: a malformed line on the boundary reaches no run at all.
+      const openAt = lastToLine == null ? lineNo : lastToLine + 1;
+      run = { repoRoot: activeRoot, branch, fromLine: openAt, toLine: lineNo, models: {}, timestamps: [], anchors: [], lines: [] };
     }
+    // The first line that names a branch defines the meta lines above it too.
+    if (run.branch == null && branch != null) run.branch = branch;
     run.toLine = lineNo;
     run.lines.push(line);
     if (ms != null) {
@@ -304,7 +321,14 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
     }
   }
   closeRun();
-  return { nextCursor: Math.max(fromLine, raw.length), segments, apiErrorEvents };
+  const nextCursor = Math.max(fromLine, raw.length);
+  // Widen the outer ranges over blank/malformed head and tail lines the cursor consumes anyway.
+  if (segments.length > 0) {
+    segments[0].fromLine = Math.min(segments[0].fromLine, fromLine + 1);
+    const last = segments[segments.length - 1];
+    last.toLine = Math.max(last.toLine, nextCursor);
+  }
+  return { nextCursor, segments, apiErrorEvents };
 }
 
 // `anchors` are the segment's session-marking stamps (isTimingAnchor), used only for the span.
