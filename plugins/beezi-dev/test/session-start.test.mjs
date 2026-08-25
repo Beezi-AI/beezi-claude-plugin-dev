@@ -707,3 +707,81 @@ test('status line check that throws never breaks session start', async (t) => {
 
   assert.equal(result, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
 });
+
+// ─── account check-in trigger ────────────────────────────────────────────────
+
+// A reconcile stub with a chosen outcome. runSessionStart destructures config/source/outcome from
+// this ONE call — a second reconcile invocation would spawn the Claude CLI twice per session.
+function reconcileWith(outcome, seen) {
+  return () => {
+    seen.calls += 1;
+    return { config: { source: 'subscription', plan: 'pro' }, source: 'subscription', outcome };
+  };
+}
+
+async function startWithOutcome(t, sessionId, outcome) {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const seen = { calls: 0 };
+  const syncCalls = [];
+  await runSessionStart(baseInput({ session_id: sessionId }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchOk({ connected: false }),
+    gitImpl: fakeGit('https://host/repo.git'),
+    reconcileBilling: reconcileWith(outcome, seen),
+    syncAccount: async (token, options) => { syncCalls.push({ token, options }); return { synced: true }; },
+  });
+  return { seen, syncCalls };
+}
+
+test('account sync — a switched account forces the check-in', async (t) => {
+  const { seen, syncCalls } = await startWithOutcome(t, 'sess-acct-switched', 'switched');
+  assert.equal(seen.calls, 1, 'the reconcile must run exactly once per session start');
+  assert.equal(syncCalls.length, 1);
+  assert.equal(syncCalls[0].token, 'tok');
+  assert.equal(syncCalls[0].options.force, true);
+  assert.equal(syncCalls[0].options.via, 'session-start');
+});
+
+test('account sync — a fresh capture forces the check-in', async (t) => {
+  const { syncCalls } = await startWithOutcome(t, 'sess-acct-captured', 'captured');
+  assert.equal(syncCalls[0].options.force, true);
+});
+
+test('account sync — the steady state calls without force (the hash gate decides)', async (t) => {
+  for (const outcome of ['none', 'kept', 'no-signal']) {
+    const { syncCalls } = await startWithOutcome(t, `sess-acct-${outcome}`, outcome);
+    assert.equal(syncCalls.length, 1, `${outcome} still checks in`);
+    assert.equal(syncCalls[0].options.force, false, `${outcome} must not force a POST`);
+  }
+});
+
+test('account sync — an unlinked machine never checks in', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const syncCalls = [];
+  await runSessionStart(baseInput({ session_id: 'sess-acct-notoken' }), {
+    getAccessToken: async () => null,
+    fetchImpl: fakeFetchOk({ connected: false }),
+    gitImpl: fakeGit('https://host/repo.git'),
+    syncAccount: async () => { syncCalls.push(1); return { synced: true }; },
+  });
+  assert.equal(syncCalls.length, 0);
+});
+
+test('account sync — a rejecting check-in never breaks session start', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  let result;
+  await assert.doesNotReject(async () => {
+    result = await runSessionStart(baseInput({ session_id: 'sess-acct-throws' }), {
+      getAccessToken: async () => 'tok',
+      ...quietBilling,
+      fetchImpl: fakeFetchOk({ connected: true, projectName: 'Acme' }),
+      gitImpl: fakeGit('https://host/repo.git'),
+      syncAccount: async () => { throw new Error('offline'); },
+    });
+  });
+  assert.equal(result, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
+});

@@ -2,9 +2,22 @@ import { parseArgs, buildConfig, reconcileBillingConfig } from '../lib/billing-c
 import { writeBillingConfig } from '../lib/billing-config.mjs';
 import { readClaudeAccountAnchor } from '../lib/claude-account.mjs';
 import { hasCustomGateway } from '../lib/billing.mjs';
+import { getAccessToken } from '../lib/token.mjs';
+import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 
-try {
+// Report the freshly reconciled account to the portal. Forced — the user just asked for a re-read,
+// and an account switch is exactly what must not wait for the hash to drift. Silent throughout: an
+// unlinked machine has no token and this script must keep working offline, so nothing here can
+// change the command's output or its exit code.
+async function reportAccount() {
+  let token = null;
+  try { token = await getAccessToken(); } catch { token = null; }
+  if (!token) return;
+  try { await syncAccountIfNeeded(token, { force: true, via: 'billing-capture' }); } catch { /* best-effort */ }
+}
+
+async function run() {
   const parsed = parseArgs(process.argv.slice(2));
   // A custom endpoint is reported as a fact, not a conclusion: whether it bills this machine's
   // subscription or its own credits is the one thing only the user can say, and /beezi:login reads
@@ -28,6 +41,8 @@ try {
       const switched = outcome === 'switched' ? ' account=changed' : '';
       console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan == null ? 'n/a' : config.plan}${via}${switched}${gateway}.`);
     }
+    // After the reconcile, so the check-in carries the account this run just resolved.
+    await reportAccount();
   } else {
     // Self-report (--plan) or raw-field capture: the user's answer always writes. The cheap file
     // anchor rides along so a later account switch can invalidate this testimony; the CLI is not
@@ -37,8 +52,13 @@ try {
     const config = buildConfig(parsed, process.env, new Date(), null, anchor);
     writeBillingConfig(config);
     console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan == null ? 'n/a' : config.plan}${gateway}.`);
+    // The user just declared how this machine pays — that answer is exactly what the check-in
+    // exists to carry, so it must not wait for the next session start's hash drift.
+    await reportAccount();
   }
-} catch (error) {
+}
+
+run().catch((error) => {
   console.error(`✗ ${friendlyMessage(error)}`);
   process.exit(1);
-}
+});

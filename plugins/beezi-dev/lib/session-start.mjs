@@ -34,6 +34,7 @@ import {
   isStale as _isStale,
 } from './billing-config.mjs';
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
+import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
 // Also records where the session lives (cwd + transcript path) so /beezi:track can find
@@ -192,10 +193,28 @@ export async function runSessionStart(input, deps = {}) {
     : deps.reconcileBilling;
   let billingConfig = null;
   let billingSource = BillingSource.UNKNOWN;
+  let billingOutcome = 'none';
   try {
     const reconciled = reconcileBilling();
     billingConfig = reconciled.config;
     billingSource = reconciled.source;
+    billingOutcome = reconciled.outcome == null ? 'none' : reconciled.outcome;
+  } catch { /* best-effort */ }
+
+  // Tell the portal which Claude account and credentials this machine is on. Fire-and-forget: the
+  // hook must not wait on it, and it never throws. The steady state (unchanged payload, synced
+  // within the week) reads one file and sends nothing, so this costs nothing on a normal start.
+  // A reconcile that switched accounts or captured fresh identity forces the send — that is the
+  // only moment the portal can learn about an account switch.
+  const syncAccount = deps.syncAccount == null ? _syncAccountIfNeeded : deps.syncAccount;
+  try {
+    const forced = billingOutcome === 'switched' || billingOutcome === 'captured';
+    // The config the reconcile above just settled is handed over directly — re-reading billing.json
+    // here would be a second file read for an answer already in hand.
+    const reconciledConfig = billingConfig;
+    Promise.resolve(
+      syncAccount(token, { force: forced, via: 'session-start' }, { fetchImpl, readBillingConfig: () => reconciledConfig }),
+    ).catch(() => { /* best-effort */ });
   } catch { /* best-effort */ }
 
   let message = systemMessage;

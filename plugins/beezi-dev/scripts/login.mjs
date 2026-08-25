@@ -10,6 +10,7 @@ import { getCredentials, setCredentials, deleteCredentials } from '../lib/creden
 import { startLoopback } from '../lib/loopback.mjs';
 import { setMachineClientId } from '../lib/machine-identity.mjs';
 import { whoami } from '../lib/whoami.mjs';
+import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 function openBrowser(url) {
@@ -73,6 +74,10 @@ async function run() {
       const account = who.name || who.email;
       console.log(`\n✓ This machine is already linked to Beezi${account ? ` as ${account}` : ''}.`);
       console.log('  Nothing to do.\n');
+      // Forced: the user asked for a re-link, and this is the one path that reaches the account
+      // check-in with a token already in hand. Bounded and silent — a failure never fails a login.
+      // After the output on purpose: the user's confirmation must not wait on a background call.
+      await syncAccountIfNeeded(existing.access_token, { force: true, via: 'login' });
       return;
     }
     if (who && !who.valid) {
@@ -148,6 +153,10 @@ async function run() {
   if (who && who.valid && who.trackingMode && who.trackingMode !== 'live') {
     console.log('  This workspace is in audit mode — your session history uploads at the end of this login.');
   }
+  // Forced for the same reason the tracking cache is cleared above: this is a fresh identity, and
+  // an account-sync marker left by the PREVIOUS login would otherwise suppress the check-in.
+  // After the output, so the link confirmation never waits on a best-effort call.
+  await syncAccountIfNeeded(tokens.access_token, { force: true, via: 'login' });
 }
 
 // argv ('start'/'wait') is ignored: the PKCE flow is a single blocking command,
