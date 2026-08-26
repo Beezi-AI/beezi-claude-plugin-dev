@@ -10,8 +10,11 @@ import {
 import { readClaudeAccount, readClaudeAuthSignals } from './claude-account.mjs';
 
 // v2 adds detectedVia (provenance of the plan tuple) and accountAnchor (identity for
-// account-switch detection). Readers stay v1-tolerant: both fields simply read as undefined.
-export const BILLING_CONFIG_VERSION = 2;
+// account-switch detection). v3 adds accountEmail (the vendor email stored alongside accountUuid
+// so a check-in can present both). Readers stay tolerant across all of it: readBillingConfig has
+// no version gate and the reconcile's kept path restamps the version — the same mechanism that
+// grandfathered v1 → v2.
+export const BILLING_CONFIG_VERSION = 3;
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000; // refresh plan info at least weekly
 

@@ -105,9 +105,13 @@ function label(value) {
 // The check-in body, built from the ALREADY-reconciled billing config — this never spawns the
 // Claude CLI or re-reads ~/.claude.json, so it stays free on the session-start hot path.
 //
-// The anchor decides the identity field: only 'account_uuid' and 'email' name a vendor account.
-// 'user_id' is Claude Code's opaque local hash — sending it as an accountUuid would mint a
-// canonical account row for an id no vendor ever issued.
+// Identity: the stored accountUuid and accountEmail always identify, and go together whenever
+// both are known — the server can only merge an email-provisional account row into the canonical
+// uuid row (and link sessions, which report the uuid) when one check-in presents both. Configs
+// predating a stored field fall back to the anchor ('account_uuid' supplies the uuid, 'email' the
+// email), which is what keeps on-disk v2 configs working unmigrated. 'user_id' is Claude Code's
+// opaque local hash — sending it as an accountUuid would mint a canonical account row for an id
+// no vendor ever issued.
 //
 // Every field is optional by contract: unknown is first-class, and a machine that can prove
 // nothing simply reports nothing.
@@ -116,8 +120,14 @@ export function buildAccountSyncPayload({ config = null, env = process.env } = {
   const anchorSource = anchor == null ? null : anchor.source;
   const anchorValue = anchor == null ? null : label(anchor.value);
   const payload = {};
-  if (anchorSource === 'account_uuid' && anchorValue != null) payload.accountUuid = anchorValue;
-  if (anchorSource === 'email' && anchorValue != null) payload.email = anchorValue;
+  const storedUuid = config == null ? null : label(config.accountUuid);
+  const accountUuid = storedUuid != null
+    ? storedUuid
+    : (anchorSource === 'account_uuid' ? anchorValue : null);
+  if (accountUuid != null) payload.accountUuid = accountUuid;
+  const storedEmail = config == null ? null : label(config.accountEmail);
+  const email = storedEmail != null ? storedEmail : (anchorSource === 'email' ? anchorValue : null);
+  if (email != null) payload.email = email;
   const subscriptionType = config == null ? null : label(config.subscriptionType);
   if (subscriptionType != null) payload.subscriptionType = subscriptionType;
   const rateLimitTier = config == null ? null : label(config.rateLimitTier);

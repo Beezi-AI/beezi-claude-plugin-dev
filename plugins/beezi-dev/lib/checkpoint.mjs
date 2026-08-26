@@ -31,6 +31,7 @@ import { claudeMdLines } from './claude-md.mjs';
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
+import { keyFingerprint } from './account-sync.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
@@ -229,8 +230,23 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try { utilization = readUtilization(); } catch { utilization = null; }
   let claudeAccount = null;
   try { claudeAccount = readAccount(); } catch { claudeAccount = null; }
+  // Identity stamp: which vendor account this machine is logged into NOW, in every shape it can
+  // prove — the uuid when oauthAccount carries one, the email otherwise (oauthAccount first, the
+  // CLI-observed anchor in billing.json as fallback), and the setup-token fingerprint for CI
+  // machines that expose nothing else. The server's ingest links the session to its account with
+  // whichever arrives; a user_id anchor is a local hash and never identifies.
+  const env = deps.env == null ? process.env : deps.env;
+  const anchor = billingConfig != null && billingConfig.accountAnchor != null ? billingConfig.accountAnchor : null;
+  const accountEmail = claudeAccount != null && claudeAccount.email
+    ? claudeAccount.email
+    : (anchor != null && anchor.source === 'email' && anchor.value != null ? anchor.value : null);
+  const oauthKey = keyFingerprint(env.CLAUDE_CODE_OAUTH_TOKEN);
   const usageStamp = {
     ...(claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
+    ...(accountEmail != null ? { account_email: accountEmail } : {}),
+    ...(oauthKey != null
+      ? { oauth_key_prefix: oauthKey.prefix, oauth_key_last4: oauthKey.last4, oauth_key_length: oauthKey.length }
+      : {}),
     ...(utilization
       ? {
           usage_five_hour_pct: utilization.fiveHourPct,

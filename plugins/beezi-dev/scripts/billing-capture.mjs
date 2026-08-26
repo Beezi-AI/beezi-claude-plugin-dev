@@ -1,6 +1,6 @@
 import { parseArgs, buildConfig, reconcileBillingConfig } from '../lib/billing-capture.mjs';
 import { writeBillingConfig } from '../lib/billing-config.mjs';
-import { readClaudeAccountAnchor } from '../lib/claude-account.mjs';
+import { readClaudeAccount, readClaudeAccountAnchor } from '../lib/claude-account.mjs';
 import { hasCustomGateway } from '../lib/billing.mjs';
 import { getAccessToken } from '../lib/token.mjs';
 import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
@@ -49,7 +49,15 @@ async function run() {
     // spawned here — the next session-start heartbeat upgrades the anchor to the email one.
     let anchor = null;
     try { anchor = readClaudeAccountAnchor(); } catch { anchor = null; }
-    const config = buildConfig(parsed, process.env, new Date(), null, anchor);
+    // --plan only, identity only: that buildConfig branch reads the account purely through the
+    // uuid/email resolvers, so the self-report's check-in can present both identity fields
+    // without oauthAccount touching the plan the user just declared. The raw-field path stays
+    // account-free — there a readable oauthAccount would change the source resolution.
+    let account = null;
+    if (parsed.plan != null) {
+      try { account = readClaudeAccount(); } catch { account = null; }
+    }
+    const config = buildConfig(parsed, process.env, new Date(), account, anchor);
     writeBillingConfig(config);
     console.log(`✓ Beezi billing captured: source=${config.source} plan=${config.plan == null ? 'n/a' : config.plan}${gateway}.`);
     // The user just declared how this machine pays — that answer is exactly what the check-in

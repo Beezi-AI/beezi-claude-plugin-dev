@@ -118,6 +118,9 @@ export function readClaudeAccount(deps = {}) {
     return {
       // Pseudonymous account id — which Claude account this machine is logged into. Non-secret.
       accountUuid: typeof account.accountUuid === 'string' ? account.accountUuid : null,
+      // Some login surfaces write oauthAccount with ONLY emailAddress — then this is the
+      // machine's one vendor identity, and the session identity stamp rides on it.
+      email: typeof account.emailAddress === 'string' && account.emailAddress ? account.emailAddress : null,
       subscriptionType: deriveSubscriptionType(account),
       rateLimitTier: account.userRateLimitTier != null
         ? account.userRateLimitTier

@@ -1946,7 +1946,10 @@ const UTIL_FIXTURE = {
 };
 const ACCOUNT_FIXTURE = { accountUuid: 'acc-1', subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' };
 const USAGE_FIXTURE = { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-const USAGE_STAMP_KEYS = ['account_uuid', 'usage_account_uuid', 'usage_five_hour_pct', 'usage_seven_day_pct', 'usage_fetched_at'];
+const USAGE_STAMP_KEYS = [
+  'account_uuid', 'usage_account_uuid', 'usage_five_hour_pct', 'usage_seven_day_pct', 'usage_fetched_at',
+  'account_email', 'oauth_key_prefix', 'oauth_key_last4', 'oauth_key_length',
+];
 
 function usageDeps(extra = {}) {
   return {
@@ -1988,12 +1991,111 @@ test('usage stamp — no stamp keys at all when both caches are unreadable', asy
     usageDeps({
       readUsageUtilization: () => { throw new Error('boom'); },
       readClaudeAccount: () => { throw new Error('boom'); },
+      env: {},
     }),
   );
   const p = readQueue(dir)[0].payload;
   for (const key of USAGE_STAMP_KEYS) {
     assert.equal(key in p, false, `${key} must be absent, not null`);
   }
+});
+
+// ─── identity stamp (live session → account mapping on the server) ───────────
+// The server's ingest resolves cli_agent_account_id from what the SESSION reports. A machine
+// whose ~/.claude.json has no accountUuid used to report nothing — its sessions could never
+// link to the account its own check-in created. Every payload therefore carries the full
+// identity triple: account_uuid, account_email, and the setup-token fingerprint — each only
+// when known.
+
+const OAUTH_SECRET = 'sk-ant-oat01-MIDDLEMUSTNEVERAPPEARANYWHERE-44aa';
+
+test('identity stamp — account_email rides every payload from oauthAccount', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-id1', transcript_path: transcript, cwd: dir },
+    usageDeps({
+      readClaudeAccount: () => ({ ...ACCOUNT_FIXTURE, email: 'dev@example.com' }),
+      env: {},
+    }),
+  );
+  const p = readQueue(dir)[0].payload;
+  assert.equal(p.account_email, 'dev@example.com');
+  assert.equal(p.account_uuid, 'acc-1', 'the uuid still rides alongside');
+});
+
+test('identity stamp — billing-config anchor email is the fallback when oauthAccount has none', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.writeFileSync(
+    path.join(dir, 'billing.json'),
+    JSON.stringify({
+      version: 2,
+      source: 'subscription',
+      subscriptionType: 'max',
+      plan: 'max',
+      capturedAt: new Date().toISOString(),
+      accountAnchor: { value: 'cli@example.com', source: 'email', updatedAt: new Date().toISOString() },
+    }),
+  );
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-id2', transcript_path: transcript, cwd: dir },
+    usageDeps({ env: {} }),
+  );
+  const p = readQueue(dir)[0].payload;
+  assert.equal(p.account_email, 'cli@example.com');
+});
+
+test('identity stamp — a user_id anchor never becomes an email', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.writeFileSync(
+    path.join(dir, 'billing.json'),
+    JSON.stringify({
+      version: 2,
+      source: 'subscription',
+      subscriptionType: 'max',
+      plan: 'max',
+      capturedAt: new Date().toISOString(),
+      accountAnchor: { value: 'opaque-local-hash', source: 'user_id', updatedAt: new Date().toISOString() },
+    }),
+  );
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-id3', transcript_path: transcript, cwd: dir },
+    usageDeps({ env: {} }),
+  );
+  const p = readQueue(dir)[0].payload;
+  assert.equal('account_email' in p, false);
+});
+
+test('identity stamp — oauth setup token rides as a fingerprint, never whole', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-id4', transcript_path: transcript, cwd: dir },
+    usageDeps({ env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SECRET } }),
+  );
+  const p = readQueue(dir)[0].payload;
+  assert.equal(p.oauth_key_prefix, OAUTH_SECRET.slice(0, 12));
+  assert.equal(p.oauth_key_last4, OAUTH_SECRET.slice(-4));
+  assert.equal(p.oauth_key_length, OAUTH_SECRET.length);
+  assert.equal(
+    JSON.stringify(p).includes(OAUTH_SECRET.slice(12, -4)),
+    false,
+    'the middle of the token must never leave the machine',
+  );
 });
 
 test('usage stamp — context fields ride main segments, stripped from subagent segments', async (t) => {

@@ -82,7 +82,9 @@ export function resolveClaudeSubscription(deps = {}) {
 
   const cliType = status != null && status.loggedIn === true ? status.subscriptionType : null;
   if (cliType == null) {
-    // No CLI answer: oauthAccount alone, exactly the pre-existing behavior.
+    // No CLI answer: oauthAccount alone, exactly the pre-existing behavior. Accepted gap: a
+    // CLI-status email with no oauthAccount is not captured — an identity-only return here would
+    // flip the reconcile's 'no-signal' outcome to 'kept' and change /beezi:login routing.
     if (!account) return null;
     return { ...account, detectedVia: 'oauth_account', anchor: buildAnchor(status, fileAnchor) };
   }
@@ -92,6 +94,9 @@ export function resolveClaudeSubscription(deps = {}) {
     && String(account.subscriptionType).toLowerCase() === cliType.toLowerCase();
   return {
     accountUuid: account == null ? null : account.accountUuid,
+    // Freshest source first, like the anchor: the CLI email reflects the live credential store,
+    // while oauthAccount's can survive an account switch stale.
+    email: status.email != null ? status.email : (account == null ? null : account.email),
     subscriptionType: cliType,
     rateLimitTier: agree ? account.rateLimitTier : null,
     expiresAt: null,

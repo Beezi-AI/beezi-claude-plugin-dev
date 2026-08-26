@@ -56,6 +56,7 @@ const cliStatus = (over = {}) => () => ({ ...CLI_JSON, ...over });
 const noCli = () => null;
 const account = (over = {}) => () => ({
   accountUuid: 'acc-1',
+  email: null,
   subscriptionType: 'max',
   rateLimitTier: 'default_claude_max_20x',
   expiresAt: null,
@@ -69,13 +70,14 @@ const noAnchor = () => null;
 
 test('resolveClaudeSubscription — CLI-only (VS Code extension shape): plan type without multiplier', () => {
   const r = resolveClaudeSubscription({
-    runClaudeAuthStatus: cliStatus(),
+    runClaudeAuthStatus: cliStatus({ email: 'ext@b.co' }),
     readClaudeAccount: noAccount,
     readClaudeAccountAnchor: noAnchor,
   });
   assert.equal(r.subscriptionType, 'max');
   assert.equal(r.rateLimitTier, null);
   assert.equal(r.accountUuid, null);
+  assert.equal(r.email, 'ext@b.co', 'the CLI email must survive with no oauthAccount at all');
   assert.equal(r.detectedVia, 'cli_status');
 });
 
@@ -93,13 +95,23 @@ test('resolveClaudeSubscription — oauthAccount-only (CLI missing): pre-existin
 
 test('resolveClaudeSubscription — both agree: CLI type + oauthAccount multiplier merge', () => {
   const r = resolveClaudeSubscription({
-    runClaudeAuthStatus: cliStatus(),
-    readClaudeAccount: account(),
+    runClaudeAuthStatus: cliStatus({ email: 'cli@b.co' }),
+    readClaudeAccount: account({ email: 'file@b.co' }),
     readClaudeAccountAnchor: noAnchor,
   });
   assert.equal(r.subscriptionType, 'max');
   assert.equal(r.rateLimitTier, 'default_claude_max_20x', 'agreeing profile donates the multiplier');
+  assert.equal(r.email, 'cli@b.co', 'the live CLI email outranks the possibly-stale profile email');
   assert.equal(r.detectedVia, 'merged');
+});
+
+test('resolveClaudeSubscription — a null CLI email falls back to the oauthAccount email', () => {
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: cliStatus(), // email: null — the observed CC 2.1.238 shape
+    readClaudeAccount: account({ email: 'file@b.co' }),
+    readClaudeAccountAnchor: noAnchor,
+  });
+  assert.equal(r.email, 'file@b.co');
 });
 
 test('resolveClaudeSubscription — disagreement: the stale profile must NOT donate its multiplier', () => {
