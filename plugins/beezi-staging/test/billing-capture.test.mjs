@@ -33,7 +33,7 @@ test('buildConfig — subscription env yields plan + raw fields', () => {
     new Date('2026-07-07T00:00:00.000Z'),
     { subscriptionType: 'pro' },
   );
-  assert.equal(cfg.version, 2);
+  assert.equal(cfg.version, 3);
   assert.equal(cfg.source, 'subscription');
   assert.equal(cfg.subscriptionType, 'pro');
   assert.equal(cfg.rateLimitTier, 'default_claude_max_5x');
@@ -80,7 +80,7 @@ test('buildConfig — each self-reported plan derives type, keeps tier null, mar
   ];
   for (const [plan, type] of cases) {
     const cfg = buildConfig({ plan, via: 'login-user' }, {}, new Date('2026-07-14T00:00:00.000Z'));
-    assert.equal(cfg.version, 2);
+    assert.equal(cfg.version, 3);
     assert.equal(cfg.source, 'subscription');
     assert.equal(cfg.plan, plan);
     assert.equal(cfg.subscriptionType, type);
@@ -290,7 +290,7 @@ test('reconcile — stuck machine heals: source unknown + a CLI answer → captu
   assert.equal(config.source, 'subscription');
   assert.equal(config.capturedBy, 'session-start');
   assert.equal(config.detectedVia, 'cli_status');
-  assert.equal(config.version, 2);
+  assert.equal(config.version, 3);
   assert.deepEqual(
     { value: config.accountAnchor.value, source: config.accountAnchor.source },
     { value: 'b@corp.co', source: 'email' },
@@ -398,7 +398,7 @@ test('reconcile — v1 config grandfathering: first pass adopts an anchor; an ob
   // here the CLI DID learn 'max', so shouldKeepExisting lets the observation through.
   assert.equal(config.plan, 'max');
   assert.equal(config.accountAnchor.value, 'b@corp.co');
-  assert.equal(config.version, 2);
+  assert.equal(config.version, 3);
 });
 
 test('reconcile — a degraded capture never overwrites a good record without a switch', () => {
@@ -564,6 +564,108 @@ test('reconcile — automatic mode still refuses the plan=unknown overwrite forc
   assert.equal(config.plan, 'max', 'a session-start pass must not degrade a good record');
 });
 
+// ─── accountUuid capture (both identity fields must reach the check-in) ──────
+
+test('buildConfig — stamps accountUuid from the resolved account fields', () => {
+  const cfg = buildConfig(
+    { subscriptionType: 'max', rateLimitTier: null, expiresAt: null, via: 'refresh' },
+    {},
+    T0,
+    { ...CLI_SUB, accountUuid: 'uuid-from-file' },
+    CLI_SUB.anchor, // the email anchor still wins the anchor slot
+  );
+  assert.equal(cfg.accountUuid, 'uuid-from-file');
+  assert.equal(cfg.accountAnchor.source, 'email');
+});
+
+test('buildConfig — an account_uuid anchor fills accountUuid when the account fields carry none', () => {
+  const cfg = buildConfig(
+    { plan: 'max_5x', via: 'login' },
+    {},
+    T0,
+    null,
+    { value: 'uuid-from-anchor', source: 'account_uuid' },
+  );
+  assert.equal(cfg.accountUuid, 'uuid-from-anchor');
+});
+
+test('buildConfig — stamps accountEmail from the resolved account fields', () => {
+  const cfg = buildConfig(
+    { subscriptionType: 'max', rateLimitTier: null, expiresAt: null, via: 'refresh' },
+    {},
+    T0,
+    { ...CLI_SUB, email: 'cli@corp.co' },
+    { value: 'uuid-from-anchor', source: 'account_uuid' }, // a uuid anchor: only the account fields know the email
+  );
+  assert.equal(cfg.accountEmail, 'cli@corp.co');
+  assert.equal(cfg.accountUuid, 'uuid-from-anchor');
+});
+
+test('buildConfig — an email anchor fills accountEmail when the account fields carry none', () => {
+  const cfg = buildConfig(
+    { plan: 'max_5x', via: 'login' },
+    {},
+    T0,
+    null,
+    { value: 'b@corp.co', source: 'email' },
+  );
+  assert.equal(cfg.accountEmail, 'b@corp.co');
+});
+
+test('buildConfig — an over-64-char email is copied raw, never through the token guard', () => {
+  // safeField refuses anything over 64 chars, and emails run to 254 — routing the email through
+  // it would throw the whole capture away.
+  const longEmail = `${'a'.repeat(80)}@example.com`;
+  const cfg = buildConfig({ plan: 'pro', via: 'login' }, {}, T0, { ...CLI_SUB, email: longEmail }, null);
+  assert.equal(cfg.accountEmail, longEmail);
+});
+
+test('reconcile — kept path adopts a newly visible accountUuid (identity-only write)', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'b@corp.co', source: 'email', updatedAt: iso(DAY_MS) },
+    },
+    sub: { ...CLI_SUB, subscriptionType: 'mystery_tier', accountUuid: 'uuid-late' },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(outcome, 'kept');
+  assert.equal(config.accountUuid, 'uuid-late');
+  assert.equal(config.plan, 'max_20x', 'plan fields untouched');
+});
+
+test('reconcile — kept path adopts a newly visible accountEmail (identity-only write)', () => {
+  const h = harness({
+    existing: {
+      version: 2,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      // A user_id anchor cannot donate the email — only the account fields can here.
+      accountAnchor: { value: 'uid-A', source: 'user_id', updatedAt: iso(DAY_MS) },
+    },
+    sub: {
+      ...CLI_SUB,
+      subscriptionType: 'mystery_tier',
+      email: 'b@corp.co',
+      anchor: { value: 'uid-A', source: 'user_id' },
+    },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'refresh' });
+  assert.equal(outcome, 'kept');
+  assert.equal(config.accountEmail, 'b@corp.co');
+  assert.equal(config.plan, 'max_20x', 'plan fields untouched');
+});
+
 test('reconcile — buildConfig stamps detectedVia and the anchor on a CLI capture', () => {
   const cfg = buildConfig(
     { subscriptionType: 'max', rateLimitTier: null, expiresAt: null, via: 'session-start' },
@@ -572,7 +674,7 @@ test('reconcile — buildConfig stamps detectedVia and the anchor on a CLI captu
     CLI_SUB,
     CLI_SUB.anchor,
   );
-  assert.equal(cfg.version, 2);
+  assert.equal(cfg.version, 3);
   assert.equal(cfg.detectedVia, 'cli_status');
   assert.deepEqual(cfg.accountAnchor, { value: 'b@corp.co', source: 'email', updatedAt: T0.toISOString() });
   assert.equal(cfg.plan, 'max');

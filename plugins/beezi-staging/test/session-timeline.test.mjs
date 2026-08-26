@@ -89,6 +89,37 @@ test('derives one active span per subagent transcript', (t) => {
   });
 });
 
+// Workflow-tool agents shard under subagents/workflows/<wf_id>/. They get a span like any other
+// subagent, and their wall clock is real session activity, so the axis has to reach it.
+test('derives a span for a workflow subagent and widens the axis to cover it', (t) => {
+  const { transcriptPath, sessionId } = setup(t);
+  const wfDir = path.join(path.dirname(transcriptPath), sessionId, 'subagents', 'workflows', 'wf_abc123');
+  fs.mkdirSync(wfDir, { recursive: true });
+  writeJsonl(path.join(wfDir, 'agent-w1.jsonl'), [
+    { type: 'assistant', timestamp: ts(1200) },
+    { type: 'assistant', timestamp: ts(1400) },
+  ]);
+  fs.writeFileSync(
+    path.join(wfDir, 'agent-w1.meta.json'),
+    JSON.stringify({ agentType: 'workflow-subagent', spawnDepth: 1 }),
+    'utf-8',
+  );
+  // The run's journal must not become a span of its own.
+  writeJsonl(path.join(wfDir, 'journal.jsonl'), [{ type: 'started', agentId: 'w1' }]);
+
+  const tl = computeSessionTimeline(transcriptPath, sessionId);
+
+  assert.equal(tl.subagents.length, 2);
+  const wf = tl.subagents.find((a) => a.agent_id === 'agent-w1');
+  assert.deepEqual(wf, {
+    agent_id: 'agent-w1',
+    agent_type: 'workflow-subagent',
+    started_at: ts(1200),
+    ended_at: ts(1400),
+  });
+  assert.equal(tl.ended_at, ts(1400), 'axis reaches the workflow agent, which ran past the main thread');
+});
+
 test('planning is driven by permissionMode; assistant work inherits it and vim type:mode is ignored', (t) => {
   const dir = makeTmpDir(t);
   const transcriptPath = path.join(dir, 'plan.jsonl');

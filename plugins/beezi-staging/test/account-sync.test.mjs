@@ -40,12 +40,13 @@ const okFetch = (calls = [], status = 200) => async (url, opts) => {
 
 function config(overrides = {}) {
   return {
-    version: 2,
+    version: 3,
     source: 'subscription',
     subscriptionType: 'max',
     rateLimitTier: 'default_claude_max_20x',
     plan: 'max_20x',
     accountAnchor: { value: 'acc-uuid-1', source: 'account_uuid', updatedAt: '2026-08-01T00:00:00.000Z' },
+    accountEmail: 'dev@example.com',
     ...overrides,
   };
 }
@@ -169,17 +170,19 @@ test('collectKeys — the same value under two names is reported once per kind',
 
 // ─── buildAccountSyncPayload ─────────────────────────────────────────────────
 
-test('payload — an account_uuid anchor fills accountUuid and nothing else identifies', () => {
+test('payload — an account_uuid anchor fills accountUuid and the stored accountEmail rides along', () => {
+  // The uuid-anchored machine is exactly the one the server-side merge was starving on: it knew
+  // the email locally but never sent it alongside the uuid.
   const p = buildAccountSyncPayload({ config: config(), env: {} });
   assert.equal(p.accountUuid, 'acc-uuid-1');
-  assert.equal('email' in p, false);
+  assert.equal(p.email, 'dev@example.com');
   assert.equal(p.subscriptionType, 'max');
   assert.equal(p.rateLimitTier, 'default_claude_max_20x');
 });
 
-test('payload — an email anchor fills email', () => {
+test('payload — an email anchor fills email (on-disk v2 config with no stored accountEmail)', () => {
   const p = buildAccountSyncPayload({
-    config: config({ accountAnchor: { value: 'dev@example.com', source: 'email' } }),
+    config: config({ accountAnchor: { value: 'dev@example.com', source: 'email' }, accountEmail: null }),
     env: {},
   });
   assert.equal(p.email, 'dev@example.com');
@@ -188,7 +191,7 @@ test('payload — an email anchor fills email', () => {
 
 test('payload — a user_id anchor identifies NOTHING (opaque local hash, not a vendor id)', () => {
   const p = buildAccountSyncPayload({
-    config: config({ accountAnchor: { value: 'aabbccdd-local-hash', source: 'user_id' } }),
+    config: config({ accountAnchor: { value: 'aabbccdd-local-hash', source: 'user_id' }, accountEmail: null }),
     env: {},
   });
   assert.equal('accountUuid' in p, false);
@@ -196,11 +199,62 @@ test('payload — a user_id anchor identifies NOTHING (opaque local hash, not a 
   assert.equal(p.subscriptionType, 'max', 'the tier is still known and still reported');
 });
 
+test('payload — a stored accountEmail identifies even under a user_id anchor', () => {
+  const p = buildAccountSyncPayload({
+    config: config({ accountAnchor: { value: 'aabbccdd-local-hash', source: 'user_id' } }),
+    env: {},
+  });
+  assert.equal(p.email, 'dev@example.com');
+  assert.equal('accountUuid' in p, false);
+});
+
+test('payload — a stored accountUuid rides along with an email anchor: BOTH identity fields', () => {
+  // The server's Case A merge (uuid row absorbs the email provisional row, repoints sessions)
+  // is only reachable when one payload presents the uuid — an email-only check-in and
+  // uuid-only session reports otherwise never meet.
+  const p = buildAccountSyncPayload({
+    config: config({
+      accountUuid: 'acc-uuid-1',
+      accountAnchor: { value: 'dev@example.com', source: 'email' },
+    }),
+    env: {},
+  });
+  assert.equal(p.accountUuid, 'acc-uuid-1');
+  assert.equal(p.email, 'dev@example.com');
+});
+
+test('payload — a stored accountUuid identifies even under a user_id anchor', () => {
+  const p = buildAccountSyncPayload({
+    config: config({
+      accountUuid: 'acc-uuid-1',
+      accountAnchor: { value: 'aabbccdd-local-hash', source: 'user_id' },
+      accountEmail: null,
+    }),
+    env: {},
+  });
+  assert.equal(p.accountUuid, 'acc-uuid-1');
+  assert.equal('email' in p, false);
+});
+
+test('payload — both identity fields stay inside the contract keys', () => {
+  const p = buildAccountSyncPayload({
+    config: config({
+      accountUuid: 'acc-uuid-1',
+      accountAnchor: { value: 'dev@example.com', source: 'email' },
+    }),
+    env: {},
+  });
+  assert.deepEqual(
+    Object.keys(p).sort(),
+    ['accountUuid', 'email', 'rateLimitTier', 'subscriptionType'],
+  );
+});
+
 test('payload — carries ONLY the contract keys (an unknown key would 400 the check-in)', () => {
   const p = buildAccountSyncPayload({ config: config(), env: { ANTHROPIC_API_KEY: SECRET } });
   assert.deepEqual(
     Object.keys(p).sort(),
-    ['accountUuid', 'keys', 'rateLimitTier', 'subscriptionType'],
+    ['accountUuid', 'email', 'keys', 'rateLimitTier', 'subscriptionType'],
   );
   assert.deepEqual(Object.keys(p.keys[0]).sort(), ['kind', 'last4', 'length', 'prefix']);
   // The server derives the plan itself — sending it would be rejected.
@@ -247,6 +301,8 @@ test('hash — any real change moves the digest', () => {
     env: {},
   });
   assert.notEqual(payloadHash(base), payloadHash(switched));
+  const emailChanged = buildAccountSyncPayload({ config: config({ accountEmail: 'other@example.com' }), env: {} });
+  assert.notEqual(payloadHash(base), payloadHash(emailChanged));
   const withKey = buildAccountSyncPayload({ config: config(), env: { ANTHROPIC_API_KEY: SECRET } });
   assert.notEqual(payloadHash(base), payloadHash(withKey));
 });
@@ -278,7 +334,7 @@ test('sync — `via` is provenance only and never reaches the wire body', async 
       env: {},
     });
     assert.equal('via' in calls[0].body, false);
-    assert.deepEqual(Object.keys(calls[0].body).sort(), ['accountUuid', 'rateLimitTier', 'subscriptionType']);
+    assert.deepEqual(Object.keys(calls[0].body).sort(), ['accountUuid', 'email', 'rateLimitTier', 'subscriptionType']);
   });
 });
 

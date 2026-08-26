@@ -76,6 +76,33 @@ function stampAnchor(anchor, now) {
   return { value: anchor.value, source: anchor.source, updatedAt: now.toISOString() };
 }
 
+// The vendor account id stored ALONGSIDE the anchor, whichever source won the anchor slot: the
+// CLI's email outranks the file uuid as the switch detector, but the server can only merge an
+// email-provisional account row into the canonical uuid row (and link sessions, which report the
+// uuid) when the check-in presents both identity fields.
+function resolveAccountUuid(account, anchor) {
+  if (account != null && typeof account.accountUuid === 'string' && account.accountUuid) {
+    return account.accountUuid;
+  }
+  if (anchor != null && anchor.source === 'account_uuid' && anchor.value != null) {
+    return anchor.value;
+  }
+  return null;
+}
+
+// The vendor email stored alongside the uuid, for the same merge: a machine anchored on the uuid
+// still knows the email and must present both. Copied raw like the anchor value — safeField's
+// 64-char cap would throw away a legitimate address (emails run to 254).
+function resolveAccountEmail(account, anchor) {
+  if (account != null && typeof account.email === 'string' && account.email) {
+    return account.email;
+  }
+  if (anchor != null && anchor.source === 'email' && anchor.value != null) {
+    return anchor.value;
+  }
+  return null;
+}
+
 export function buildConfig(args, env = process.env, now = new Date(), account = null, anchor = null) {
   if (args.plan != null) {
     const plan = String(args.plan).trim().toLowerCase();
@@ -96,6 +123,8 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
         selfReported: true,
         detectedVia: null,
         accountAnchor: stampAnchor(anchor, now),
+        accountUuid: resolveAccountUuid(account, anchor),
+        accountEmail: resolveAccountEmail(account, anchor),
       };
     }
     if (!SELF_REPORTED_PLANS.includes(plan)) {
@@ -124,6 +153,8 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
       selfReported: true,
       detectedVia: null,
       accountAnchor: stampAnchor(anchor, now),
+      accountUuid: resolveAccountUuid(account, anchor),
+      accountEmail: resolveAccountEmail(account, anchor),
     };
   }
   const subscriptionType = safeField(args.subscriptionType);
@@ -147,6 +178,8 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
     capturedBy: via == null ? 'manual' : via,
     detectedVia: account == null || account.detectedVia == null ? null : account.detectedVia,
     accountAnchor: stampAnchor(anchor, now),
+    accountUuid: resolveAccountUuid(account, anchor),
+    accountEmail: resolveAccountEmail(account, anchor),
   };
 }
 
@@ -279,11 +312,27 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       } else if (existing != null) {
         // Kept: adopt the anchor (v1 grandfathering included) so the NEXT switch is detectable,
         // and stamp the heartbeat. Identity-only write — plan fields and capturedAt untouched.
+        // A newly visible accountUuid or accountEmail is identity too and is adopted the same
+        // way, so a machine whose plan record is protected forever still gains the identity
+        // fields the check-in needs.
         const next = currentAnchor == null ? storedAnchor : currentAnchor;
         const keptAnchor = next == null
           ? (existing.accountAnchor == null ? null : existing.accountAnchor)
           : (sameAnchor(existing.accountAnchor, next) ? existing.accountAnchor : stampAnchor(next, now));
-        chosen = { ...existing, version: BILLING_CONFIG_VERSION, accountAnchor: keptAnchor, anchorCheckedAt: stampedNow };
+        const keptUuid = resolveAccountUuid(sub, currentAnchor);
+        const keptEmail = resolveAccountEmail(sub, currentAnchor);
+        chosen = {
+          ...existing,
+          version: BILLING_CONFIG_VERSION,
+          accountAnchor: keptAnchor,
+          anchorCheckedAt: stampedNow,
+          accountUuid: keptUuid == null
+            ? (existing.accountUuid == null ? null : existing.accountUuid)
+            : keptUuid,
+          accountEmail: keptEmail == null
+            ? (existing.accountEmail == null ? null : existing.accountEmail)
+            : keptEmail,
+        };
         writeConfig(chosen);
         outcome = sub == null ? 'no-signal' : 'kept';
       } else {

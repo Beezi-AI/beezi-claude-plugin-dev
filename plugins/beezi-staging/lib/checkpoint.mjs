@@ -20,13 +20,18 @@ import {
 } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
-import { listSubagentTranscripts, buildTaskDescriptionMap } from './subagents.mjs';
+import {
+  listSubagentTranscripts,
+  buildTaskDescriptionMap,
+  createWorkflowNameResolver,
+} from './subagents.mjs';
 import { claimIntervals, mergeIntervals, subtractIntervals, totalMs } from './active-time.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 import { claudeMdLines } from './claude-md.mjs';
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
+import { keyFingerprint } from './account-sync.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
@@ -225,8 +230,23 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try { utilization = readUtilization(); } catch { utilization = null; }
   let claudeAccount = null;
   try { claudeAccount = readAccount(); } catch { claudeAccount = null; }
+  // Identity stamp: which vendor account this machine is logged into NOW, in every shape it can
+  // prove — the uuid when oauthAccount carries one, the email otherwise (oauthAccount first, the
+  // CLI-observed anchor in billing.json as fallback), and the setup-token fingerprint for CI
+  // machines that expose nothing else. The server's ingest links the session to its account with
+  // whichever arrives; a user_id anchor is a local hash and never identifies.
+  const env = deps.env == null ? process.env : deps.env;
+  const anchor = billingConfig != null && billingConfig.accountAnchor != null ? billingConfig.accountAnchor : null;
+  const accountEmail = claudeAccount != null && claudeAccount.email
+    ? claudeAccount.email
+    : (anchor != null && anchor.source === 'email' && anchor.value != null ? anchor.value : null);
+  const oauthKey = keyFingerprint(env.CLAUDE_CODE_OAUTH_TOKEN);
   const usageStamp = {
     ...(claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
+    ...(accountEmail != null ? { account_email: accountEmail } : {}),
+    ...(oauthKey != null
+      ? { oauth_key_prefix: oauthKey.prefix, oauth_key_last4: oauthKey.last4, oauth_key_length: oauthKey.length }
+      : {}),
     ...(utilization
       ? {
           usage_five_hour_pct: utilization.fiveHourPct,
@@ -256,6 +276,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let coveredDirty = false;
 
   const enqueueSegments = (segs, segmentScope, extra = null, { includeContext = true } = {}) => {
+    // Range of the dropped segments so far, folded into the next payload we do send — the cursor
+    // consumes them either way, and a line in no payload is a hole coverage can never step over.
+    // Per call: the main transcript and each subagent file number their lines independently.
+    let carryFrom = null;
     for (const seg of segs) {
       // Main-transcript segments run through here first and so keep their full span; subagents bill
       // only the residual. Deterministic, and it puts the time on the thread that was blocked for
@@ -265,11 +289,20 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       const durationSec = intervals
         ? Math.round(totalMs(subtractIntervals(intervals, covered)) / 1000)
         : seg.stats.duration_sec;
-      if (seg.stats.token_total === 0 && durationSec === 0) continue;
+      if (seg.stats.token_total === 0 && durationSec === 0) {
+        if (carryFrom == null) carryFrom = seg.fromLine;
+        continue;
+      }
       const resolvedRemote = resolveRemote(seg.repoRoot);
       const remote = resolvedRemote == null ? localRemote(seg.repoRoot == null ? cwd : seg.repoRoot) : resolvedRemote;
       // Nothing left to name the work by — only reachable when the session has no cwd either.
-      if (!remote) { skipped.noRemote += 1; continue; }
+      if (!remote) {
+        if (carryFrom == null) carryFrom = seg.fromLine;
+        skipped.noRemote += 1;
+        continue;
+      }
+      // Widens the claimed span only; every stat below stays this segment's own.
+      const fromLine = carryFrom == null ? seg.fromLine : Math.min(carryFrom, seg.fromLine);
       // A single write failure must not abort the window (which would leave the cursor
       // unadvanced and re-process everything forever) — skip that segment and continue.
       // A subagent's context window is not the session's — its context fields never ship.
@@ -280,11 +313,11 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       const mdLines = resolveClaudeMdLines(seg.repoRoot);
       try {
         const payload = {
-          segmentId: `${segmentScope}:${seg.fromLine}-${seg.toLine}`,
+          segmentId: `${segmentScope}:${fromLine}-${seg.toLine}`,
           sessionId: session_id,
           remote,
           branch: clamp(seg.branch, BRANCH_MAX),
-          from_line: seg.fromLine,
+          from_line: fromLine,
           to_line: seg.toLine,
           ...billingFields,
           ...usageStamp,
@@ -296,6 +329,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
           duration_sec: durationSec,
         };
         emit(payload);
+        carryFrom = null;
         // Claim only what actually reached the queue: a failed write must not swallow the window
         // for every later segment too.
         if (intervals != null && intervals.length) {
@@ -304,7 +338,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
         }
         lastPayload = payload;
         enqueued += 1;
-      } catch { skipped.emitFailed += 1; /* keep going; the cursor still advances below */ }
+      } catch {
+        carryFrom = fromLine;
+        skipped.emitFailed += 1; /* keep going; the cursor still advances below */
+      }
     }
   };
   enqueueSegments(segments, session_id);
@@ -320,18 +357,23 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // Each subagent's display name is the `description` of the Task block that spawned it; join via
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
   const taskDescriptions = buildTaskDescriptionMap(transcript_path);
-  for (const { agentId, path: agentPath, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
+  const workflowNameOf = createWorkflowNameResolver(transcript_path, session_id);
+  for (const { agentId, path: agentPath, workflowId, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
     const agentFrom = agentCursors[agentId] == null ? 0 : agentCursors[agentId];
     let agentDelta;
     try {
       agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
     } catch { continue; }
     const taskDescription = toolUseId ? taskDescriptions.get(toolUseId) : null;
+    // A workflow agent has no spawning Task block, so its run's state file names it instead.
+    const workflowName = workflowNameOf(workflowId, agentId);
     enqueueSegments(agentDelta.segments, `${session_id}:${agentId}`, {
       is_subagent: true,
       agent_id: agentId,
       agent_type: clamp(agentType, AGENT_TYPE_MAX),
-      agent_name: toolUseId ? clamp(taskDescription == null ? null : taskDescription, AGENT_NAME_MAX) : null,
+      agent_name: workflowName != null
+        ? clamp(workflowName, AGENT_NAME_MAX)
+        : (toolUseId ? clamp(taskDescription == null ? null : taskDescription, AGENT_NAME_MAX) : null),
       spawn_depth: spawnDepth,
     }, { includeContext: false });
     // A subagent that dies on an API error never ends the main turn, so no StopFailure fires

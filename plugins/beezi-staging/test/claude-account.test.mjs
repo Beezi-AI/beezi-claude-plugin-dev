@@ -58,6 +58,18 @@ test('readClaudeAccount — accountUuid null when absent or non-string', () => {
   assert.equal(readClaudeAccount(withAccount({ accountUuid: 42, seatTier: 'pro' })).accountUuid, null);
 });
 
+// Some login surfaces write oauthAccount with ONLY emailAddress (no accountUuid) — the email is
+// then the machine's one vendor identity, and the identity stamp on session reports needs it.
+test('readClaudeAccount — exposes emailAddress as email', () => {
+  const r = readClaudeAccount(withAccount({ emailAddress: 'dev@example.com', seatTier: 'max' }));
+  assert.equal(r.email, 'dev@example.com');
+});
+
+test('readClaudeAccount — email null when absent or non-string', () => {
+  assert.equal(readClaudeAccount(withAccount({ seatTier: 'pro' })).email, null);
+  assert.equal(readClaudeAccount(withAccount({ emailAddress: 42, seatTier: 'pro' })).email, null);
+});
+
 test('readClaudeAccount — falls back to organizationRateLimitTier', () => {
   const r = readClaudeAccount(
     withAccount({ organizationType: 'claude_team', organizationRateLimitTier: 'default_raven' }),
