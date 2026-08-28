@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, buildConfig, shouldKeepExisting, reconcileBillingConfig } from '../lib/billing-capture.mjs';
+import { parseArgs, buildConfig, shouldKeepExisting, losesMultiplier, reconcileBillingConfig } from '../lib/billing-capture.mjs';
 
 test('parseArgs recognizes --from-claude as a boolean flag', () => {
   const a = parseArgs(['--from-claude', '--via', 'login']);
@@ -381,7 +381,7 @@ test('reconcile — cross-source anchor difference is inconclusive: self-reporte
   assert.equal(config.anchorCheckedAt, T0.toISOString(), 'heartbeat stamped so the next check is a week out');
 });
 
-test('reconcile — v1 config grandfathering: first pass adopts an anchor; an observed plan beats testimony', () => {
+test('reconcile — v1 grandfathering adopts an anchor without trading max_20x for a bare max', () => {
   const h = harness({
     existing: {
       version: 1,
@@ -394,11 +394,30 @@ test('reconcile — v1 config grandfathering: first pass adopts an anchor; an ob
     sub: { ...CLI_SUB, subscriptionType: 'max', anchor: { value: 'b@corp.co', source: 'email' } },
   });
   const { config } = reconcileBillingConfig(h.deps);
-  // selfReported testimony beats an observed capture only when the capture learned nothing —
-  // here the CLI DID learn 'max', so shouldKeepExisting lets the observation through.
-  assert.equal(config.plan, 'max');
+  // A CLI capture with no tier resolves 'max', which is the SAME product with the multiplier
+  // missing — not a plan the user moved to. Letting it through cost the multiplier permanently,
+  // since 'max' is not 'unknown' and nothing ever asks again. The identity work still lands.
+  assert.equal(config.plan, 'max_20x');
   assert.equal(config.accountAnchor.value, 'b@corp.co');
   assert.equal(config.version, 3);
+});
+
+test('losesMultiplier — only same-product detail loss is refused, never a real plan change', () => {
+  assert.equal(losesMultiplier('max', 'max_20x'), true);
+  assert.equal(losesMultiplier('max', 'max_5x'), true);
+  // Genuine moves off Max must still record, or a downgraded user is billed to the wrong plan.
+  assert.equal(losesMultiplier('pro', 'max_20x'), false);
+  assert.equal(losesMultiplier('team', 'max_5x'), false);
+  assert.equal(losesMultiplier('max_5x', 'max_20x'), false);
+  assert.equal(losesMultiplier('max', 'max'), false);
+  assert.equal(losesMultiplier('unknown', 'max_20x'), false);
+});
+
+test('shouldKeepExisting — a detected bare max never replaces a stored multiplier, self-reported or not', () => {
+  assert.equal(shouldKeepExisting({ plan: 'max' }, { plan: 'max_20x' }), true);
+  assert.equal(shouldKeepExisting({ plan: 'max' }, { selfReported: true, plan: 'max_5x' }), true);
+  // and the upgrade direction stays open, which is how already-degraded machines heal
+  assert.equal(shouldKeepExisting({ plan: 'max_20x' }, { plan: 'max' }), false);
 });
 
 test('reconcile — a degraded capture never overwrites a good record without a switch', () => {
@@ -545,6 +564,67 @@ test('reconcile force — account switch reports switched and drops the testimon
   assert.equal(config.plan, 'max');
   assert.equal(config.selfReported, undefined);
   assert.equal(config.accountAnchor.value, 'b@corp.co');
+});
+
+// ─── the CLAUDE_CODE_OAUTH_TOKEN identity axis ───────────────────────────────
+
+const OAUTH_ANCHOR = Object.freeze({ value: 'sk-ant-oat01...yyyy:53', source: 'oauth_key' });
+
+test('reconcile — an oauth_key anchor is stored verbatim (safeField never sees it)', () => {
+  // safeField refuses anything matching /sk-ant/; the anchor value must not be routed through it.
+  const h = harness({
+    existing: { version: 3, source: 'unknown', capturedAt: iso(30 * DAY_MS) },
+    sub: { ...CLI_SUB, anchor: OAUTH_ANCHOR },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps);
+  assert.equal(outcome, 'captured');
+  assert.equal(config.accountAnchor.value, 'sk-ant-oat01...yyyy:53');
+  assert.equal(config.accountAnchor.source, 'oauth_key');
+});
+
+test('reconcile — rotating to a different setup token is an account switch', () => {
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'pro',
+      subscriptionType: 'pro',
+      selfReported: true,
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: { value: 'sk-ant-oat01...aaaa:53', source: 'oauth_key', updatedAt: iso(DAY_MS) },
+    },
+    sub: { ...CLI_SUB, anchor: OAUTH_ANCHOR },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps, { force: true, via: 'login' });
+  assert.equal(outcome, 'switched');
+  assert.equal(config.accountAnchor.value, 'sk-ant-oat01...yyyy:53');
+  assert.equal(config.selfReported, undefined, "the previous account's testimony is dropped");
+});
+
+test('reconcile — an email→oauth_key source flip is inconclusive, not a switch (kept, adopted)', () => {
+  // Cross-source anchors never prove a mismatch. The stored uuid/email survive on disk; the
+  // payload boundary is what stops them from being sent while the token is exported.
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(30 * DAY_MS),
+      accountAnchor: { value: 'a@corp.co', source: 'email', updatedAt: iso(30 * DAY_MS) },
+      accountUuid: 'acc-uuid-1',
+      accountEmail: 'a@corp.co',
+    },
+    sub: { ...CLI_SUB, plan: null, subscriptionType: null, anchor: OAUTH_ANCHOR },
+  });
+  const { config, outcome } = reconcileBillingConfig(h.deps);
+  assert.equal(outcome, 'kept');
+  assert.equal(config.plan, 'max_20x');
+  assert.equal(config.accountAnchor.source, 'oauth_key');
+  assert.equal(config.accountUuid, 'acc-uuid-1');
+  assert.equal(config.accountEmail, 'a@corp.co');
 });
 
 test('reconcile — automatic mode still refuses the plan=unknown overwrite force allows', () => {

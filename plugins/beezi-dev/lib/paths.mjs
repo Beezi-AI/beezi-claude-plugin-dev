@@ -68,6 +68,13 @@ export function trackingStateFile() {
 // Last-sent account check-in marker: { version, lastSyncedHash, lastSyncedAt }. Root-level for
 // the same pruneStale() reason as the audit ledger and the tracking cache — an expiring marker
 // would re-POST the same unchanged account payload on every session start.
+// The portal's last answer about this machine's setup token. Root of beeziHome() beside
+// billing.json, not under state/: pruneStale() sweeps state/ and queue/, and an expiring answer
+// would re-nag a user who already fixed their plan.
+export function oauthKeyStatusFile() {
+  return path.join(beeziHome(), 'oauth-key-status.json');
+}
+
 export function accountSyncStateFile() {
   return path.join(beeziHome(), 'account-sync.json');
 }

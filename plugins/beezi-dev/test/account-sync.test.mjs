@@ -189,6 +189,43 @@ test('payload — an email anchor fills email (on-disk v2 config with no stored 
   assert.equal('accountUuid' in p, false);
 });
 
+const OAUTH_TOKEN = `sk-ant-oat01-${'y'.repeat(40)}`;
+
+test('payload — a fingerprintable CLAUDE_CODE_OAUTH_TOKEN replaces the stored uuid/email', () => {
+  // The server anchors an account row on the fingerprint itself (Case C). Sending the stored pair
+  // alongside would let it win the resolution — it is matched BEFORE the fingerprint — and on a
+  // token machine that pair is routinely a previous login's leftovers.
+  const p = buildAccountSyncPayload({
+    config: config({ accountUuid: 'acc-uuid-1' }),
+    env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN },
+  });
+  assert.equal('accountUuid' in p, false);
+  assert.equal('email' in p, false);
+  assert.equal(p.subscriptionType, 'max', 'the plan axis is untouched');
+  assert.equal(p.rateLimitTier, 'default_claude_max_20x');
+  assert.equal(p.keys.length, 1);
+  assert.equal(p.keys[0].kind, CredentialKind.CLAUDE_OAUTH_TOKEN);
+});
+
+test('payload — a token too short to fingerprint suppresses nothing', () => {
+  // Truthy but unidentifiable: the server would drop the key entry, so suppressing here would
+  // trade a usable identity for none at all.
+  const p = buildAccountSyncPayload({
+    config: config({ accountUuid: 'acc-uuid-1' }),
+    env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01' },
+  });
+  assert.equal(p.accountUuid, 'acc-uuid-1');
+  assert.equal(p.email, 'dev@example.com');
+  assert.equal('keys' in p, false);
+});
+
+test('payload — unexporting the token brings the stored identity back (suppression is not erasure)', () => {
+  const stored = config({ accountUuid: 'acc-uuid-1' });
+  const withToken = buildAccountSyncPayload({ config: stored, env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN } });
+  assert.equal('accountUuid' in withToken, false);
+  assert.equal(buildAccountSyncPayload({ config: stored, env: {} }).accountUuid, 'acc-uuid-1');
+});
+
 test('payload — a user_id anchor identifies NOTHING (opaque local hash, not a vendor id)', () => {
   const p = buildAccountSyncPayload({
     config: config({ accountAnchor: { value: 'aabbccdd-local-hash', source: 'user_id' }, accountEmail: null }),

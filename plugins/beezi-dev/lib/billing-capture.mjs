@@ -183,11 +183,28 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
   };
 }
 
+// The one degradation that is never new information: the SAME product with the multiplier gone.
+// `max` alongside a stored `max_5x`/`max_20x` means the tier was not readable this time, not that
+// the user moved to a different plan — and the loss is unrecoverable, because `max` is not
+// `unknown` so no staleness check and no nudge ever asks again.
+//
+// Deliberately narrow. A fresh `pro` or `team` over a stored `max_20x` IS a real plan change and
+// must still record; only same-product detail loss is refused.
+export function losesMultiplier(freshPlan, existingPlan) {
+  if (freshPlan !== 'max') return false;
+  return existingPlan === 'max_5x' || existingPlan === 'max_20x';
+}
+
 // A self-reported plan must survive automatic re-capture: when the fresh account
 // fields still normalize to 'unknown', overwriting would destroy the only good
 // data and restart the refresh-nudge loop the selfReported exemption exists to end.
 export function shouldKeepExisting(freshConfig, existingConfig) {
-  if (existingConfig == null || existingConfig.selfReported !== true) return false;
+  if (existingConfig == null) return false;
+  // Applies to every record, self-reported or not, and to the forced path too: /beezi:refresh
+  // exists to correct a stale plan, but a re-resolution that dropped the tier has not learned
+  // anything to correct it with.
+  if (losesMultiplier(freshConfig.plan, existingConfig.plan)) return true;
+  if (existingConfig.selfReported !== true) return false;
   const declaredTier = Boolean(existingConfig.plan) && existingConfig.plan !== 'unknown';
   // A declared api-key or gateway machine carries no plan at all — the source IS the declaration.
   const declaredSource = existingConfig.source === BillingSource.ANTHROPIC_API_KEY

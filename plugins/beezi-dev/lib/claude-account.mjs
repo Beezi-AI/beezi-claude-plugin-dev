@@ -15,6 +15,16 @@ export function configCandidates(env, homedir) {
 
 // Coarse product tier from the org/seat shape (team/enterprise/max/pro/free), or null.
 // The rateLimitTier still carries the Max multiplier and is normalized downstream.
+//
+// organizationType names the product for EVERY account, not just real organizations: a personal
+// Max subscription is written as `claude_max` with `seatTier: null` and the multiplier parked in
+// `organizationRateLimitTier`. Observed on a live personal Max 20x machine:
+//   { organizationType: 'claude_max', seatTier: null, userRateLimitTier: null,
+//     organizationRateLimitTier: 'default_claude_max_20x', billingType: 'stripe_subscription' }
+// Matching only enterprise/team here returned null for that shape, which made the merge in
+// claude-auth-status.mjs treat the profile as unable to state its type and discard the tier it
+// was holding — every personal Max user reported as plain `max`. seatTier stays as the fallback
+// for seat-based orgs, where the org names the company and the seat names the product.
 function deriveSubscriptionType(account) {
   const org = String(account.organizationType == null ? '' : account.organizationType).toLowerCase();
   if (org.includes('enterprise')) return 'enterprise';
@@ -23,6 +33,9 @@ function deriveSubscriptionType(account) {
   if (seat.includes('max')) return 'max';
   if (seat.includes('pro')) return 'pro';
   if (seat.includes('free')) return 'free';
+  if (org.includes('max')) return 'max';
+  if (org.includes('pro')) return 'pro';
+  if (org.includes('free')) return 'free';
   return null;
 }
 
