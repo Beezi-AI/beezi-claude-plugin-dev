@@ -35,6 +35,7 @@ import {
 } from './billing-config.mjs';
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
+import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.mjs';
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
 // Also records where the session lives (cwd + transcript path) so /beezi:track can find
@@ -233,6 +234,27 @@ export async function runSessionStart(input, deps = {}) {
         ? 'Beezi: this machine sends Claude Code through a custom API endpoint (gateway), so its billing cannot be read locally — usage is reported as "unknown". Run /beezi:login to say whether your Claude subscription or the gateway pays.'
         : 'Beezi: cannot determine how this machine bills Claude — usage is reported as "unknown". Run /beezi:login to set it.';
       message = message ? `${message}\n${nudge}` : nudge;
+    }
+
+    // A setup-token machine is the one case the two nudges above structurally cannot reach:
+    // billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN (so the UNKNOWN branch never
+    // fires) and isStale() is false for a config that never resolved a plan (so the stale branch
+    // never fires either). Its usage lands priced at nothing, and nothing local can tell — only the
+    // portal knows whether that key has been given an account and a plan.
+    //
+    // Answered from a cached verdict, so the steady state is one file read. A null answer means the
+    // question could not be asked, which is not the same as "unresolved" and says nothing.
+    let keyStatus = null;
+    try {
+      const fetchKeyStatus = deps.fetchOauthKeyStatus == null
+        ? _fetchOauthKeyStatus
+        : deps.fetchOauthKeyStatus;
+      keyStatus = await fetchKeyStatus(token, { fetchImpl });
+    } catch { /* best-effort */ }
+    if (keyStatus != null && keyStatus.needsAttention) {
+      const nudge = 'Beezi: this machine signs in with a Claude setup token, and Beezi does not know which subscription it bills — its usage is reported without a plan. Open Beezi → Connections to set the plan or link it to an existing subscription.';
+      message = message ? `${message}
+${nudge}` : nudge;
     }
 
     // The status-line wrapper is the only source of LIVE plan-usage readings, and it is a

@@ -36,6 +36,16 @@ export const ENDPOINTS = Object.freeze({
   // Vendor-generic on purpose (Codex reports here too): the server reads the vendor off the
   // X-Beezi-Agent header postJson already sends.
   accountSync: "/me/cli-agent/account",
+  // Read-only twin of accountSync: what the portal knows about this machine's setup token, so the
+  // session-start hook can say when its usage is landing unpriced.
+  credentialStatus: "/me/cli-agent/credential-status",
+  // Interactive resolution of the subscription behind CLAUDE_CODE_OAUTH_TOKEN (/beezi:refresh).
+  // All three take the key FINGERPRINT, never the token: /key-resolution reads what the portal
+  // knows and what the caller may choose, /plan records a manual plan, /link attaches the key to
+  // one of the caller's subscriptions (or claims it for this account when nothing matches).
+  keyResolution: "/me/cli-agent/key-resolution",
+  keyResolutionPlan: "/me/cli-agent/key-resolution/plan",
+  keyResolutionLink: "/me/cli-agent/key-resolution/link",
 });
 
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";

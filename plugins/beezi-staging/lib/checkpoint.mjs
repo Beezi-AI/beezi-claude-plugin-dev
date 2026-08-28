@@ -31,7 +31,7 @@ import { claudeMdLines } from './claude-md.mjs';
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
-import { keyFingerprint } from './account-sync.mjs';
+import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
@@ -240,10 +240,15 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const accountEmail = claudeAccount != null && claudeAccount.email
     ? claudeAccount.email
     : (anchor != null && anchor.source === 'email' && anchor.value != null ? anchor.value : null);
+  // A fingerprintable setup token REPLACES the uuid/email here, exactly as it does in the account
+  // check-in: the server resolves a session's account by uuid, then email, then by oauth
+  // fingerprint, so a stale uuid alongside a live fingerprint would win the resolution outright.
+  // The fingerprint arm reaches the account the check-in bound this credential to.
   const oauthKey = keyFingerprint(env.CLAUDE_CODE_OAUTH_TOKEN);
+  const oauthIdentity = hasOauthTokenIdentity(env);
   const usageStamp = {
-    ...(claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
-    ...(accountEmail != null ? { account_email: accountEmail } : {}),
+    ...(!oauthIdentity && claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
+    ...(!oauthIdentity && accountEmail != null ? { account_email: accountEmail } : {}),
     ...(oauthKey != null
       ? { oauth_key_prefix: oauthKey.prefix, oauth_key_last4: oauthKey.last4, oauth_key_length: oauthKey.length }
       : {}),

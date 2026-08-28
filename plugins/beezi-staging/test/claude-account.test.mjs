@@ -51,6 +51,36 @@ test('readClaudeAccount — exposes accountUuid from oauthAccount', () => {
     withAccount({ accountUuid: 'acc-123', seatTier: 'max', userRateLimitTier: 'default_claude_max_5x' }),
   );
   assert.equal(r.accountUuid, 'acc-123');
+  assert.equal(r.rateLimitTier, 'default_claude_max_5x');
+  assert.equal(r.subscriptionType, 'max');
+});
+
+test('readClaudeAccount — personal Max: organizationType names the product, seatTier is null', () => {
+  // Verbatim from a live Max 20x machine. A personal subscription is written as an
+  // "organization" of type claude_max: seatTier and userRateLimitTier are both null and the
+  // multiplier sits in organizationRateLimitTier. Deriving from seatTier alone returned null
+  // here, which downstream read as "this profile cannot state its type" and cost the tier.
+  const r = readClaudeAccount(withAccount({
+    accountUuid: '164073bf-3bef-4127-93d5-b0bb5d8ec7e5',
+    emailAddress: 'b@icloud.com',
+    seatTier: null,
+    organizationType: 'claude_max',
+    userRateLimitTier: null,
+    organizationRateLimitTier: 'default_claude_max_20x',
+    billingType: 'stripe_subscription',
+  }));
+  assert.equal(r.subscriptionType, 'max');
+  assert.equal(r.rateLimitTier, 'default_claude_max_20x');
+});
+
+test('readClaudeAccount — a seat tier still outranks the org product label', () => {
+  // Order matters for seat-based orgs: the org names the company, the seat names the product.
+  const r = readClaudeAccount(
+    withAccount({ organizationType: 'claude_team', seatTier: 'max', userRateLimitTier: 'default_claude_max_20x' }),
+  );
+  assert.equal(r.subscriptionType, 'team', 'an explicit team org is still a team account');
+  const p = readClaudeAccount(withAccount({ organizationType: 'claude_pro' }));
+  assert.equal(p.subscriptionType, 'pro');
 });
 
 test('readClaudeAccount — accountUuid null when absent or non-string', () => {

@@ -22,6 +22,26 @@ const PAYLOAD = JSON.stringify({
   },
 });
 
+// The chain is run through spawnSync(shell: true) — cmd.exe on Windows, /bin/sh elsewhere — so a
+// fixture written in one shell's syntax silently does nothing in the other. cmd has no `;`
+// sequencing and no `sleep`, and it cannot find an unquoted interpreter path containing spaces
+// ("C:\Program Files\nodejs\node.exe"). What these tests pin — capture-before-render ordering and
+// a chained line larger than the pipe buffer — is platform-independent, so the fixtures name both
+// shells rather than skipping the coverage.
+const isWindows = process.platform === 'win32';
+
+// Always quoted: harmless for /bin/sh, required for the spaces in the Windows install path.
+const NODE = `"${process.execPath}"`;
+
+// Emit exact bytes with no trailing newline, without depending on a `printf` binary existing.
+const emit = (text) => `${NODE} -e "process.stdout.write('${text}')"`;
+
+// Signals that it started, then stays running until the process group is killed. This is the slow
+// custom status line (git-heavy repo, npx-launched line) whose observation the ordering bug lost.
+const blockUntilKilled = (marker) => (isWindows
+  ? `echo started> "${marker}" & ping -n 30 127.0.0.1 > nul`
+  : `printf started > '${marker}'; sleep 5; printf CHAINED`);
+
 function tmpDir(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -80,9 +100,7 @@ function runStatusline({ home, chain, killOnMarker = null }) {
 test('statusline script — the capture survives a kill landing while the chained line runs', async (t) => {
   const home = tmpDir(t, 'statusline-kill-');
   const marker = path.join(tmpDir(t, 'statusline-marker-'), 'started');
-  // Signals that the chain is running, then stays running until the group is killed. This is the
-  // slow custom status line (git-heavy repo, npx-launched line) that the ordering bug lost.
-  const chain = `printf started > '${marker}'; sleep 5; printf CHAINED`;
+  const chain = blockUntilKilled(marker);
 
   const { stdout, killed } = await runStatusline({ home, chain, killOnMarker: marker });
 
@@ -97,7 +115,7 @@ test('statusline script — the capture survives a kill landing while the chaine
 
 test('statusline script — an uninterrupted chain still renders byte-for-byte and captures', async (t) => {
   const home = tmpDir(t, 'statusline-chain-');
-  const { stdout } = await runStatusline({ home, chain: `printf 'my custom line'` });
+  const { stdout } = await runStatusline({ home, chain: emit('my custom line') });
 
   assert.equal(stdout, 'my custom line');
   const pending = pendingRows(home);
@@ -110,7 +128,7 @@ test('statusline script — a chained line larger than the pipe buffer arrives w
   // Exiting with process.exit() would drop the remainder and silently clip someone's line.
   const home = tmpDir(t, 'statusline-big-');
   const size = 200000;
-  const chain = `${process.execPath} -e "process.stdout.write('x'.repeat(${size}))"`;
+  const chain = `${NODE} -e "process.stdout.write('x'.repeat(${size}))"`;
 
   const { stdout } = await runStatusline({ home, chain });
 
@@ -132,7 +150,7 @@ test('statusline script — a capture that throws never blanks the chained line'
   fs.writeFileSync(blocker, 'x');
   const home = path.join(blocker, 'home');
 
-  const { stdout } = await runStatusline({ home, chain: `printf 'still rendered'` });
+  const { stdout } = await runStatusline({ home, chain: emit('still rendered') });
 
   assert.equal(stdout, 'still rendered');
   assert.equal(fs.existsSync(usageFile(home)), false);

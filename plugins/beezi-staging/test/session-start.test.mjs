@@ -324,6 +324,57 @@ test('12. stale subscription plan — appends /beezi:refresh nudge', async (t) =
   assert.match(result ?? '', /\/beezi:refresh/);
 });
 
+// ─── setup-token nudge: the case neither billing nudge can structurally reach ──
+
+// billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN and isStale() is false for a config
+// that never resolved a plan, so without this check a CI runner reports unpriced usage in silence.
+test('12b. portal says the setup token has no plan — nudges to Connections', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-key-unresolved' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: true, subscriptionPlan: null }),
+  });
+
+  assert.match(result ?? '', /setup token/);
+  assert.match(result ?? '', /Connections/);
+});
+
+test('12c. a resolved setup token is silent', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-key-resolved' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: false, subscriptionPlan: 'max_20x' }),
+  });
+
+  assert.doesNotMatch(result ?? '', /setup token/);
+});
+
+// "Could not ask" is not "unresolved" — an offline machine must not be told its billing is broken.
+test('12d. an unanswerable probe says nothing', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-key-offline' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => null,
+  });
+
+  assert.doesNotMatch(result ?? '', /setup token/);
+});
+
 // ─── test 13: fresh subscription plan → no nudge ─────────────────────────────
 
 test('13. fresh subscription plan — no nudge appended', async (t) => {

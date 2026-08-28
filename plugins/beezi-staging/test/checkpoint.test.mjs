@@ -56,10 +56,18 @@ function fakeGitRepo(branch, remote, reflog = '') {
 
 // Multi-repo router: `spec` maps a repo root → { branch, remote, reflog? }.
 // rev-parse --show-toplevel is identity (dir passed IS the root); other calls look up by root.
+// Separator-insensitive so the fake matches the way a filesystem would. The repo signal is a
+// tool_use file_path, and joining a directory to it yields mixed separators on Windows
+// ("C:\tmp\repo-b/f.ts"); the resolver normalizes those to "/" before it asks git, so an exact
+// string lookup here missed every key and every repo silently resolved to its local: fallback.
+const asKey = (p) => String(p).replace(/\\/g, '/');
+
 function fakeGitByRoot(spec) {
+  const byKey = new Map();
+  for (const root of Object.keys(spec)) byKey.set(asKey(root), spec[root]);
   return (args, cwd) => {
     if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return cwd;
-    const entry = spec[cwd];
+    const entry = byKey.get(asKey(cwd));
     if (!entry) throw new Error(`no repo for ${cwd}`);
     if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return entry.branch;
     if (args[0] === 'reflog') return entry.reflog ?? '';
@@ -2096,6 +2104,27 @@ test('identity stamp — oauth setup token rides as a fingerprint, never whole',
     false,
     'the middle of the token must never leave the machine',
   );
+});
+
+test('identity stamp — the oauth setup token replaces the uuid/email, never rides beside them', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-id5', transcript_path: transcript, cwd: dir },
+    usageDeps({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SECRET },
+      readClaudeAccount: () => ({ accountUuid: 'stale-uuid', email: 'previous@example.com' }),
+    }),
+  );
+  const p = readQueue(dir)[0].payload;
+  // uuid is matched BEFORE the fingerprint server-side, so a leftover oauthAccount would win the
+  // resolution outright and attribute the session to the previous account.
+  assert.equal('account_uuid' in p, false);
+  assert.equal('account_email' in p, false);
+  assert.equal(p.oauth_key_last4, OAUTH_SECRET.slice(-4));
 });
 
 test('usage stamp — context fields ride main segments, stripped from subagent segments', async (t) => {

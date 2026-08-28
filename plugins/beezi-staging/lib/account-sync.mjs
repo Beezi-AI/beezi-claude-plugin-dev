@@ -6,6 +6,11 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { accountSyncStateFile } from './paths.mjs';
 import { hasCustomGateway } from './billing.mjs';
 import { readBillingConfig as _readBillingConfig } from './billing-config.mjs';
+import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+
+// Re-exported from its leaf home so existing importers keep working; the definition moved so the
+// identity helpers could live in a module with no import cycle back into billing config.
+export { keyFingerprint };
 
 const STATE_VERSION = 1;
 
@@ -28,24 +33,6 @@ export const CredentialKind = Object.freeze({
 
 // The API caps the array; sending more would 400 the whole check-in.
 const MAX_KEYS = 8;
-
-// Below this length a prefix+suffix pair leaves too little hidden to be safe: at 20 characters the
-// 12+4 window still conceals at least 4, which is also exactly what makes the server keep the entry
-// (it drops anything where prefix.length + last4.length >= length). Real credentials are far longer;
-// anything shorter is a placeholder, an empty export, or a truncated value — nothing worth a row.
-const MIN_FINGERPRINTABLE_LENGTH = 20;
-
-// A non-reversible shape of a credential: the first 12 characters, the last 4, and the length.
-// The middle is never read, never stored and never sent. Returns null for anything that is not a
-// long-enough string — callers must treat null as "nothing known", never as an error.
-export function keyFingerprint(value) {
-  if (typeof value !== 'string') return null;
-  // Every field is derived from the SAME trimmed string: mixing a raw length with trimmed
-  // prefix/last4 would desynchronize the server's reconstruction check.
-  const s = value.trim();
-  if (s.length < MIN_FINGERPRINTABLE_LENGTH) return null;
-  return { prefix: s.slice(0, 12), last4: s.slice(-4), length: s.length };
-}
 
 function pushKey(out, kind, value) {
   const fingerprint = keyFingerprint(value);
@@ -113,6 +100,12 @@ function label(value) {
 // opaque local hash — sending it as an accountUuid would mint a canonical account row for an id
 // no vendor ever issued.
 //
+// EXCEPT on a machine exporting a fingerprintable CLAUDE_CODE_OAUTH_TOKEN, where only the
+// fingerprint in `keys` travels: the stored uuid/email describe whatever login last touched that
+// box, and both are matched BEFORE the fingerprint server-side, so sending them would let the
+// stale one win outright. The server attributes such a check-in to the caller's own account
+// membership. See oauth-identity.mjs for the rationale, the limits and the server-version floor.
+//
 // Every field is optional by contract: unknown is first-class, and a machine that can prove
 // nothing simply reports nothing.
 export function buildAccountSyncPayload({ config = null, env = process.env } = {}) {
@@ -120,14 +113,16 @@ export function buildAccountSyncPayload({ config = null, env = process.env } = {
   const anchorSource = anchor == null ? null : anchor.source;
   const anchorValue = anchor == null ? null : label(anchor.value);
   const payload = {};
-  const storedUuid = config == null ? null : label(config.accountUuid);
-  const accountUuid = storedUuid != null
-    ? storedUuid
-    : (anchorSource === 'account_uuid' ? anchorValue : null);
-  if (accountUuid != null) payload.accountUuid = accountUuid;
-  const storedEmail = config == null ? null : label(config.accountEmail);
-  const email = storedEmail != null ? storedEmail : (anchorSource === 'email' ? anchorValue : null);
-  if (email != null) payload.email = email;
+  if (!hasOauthTokenIdentity(env)) {
+    const storedUuid = config == null ? null : label(config.accountUuid);
+    const accountUuid = storedUuid != null
+      ? storedUuid
+      : (anchorSource === 'account_uuid' ? anchorValue : null);
+    if (accountUuid != null) payload.accountUuid = accountUuid;
+    const storedEmail = config == null ? null : label(config.accountEmail);
+    const email = storedEmail != null ? storedEmail : (anchorSource === 'email' ? anchorValue : null);
+    if (email != null) payload.email = email;
+  }
   const subscriptionType = config == null ? null : label(config.subscriptionType);
   if (subscriptionType != null) payload.subscriptionType = subscriptionType;
   const rateLimitTier = config == null ? null : label(config.rateLimitTier);
