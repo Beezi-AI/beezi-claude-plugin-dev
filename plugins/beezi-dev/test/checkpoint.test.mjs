@@ -2203,3 +2203,62 @@ test('claude_md_lines — reported from the segment repo root, omitted when the 
   assert.equal(bareItems.length, 1, 'exactly one queue file');
   assert.equal('claude_md_lines' in bareItems[0].payload, false);
 });
+
+// ─── corrupt queue files: salvage what is readable, quarantine what is not ───────────────
+
+// The exact wreckage two concurrent pre-atomic writers left behind: a whole payload followed by
+// the tail of a longer previous one. These used to be re-read and skipped on every flush forever.
+test('flushQueue salvages a payload buried under trailing wreckage and posts it', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  const p = path.join(qdir, 'seg-salvage.json');
+  const good = JSON.stringify({ segmentId: 'sess-salvage:1-1', sessionId: 'sess-salvage' });
+  fs.writeFileSync(p, good + '65070,"context_final_model":"claude-opus-5"}', 'utf-8');
+
+  const posted = [];
+  const fetchImpl = async (_url, opts) => { posted.push(JSON.parse(opts.body)); return { status: 200 }; };
+  const result = await flushQueue('tok', { fetchImpl });
+
+  assert.equal(posted.length, 1, 'the recovered payload was posted');
+  assert.equal(posted[0].segmentId, 'sess-salvage:1-1');
+  assert.equal(result.salvaged, 1);
+  assert.equal(result.flushed, 1);
+  assert.equal(fs.existsSync(p), false, 'file removed once accepted');
+});
+
+test('flushQueue quarantines an unreadable file instead of retrying it forever', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  const p = path.join(qdir, 'seg-garbage.json');
+  fs.writeFileSync(p, 'not json at all', 'utf-8');
+
+  let calls = 0;
+  const result = await flushQueue('tok', { fetchImpl: async () => { calls += 1; return { status: 200 }; } });
+
+  assert.equal(calls, 0, 'nothing postable, so nothing posted');
+  assert.equal(result.quarantined, 1);
+  assert.equal(fs.existsSync(p), false);
+  assert.equal(fs.existsSync(p + '.corrupt'), true, 'set aside, and pruneStale expires it');
+});
+
+test('flushQueue ignores stray .tmp and .corrupt entries', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  fs.writeFileSync(path.join(qdir, 'seg.json.1234.abcd.tmp'), '{"segmentId":"x:1-1"}', 'utf-8');
+  fs.writeFileSync(path.join(qdir, 'seg-old.json.corrupt'), 'garbage', 'utf-8');
+
+  let calls = 0;
+  const result = await flushQueue('tok', { fetchImpl: async () => { calls += 1; return { status: 200 }; } });
+
+  assert.equal(calls, 0, 'a half-written temp is never posted');
+  assert.equal(result.quarantined, 0, 'and an already-quarantined file is not re-quarantined');
+});

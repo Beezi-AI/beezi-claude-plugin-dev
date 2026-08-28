@@ -19,7 +19,7 @@ import {
   recordApiKeyEvidence,
 } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
-import { readJson, writeJsonSecure } from './fs-store.mjs';
+import { readJson, readJsonSalvaged, writeJsonSecure } from './fs-store.mjs';
 import {
   listSubagentTranscripts,
   buildTaskDescriptionMap,
@@ -541,7 +541,7 @@ function sweepHeldQueue(dir, result, now = Date.now()) {
 export async function flushQueue(token, deps = {}) {
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
-  const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, trackingDisabled: false, lastError: null };
+  const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, salvaged: 0, quarantined: 0, trackingDisabled: false, lastError: null };
   const dir = queueDir();
 
   // Dark workspace: no readdir-and-post loop, just the hold-window sweep. Files stay for
@@ -574,9 +574,21 @@ export async function flushQueue(token, deps = {}) {
   }
 
   for (const file of files) {
+    // Only queued payloads. Skips the `.tmp` of a writer that died mid-write and the `.corrupt`
+    // files quarantined below, neither of which is ever postable; pruneStale expires both.
+    if (!file.endsWith('.json')) continue;
     const filePath = path.join(dir, file);
-    const payload = readJson(filePath);
-    if (payload == null) continue;
+    const { value: payload, salvaged } = readJsonSalvaged(filePath);
+    // Nothing recoverable, or what came back is not a postable payload. Quarantine rather than
+    // `continue`: an unparseable file used to be re-read on every flush forever, invisibly, and
+    // the session's analytics were lost without a signal. A cleanly parsed payload is posted
+    // exactly as before — the server stays the judge of its contents.
+    if (payload == null || (salvaged && payload.segmentId == null)) {
+      result.quarantined += 1;
+      try { fs.renameSync(filePath, `${filePath}.corrupt`); } catch { /* best-effort */ }
+      continue;
+    }
+    if (salvaged) result.salvaged += 1;
 
     try {
       let res = await postJson(reportUrl, token, payload, { fetchImpl });
