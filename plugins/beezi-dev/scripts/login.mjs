@@ -11,6 +11,7 @@ import { startLoopback } from '../lib/loopback.mjs';
 import { setMachineClientId } from '../lib/machine-identity.mjs';
 import { whoami } from '../lib/whoami.mjs';
 import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
+import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 function openBrowser(url) {
@@ -77,7 +78,15 @@ async function run() {
       // Forced: the user asked for a re-link, and this is the one path that reaches the account
       // check-in with a token already in hand. Bounded and silent — a failure never fails a login.
       // After the output on purpose: the user's confirmation must not wait on a background call.
-      await syncAccountIfNeeded(existing.access_token, { force: true, via: 'login' });
+      // A human is waiting on this command, so the token resolution can afford the OS-environment
+      // probe that the hook paths cannot: process.env → user settings file → persistent OS env.
+      // Claude Code scrubs CLAUDE_CODE_OAUTH_TOKEN out of every child environment it builds, so on
+      // a setup-token machine this is the only way the check-in learns which key it is running.
+      await syncAccountIfNeeded(
+        existing.access_token,
+        { force: true, via: 'login' },
+        { env: oauthTokenEnvWithOsProbe(process.env) },
+      );
       return;
     }
     if (who && !who.valid) {
@@ -156,7 +165,13 @@ async function run() {
   // Forced for the same reason the tracking cache is cleared above: this is a fresh identity, and
   // an account-sync marker left by the PREVIOUS login would otherwise suppress the check-in.
   // After the output, so the link confirmation never waits on a best-effort call.
-  await syncAccountIfNeeded(tokens.access_token, { force: true, via: 'login' });
+  // Same reasoning as the already-linked branch above: interactive, so the OS-environment probe
+  // is affordable, and os-env-token caches per process so this second call re-uses the first read.
+  await syncAccountIfNeeded(
+    tokens.access_token,
+    { force: true, via: 'login' },
+    { env: oauthTokenEnvWithOsProbe(process.env) },
+  );
 }
 
 // argv ('start'/'wait') is ignored: the PKCE flow is a single blocking command,

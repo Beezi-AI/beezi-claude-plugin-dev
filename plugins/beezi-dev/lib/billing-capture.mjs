@@ -13,7 +13,9 @@ import {
   isStale as _isStale,
 } from './billing-config.mjs';
 import { resolveClaudeSubscription as _resolveClaudeSubscription } from './claude-auth-status.mjs';
+import { oauthTokenAnchor as _oauthTokenAnchor } from './oauth-identity.mjs';
 import { readClaudeAccountAnchor as _readClaudeAccountAnchor } from './claude-account.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 import { UserError } from './friendly-error.mjs';
 
 // The credential fields are short opaque labels. Anything token-shaped (an
@@ -122,6 +124,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
         capturedBy: capturedVia == null ? 'manual' : capturedVia,
         selfReported: true,
         detectedVia: null,
+        planSource: null,
         accountAnchor: stampAnchor(anchor, now),
         accountUuid: resolveAccountUuid(account, anchor),
         accountEmail: resolveAccountEmail(account, anchor),
@@ -152,6 +155,9 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
       capturedBy: capturedVia == null ? 'manual' : capturedVia,
       selfReported: true,
       detectedVia: null,
+      // Provenance of the PLAN: null when the env overruled the declaration, since there is then
+      // no plan above for it to describe.
+      planSource: isSub ? 'self_reported' : null,
       accountAnchor: stampAnchor(anchor, now),
       accountUuid: resolveAccountUuid(account, anchor),
       accountEmail: resolveAccountEmail(account, anchor),
@@ -164,19 +170,29 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
   // signal) the source stays unknown rather than being assumed.
   const source = resolveBillingSource(env, account);
   const isSub = source === BillingSource.SUBSCRIPTION;
+  // The resolver told us the on-disk profile describes a different credential than the one in
+  // force (a setup token), so there is no plan tuple to persist. Gate it explicitly: the incoming
+  // fields are already null, and normalizePlan(null, null) is 'unknown' — a label that reads as
+  // "captured, could not classify" and would be reported as such. `null` says we did not capture.
+  const planUnresolved = account != null && account.planSource === 'unresolved';
+  const keepPlan = isSub && !planUnresolved;
   // null/undefined/'' must stay null — Number(null) is 0, which would look like an
   // already-expired timestamp and force a permanent "stale" state.
   const expiresAt = args.expiresAt == null || args.expiresAt === '' ? NaN : Number(args.expiresAt);
   return {
     version: BILLING_CONFIG_VERSION,
     source,
-    subscriptionType: isSub ? subscriptionType : null,
-    rateLimitTier: isSub ? rateLimitTier : null,
-    plan: isSub ? normalizePlan(subscriptionType, rateLimitTier) : null,
+    subscriptionType: keepPlan ? subscriptionType : null,
+    rateLimitTier: keepPlan ? rateLimitTier : null,
+    plan: keepPlan ? normalizePlan(subscriptionType, rateLimitTier) : null,
     credentialsExpiresAt: Number.isFinite(expiresAt) ? expiresAt : null,
     capturedAt: now.toISOString(),
     capturedBy: via == null ? 'manual' : via,
     detectedVia: account == null || account.detectedVia == null ? null : account.detectedVia,
+    // Provenance of the PLAN, distinct from detectedVia (provenance of the tuple's fields).
+    // 'unresolved' records that the nulls above are a verdict rather than a gap, which is what
+    // keeps isStale() and the report gate from treating them as a plan waiting to be re-read.
+    planSource: planUnresolved ? 'unresolved' : (keepPlan ? 'claude_login' : null),
     accountAnchor: stampAnchor(anchor, now),
     accountUuid: resolveAccountUuid(account, anchor),
     accountEmail: resolveAccountEmail(account, anchor),
@@ -204,12 +220,26 @@ export function shouldKeepExisting(freshConfig, existingConfig) {
   // exists to correct a stale plan, but a re-resolution that dropped the tier has not learned
   // anything to correct it with.
   if (losesMultiplier(freshConfig.plan, existingConfig.plan)) return true;
+  // An `unresolved` capture is the ABSENCE of local evidence, so it must never erase a plan that
+  // came from somewhere local evidence cannot reach. The Beezi server's answer for this key's
+  // fingerprint (planSource 'key_resolution', written by plan-writeback.mjs) is exactly that: it
+  // is the ONLY thing that can price a setup-token machine, and every weekly heartbeat re-runs a
+  // capture that will keep reporting 'unresolved' for as long as the token is in force.
+  // The literal rather than an import: this must not couple the local capture to the writeback
+  // module, and the vocabulary is documented in one place there.
+  if (freshConfig.planSource === 'unresolved' && existingConfig.planSource === 'key_resolution') return true;
   if (existingConfig.selfReported !== true) return false;
   const declaredTier = Boolean(existingConfig.plan) && existingConfig.plan !== 'unknown';
   // A declared api-key or gateway machine carries no plan at all — the source IS the declaration.
   const declaredSource = existingConfig.source === BillingSource.ANTHROPIC_API_KEY
     || existingConfig.source === BillingSource.THIRD_PARTY;
   if (!declaredTier && !declaredSource) return false;
+  // An `unresolved` verdict says the on-disk PROFILE is not evidence for the credential in force.
+  // It says nothing about the user's own testimony — the token may well belong to the very account
+  // they described — so it must not wipe the one answer no automatic capture can reconstruct, or
+  // the nudge loop this exemption exists to end starts over. (An account SWITCH still overrides,
+  // above in the reconcile: there the record demonstrably describes someone else.)
+  if (freshConfig.planSource === 'unresolved') return true;
   // Overwrite only when the fresh capture actually learned something. An `unknown` source means it
   // did not, so the user's answer must survive — otherwise every /beezi:refresh on a machine whose
   // billing cannot be observed wipes the answer and restarts the nudge loop.
@@ -255,8 +285,10 @@ function learnedPlan(config) {
 // self-reported plan — including re-writing `plan=unknown`, which is what routes the login flow to
 // its tier question. `options.via` names the writer (capturedBy).
 //
-// Returns { config, source, outcome } — outcome is 'switched' | 'captured' | 'kept' | 'no-signal'
-// | 'none' (no trigger fired), for the manual commands' one-line reports.
+// Returns { config, source, outcome } — outcome is 'switched' | 'captured' | 'cleared' | 'kept' |
+// 'no-signal' | 'none' (no trigger fired), for the manual commands' one-line reports. 'cleared' is
+// a write like 'captured', but of a record with NO plan: the CLI said the credential in force is a
+// setup token, so the tuple that was there described a different account.
 // Best-effort by contract: any failure returns whatever is known and must never throw.
 export function reconcileBillingConfig(deps = {}, options = {}) {
   const readConfig = deps.readBillingConfig == null ? _readBillingConfig : deps.readBillingConfig;
@@ -265,7 +297,10 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
   const isStaleImpl = deps.isStale == null ? _isStale : deps.isStale;
   const resolveSubscription = deps.resolveClaudeSubscription == null ? _resolveClaudeSubscription : deps.resolveClaudeSubscription;
   const readFileAnchor = deps.readClaudeAccountAnchor == null ? _readClaudeAccountAnchor : deps.readClaudeAccountAnchor;
-  const env = deps.env == null ? process.env : deps.env;
+  const tokenAnchorOf = deps.oauthTokenAnchor == null ? _oauthTokenAnchor : deps.oauthTokenAnchor;
+  // Same rule as every other token read: a settings-file token counts when nothing exported
+  // one, and an injected deps.env is trusted verbatim.
+  const env = deps.env == null ? oauthTokenEnv(process.env) : deps.env;
   const now = deps.now == null ? new Date() : deps.now;
   const force = options.force === true;
   const via = options.via == null ? 'session-start' : options.via;
@@ -276,10 +311,20 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
     const existing = readConfig();
     chosen = existing;
     const storedAnchor = existing == null ? null : existing.accountAnchor;
-    // Cheap file-only precheck; the CLI's own (fresher) anchor re-checks after the spawn. A
+    // Cheap precheck, no spawn; the CLI's own (fresher) anchor re-checks after one. A
     // cross-source pair here is inconclusive by design — the weekly heartbeat covers it.
     let fileAnchor = null;
     try { fileAnchor = readFileAnchor(); } catch { fileAnchor = null; }
+
+    // The setup token's OWN anchor, read from the already-resolved env — free, no process spawn.
+    // Without it a key ROTATION is invisible here: ~/.claude.json's file anchor does not move when
+    // the token changes, so on a token machine the precheck compared two things that never differ,
+    // nothing triggered, and a plan the server resolved for the PREVIOUS fingerprint kept shipping
+    // under the new one. A key_resolution plan is an answer scoped to one fingerprint, so serving it
+    // under a different one is a category error — worse than a stale plan, and one the pre-token
+    // code could not make, because plans were not key-scoped then.
+    let tokenAnchor = null;
+    try { tokenAnchor = tokenAnchorOf(env); } catch { tokenAnchor = null; }
 
     // The heartbeat bounds how long an account switch can stay invisible: an email anchor only
     // exists in the CLI's answer, and a self-reported plan never goes stale, so without a periodic
@@ -293,11 +338,19 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       || (existing.source === BillingSource.UNKNOWN && existing.selfReported !== true)
       || isStaleImpl(existing, now.getTime())
       || anchorChanged(storedAnchor, fileAnchor)
+      || anchorChanged(storedAnchor, tokenAnchor)
       || heartbeatDue;
 
     if (trigger) {
       let sub = null;
-      try { sub = resolveSubscription(); } catch { sub = null; }
+      // `env` is passed EXPLICITLY, and that is the whole point of this line. resolveClaudeSubscription
+      // otherwise defaults to oauthTokenEnv(process.env) — the NON-probing variant — and rebuilds a
+      // second, un-probed env of its own. On a setup-token machine that env has no token (Claude Code
+      // scrubs CLAUDE_CODE_OAUTH_TOKEN from every child it spawns), so the CLI is asked without the
+      // token, answers authMethod:"claude.ai", and the previous login's plan is captured as fact —
+      // exactly the bug the oauth_token branch below exists to prevent. The reconcile's env has been
+      // through all three tiers; the resolver must judge by the same one.
+      try { sub = resolveSubscription({ env }); } catch { sub = null; }
       const currentAnchor = sub != null && sub.anchor != null ? sub.anchor : fileAnchor;
       const switched = anchorChanged(storedAnchor, currentAnchor);
       const fresh = buildConfig(
@@ -314,8 +367,14 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       // account overwrites anything shouldKeepExisting does not protect, `plan=unknown` included.
       // The automatic path additionally demands a real plan, so a transiently unreadable machine
       // can never degrade a good record on its own.
+      // Losing a plan we now know we cannot resolve IS new information, so it has to be able to
+      // win the write. Without this a machine that once captured `team` from a previous
+      // interactive login would keep reporting it forever under a setup token: learnedPlan(fresh)
+      // is false for a cleared capture, so the automatic path would take the `kept` branch and
+      // leave the stale tuple in place on every heartbeat.
+      const clearsPlan = fresh.planSource === 'unresolved';
       const overwrite = sub != null && !shouldKeepExisting(fresh, existing)
-        && (force || learnedPlan(fresh));
+        && (force || learnedPlan(fresh) || clearsPlan);
       if (switched) {
         // The account changed: the old record — self-reported or not — describes someone else.
         // A degraded fresh capture still wins; the unknown-nudge then asks the right account.
@@ -325,7 +384,7 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       } else if (overwrite) {
         chosen = { ...fresh, anchorCheckedAt: stampedNow };
         writeConfig(chosen);
-        outcome = 'captured';
+        outcome = clearsPlan ? 'cleared' : 'captured';
       } else if (existing != null) {
         // Kept: adopt the anchor (v1 grandfathering included) so the NEXT switch is detectable,
         // and stamp the heartbeat. Identity-only write — plan fields and capturedAt untouched.

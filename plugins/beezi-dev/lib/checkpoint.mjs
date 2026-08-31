@@ -35,6 +35,7 @@ import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
 import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
@@ -228,7 +229,50 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       billingConfig = recorded;
     }
   }
-  const billingFields = resolveBilling(billingConfig);
+  // Resolved HERE, above resolveBilling, and used for the identity stamp below too: both readings
+  // must come from ONE env. resolveBilling's `env` parameter defaults to oauthTokenEnv(process.env),
+  // so omitting it silently computed a SECOND, un-probed env — the source could then disagree with
+  // the fingerprint stamped ten lines further down. Passing it explicitly closes that.
+  //
+  // Why the probing variant: Claude Code 2.1.251 deletes CLAUDE_CODE_OAUTH_TOKEN from every child
+  // environment it builds, so a hook never inherits it however the user set it — process.env alone
+  // cannot answer here. The chain is process.env → user settings file → OS persistent environment.
+  //
+  // WHAT THIS COSTS, HONESTLY. This is the PostToolUse-Bash hook: a FRESH PROCESS on every Bash
+  // tool call. os-env-token's cache is per process, so it amortizes nothing across calls — the
+  // price below is paid once per Bash command, not once per session.
+  //
+  // Measured on Windows 11 after os-env-token learned to tell "reg ran and found nothing"
+  // (authoritative — no PowerShell) from "reg could not execute" (fall back):
+  //   token present in User scope, one `reg query` hit ......... 38ms median (34.8-46.0, n=8)
+  //   no token set, two `reg query` misses, no PowerShell ............... ~56ms
+  //   PowerShell fallback, only when reg cannot execute at all .......... ~261ms
+  // (the previous no-token behaviour, which always spawned PowerShell, was ~316ms). macOS is one
+  // ~10ms `launchctl getenv`; Linux has no OS-level persistent env store and spawns nothing at all.
+  //
+  // The 38ms is the figure to trust for this call site: it was taken at the ENTRYPOINT, spawning
+  // `node scripts/checkpoint.mjs` end to end (822ms with the probe firing vs 783ms with a token
+  // pre-set in process.env so it is skipped). That the entrypoint delta matches ONE isolated probe
+  // is also the evidence that the module-level cache holds here — no call site double-probes.
+  //
+  // And it is only paid when the two cheap tiers came up empty, so a machine whose token is
+  // exported or sits in settings.json never probes.
+  //
+  // That is accepted, with eyes open, as the price of a correct identity stamp: this is the path
+  // the fingerprint has to reach, and a setup-token machine that skips it reports usage no account
+  // can be resolved for. The alternative — SessionStart probing once and persisting the
+  // fingerprint under BEEZI_HOME for the hook to read — was considered and DEFERRED: it adds a
+  // cache that can outlive a rotated token and go quietly wrong, which is a worse failure than
+  // milliseconds. Do not build it here without deciding how it is invalidated.
+  //
+  // An INJECTED deps.env is trusted verbatim — it describes a machine under test, and a
+  // developer's own settings file (or registry) must not leak into it.
+  // Only the probe seam is forwarded, never the whole deps bag: os-env-token turns its own cache
+  // off when it sees an injected env/platform/run, and checkpoint's deps carry neither meaning.
+  const env = deps.env == null
+    ? oauthTokenEnvWithOsProbe(process.env, { osEnvOauthToken: deps.osEnvOauthToken })
+    : deps.env;
+  const billingFields = resolveBilling(billingConfig, env);
 
   // Subscription-usage stamp: account-level utilization correlated onto every payload of this
   // checkpoint. Keys are omitted (not null) when unknown. usage_account_uuid is the CACHE's own
@@ -245,7 +289,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // CLI-observed anchor in billing.json as fallback), and the setup-token fingerprint for CI
   // machines that expose nothing else. The server's ingest links the session to its account with
   // whichever arrives; a user_id anchor is a local hash and never identifies.
-  const env = deps.env == null ? process.env : deps.env;
+  // `env` was resolved above the billing block so both readings share one answer — see there.
   const anchor = billingConfig != null && billingConfig.accountAnchor != null ? billingConfig.accountAnchor : null;
   const accountEmail = claudeAccount != null && claudeAccount.email
     ? claudeAccount.email

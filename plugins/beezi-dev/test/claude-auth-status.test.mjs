@@ -254,3 +254,158 @@ test('resolveClaudeSubscription — a throwing reader degrades to the other laye
   assert.equal(r.detectedVia, 'oauth_account');
   assert.equal(r.subscriptionType, 'max');
 });
+
+// ─── setup-token machines: the CLI is asked with the token in force ──────────
+//
+// Claude Code deletes CLAUDE_CODE_OAUTH_TOKEN from every subprocess environment it builds, so
+// without re-injecting it the child answers for whatever login last touched the disk. These lock
+// down both halves: the token must reach the child's ENVIRONMENT, and it must reach nothing else.
+
+const SETUP_TOKEN = `sk-ant-oat01-${'z'.repeat(40)}`;
+
+// The real shape observed with a setup token in the child's environment (CC 2.1.251): authMethod
+// flips to oauth_token and email/orgId/orgName/subscriptionType are simply absent.
+const TOKEN_JSON = { loggedIn: true, authMethod: 'oauth_token', apiProvider: 'firstParty' };
+
+test('runClaudeAuthStatus — the token reaches the child env and NEVER argv', () => {
+  const calls = [];
+  const r = runClaudeAuthStatus({
+    exec: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return JSON.stringify(TOKEN_JSON); },
+    oauthToken: SETUP_TOKEN,
+    processEnv: { PATH: '/usr/bin', HOME: '/home/x' },
+  });
+  assert.equal(calls[0].opts.env.CLAUDE_CODE_OAUTH_TOKEN, SETUP_TOKEN);
+  assert.equal(calls[0].opts.env.PATH, '/usr/bin', 'the base environment is preserved, not replaced');
+  assert.equal(calls[0].cmd.includes('sk-ant'), false);
+  assert.equal(JSON.stringify(calls[0].args).includes('sk-ant'), false);
+  assert.equal(r.authMethod, 'oauth_token');
+  assert.equal(JSON.stringify(r).includes('sk-ant'), false, 'the token never comes back out');
+});
+
+test('runClaudeAuthStatus — with no token the spawn is byte-identical to before (no env override)', () => {
+  const calls = [];
+  runClaudeAuthStatus({ exec: (cmd, args, opts) => { calls.push(opts); return JSON.stringify(CLI_JSON); } });
+  assert.equal('env' in calls[0], false);
+});
+
+test('runClaudeAuthStatus — the Windows shell fallback carries the env, never the token', () => {
+  const calls = [];
+  const r = runClaudeAuthStatus({
+    platform: 'win32',
+    oauthToken: SETUP_TOKEN,
+    processEnv: { PATH: 'C:\\bin' },
+    exec: (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      if (calls.length === 1) throw new Error('ENOENT');
+      return JSON.stringify(TOKEN_JSON);
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].cmd, 'claude auth status --json', 'one fixed literal command line');
+  assert.equal(calls[1].opts.shell, true);
+  assert.equal(calls[1].opts.env.CLAUDE_CODE_OAUTH_TOKEN, SETUP_TOKEN);
+  assert.equal(calls[1].cmd.includes('sk-ant'), false, 'a shell command line is world-readable');
+  assert.equal(r.authMethod, 'oauth_token');
+});
+
+test('resolveClaudeSubscription — hands the recovered token down to the spawn', () => {
+  const seen = [];
+  resolveClaudeSubscription({
+    runClaudeAuthStatus: (d) => { seen.push(d); return { ...TOKEN_JSON }; },
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: { CLAUDE_CODE_OAUTH_TOKEN: SETUP_TOKEN },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].oauthToken, SETUP_TOKEN, 'without this the child answers for the stale login');
+});
+
+test('resolveClaudeSubscription — authMethod oauth_token clears the plan the stale profile names', () => {
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: () => ({ ...TOKEN_JSON }),
+    // The leftovers of a previous interactive /login: a full, confident, wrong profile.
+    readClaudeAccount: account({ email: 'previous@b.co' }),
+    readClaudeAccountAnchor: () => ({ value: 'acc-1', source: 'account_uuid' }),
+    env: { CLAUDE_CODE_OAUTH_TOKEN: SETUP_TOKEN },
+  });
+  assert.equal(r.subscriptionType, null);
+  assert.equal(r.rateLimitTier, null, 'the multiplier belongs to a different account');
+  assert.equal(r.billingType, null);
+  assert.equal(r.seatTier, null);
+  assert.equal(r.organizationType, null);
+  assert.equal(r.planSource, 'unresolved');
+  assert.equal(r.detectedVia, 'oauth_token');
+  // Identity is unchanged: the token anchor still wins, exactly as before.
+  assert.deepEqual(r.anchor, {
+    value: `sk-ant-oat01...${SETUP_TOKEN.slice(-4)}:${SETUP_TOKEN.length}`,
+    source: 'oauth_key',
+  });
+});
+
+test('resolveClaudeSubscription — an oauth_token answer never falls into the oauth_account branch', () => {
+  // The second route to the same bug: a token answer carries NO subscriptionType, so the
+  // `cliType == null` arm would otherwise return the whole stale profile verbatim.
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: () => ({ ...TOKEN_JSON, subscriptionType: null }),
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: {},
+  });
+  assert.notEqual(r.detectedVia, 'oauth_account');
+  assert.equal(r.detectedVia, 'oauth_token');
+  assert.equal(r.rateLimitTier, null);
+});
+
+test('resolveClaudeSubscription — a loggedIn:false token answer still clears, never leaks the profile', () => {
+  // An expired or revoked token is not a reason to start trusting the previous login's leftovers.
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: () => ({ loggedIn: false, authMethod: 'oauth_token' }),
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: {},
+  });
+  assert.equal(r.planSource, 'unresolved');
+  assert.equal(r.rateLimitTier, null);
+});
+
+test('resolveClaudeSubscription — authMethod claude.ai is completely unchanged', () => {
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: cliStatus({ email: 'cli@b.co' }),
+    readClaudeAccount: account({ email: 'cli@b.co' }),
+    readClaudeAccountAnchor: noAnchor,
+    env: {},
+  });
+  assert.equal(r.subscriptionType, 'max');
+  assert.equal(r.rateLimitTier, 'default_claude_max_20x');
+  assert.equal(r.detectedVia, 'merged');
+  assert.equal(r.planSource, undefined, 'only the cleared case stamps a planSource');
+});
+
+test('resolveClaudeSubscription — an UNKNOWN authMethod is not evidence and clears nothing', () => {
+  // Open vocabulary: third_party / api_key_helper / api_key / none today, whatever ships next.
+  for (const method of ['api_key_helper', 'third_party', 'api_key', 'none', 'something_new']) {
+    const r = resolveClaudeSubscription({
+      runClaudeAuthStatus: cliStatus({ authMethod: method, email: 'cli@b.co' }),
+      readClaudeAccount: account({ email: 'cli@b.co' }),
+      readClaudeAccountAnchor: noAnchor,
+      env: {},
+    });
+    assert.equal(r.detectedVia, 'merged', `authMethod ${method} must not clear`);
+    assert.equal(r.rateLimitTier, 'default_claude_max_20x');
+  }
+});
+
+test('resolveClaudeSubscription — an unavailable or unparseable CLI clears nothing', () => {
+  // runClaudeAuthStatus already normalizes "missing / timed out / garbage stdout" to null.
+  for (const readStatus of [noCli, () => { throw new Error('boom'); }, () => ({}), () => ({ authMethod: null })]) {
+    const r = resolveClaudeSubscription({
+      runClaudeAuthStatus: readStatus,
+      readClaudeAccount: account(),
+      readClaudeAccountAnchor: noAnchor,
+      env: {},
+    });
+    assert.equal(r.detectedVia, 'oauth_account', 'an unanswerable question is not evidence');
+    assert.equal(r.rateLimitTier, 'default_claude_max_20x');
+    assert.equal(r.planSource, undefined);
+  }
+});

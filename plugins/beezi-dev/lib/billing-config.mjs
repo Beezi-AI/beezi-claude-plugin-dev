@@ -8,6 +8,7 @@ import {
   hasCustomGateway,
 } from './billing.mjs';
 import { readClaudeAccount, readClaudeAuthSignals } from './claude-account.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // v2 adds detectedVia (provenance of the plan tuple) and accountAnchor (identity for
 // account-switch detection). v3 adds accountEmail (the vendor email stored alongside accountUuid
@@ -26,9 +27,26 @@ export function writeBillingConfig(obj) {
   writeJsonSecure(billingConfigFile(), obj);
 }
 
+// A plan the capture positively determined it cannot resolve locally: the credential in force is a
+// CLAUDE_CODE_OAUTH_TOKEN, so `claude auth status` names no account and no product, and everything
+// ~/.claude.json says belongs to whichever login last touched the disk. See claude-auth-status.mjs.
+//
+// Exported because "unresolvable" is a different state from "missing" and callers must be able to
+// branch on it: re-reading it changes nothing, so the /beezi:refresh nudge has nothing to offer —
+// only the server, from the key row, knows what that credential is entitled to.
+export function isPlanUnresolvable(config) {
+  return config != null && config.planSource === 'unresolved';
+}
+
 // Stale only matters for subscription billing: env-based sources carry no plan.
 export function isStale(config, now = Date.now(), staleMs = STALE_MS) {
   if (!config || config.source !== BillingSource.SUBSCRIPTION) return false;
+  // BEFORE the missing-plan check, which a cleared record would otherwise trip on `plan: null`.
+  // Not stale — unresolvable. Staleness means "this answer has aged out, go read it again", and
+  // re-reading is exactly what cannot help here; a true verdict would spawn the CLI on every
+  // session start and raise a refresh nudge the user has no way to satisfy. The reconcile's weekly
+  // anchor heartbeat still re-verifies it, and a token rotation invalidates it immediately.
+  if (isPlanUnresolvable(config)) return false;
   if (!config.plan || config.plan === 'unknown') return true;
   // A self-reported plan can never be re-resolved automatically, so age must not
   // invalidate it; the user re-runs /beezi:login when their tier changes.
@@ -40,8 +58,17 @@ export function isStale(config, now = Date.now(), staleMs = STALE_MS) {
 }
 
 // The report payload keys for the subscription plan, or {} when not applicable.
+//
+// An unresolvable plan OMITS all three rather than sending explicit nulls, the same way
+// thirdPartyReportFields omits its key: the three fields are how this client asserts a plan, and a
+// setup-token machine has nothing to assert. Omission also matters because billing.mjs forces
+// SUBSCRIPTION on a truthy CLAUDE_CODE_OAUTH_TOKEN, so `billing_source` still says subscription and
+// this gate is the only thing standing between a plan we know is someone else's and the wire.
+// The server prices these sessions from the credential row instead — a null here would be this
+// client overwriting that answer with a guess it just decided it could not make.
 export function subscriptionReportFields(billingSource, config) {
   if (billingSource !== BillingSource.SUBSCRIPTION || !config) return {};
+  if (isPlanUnresolvable(config)) return {};
   return {
     subscription_type: config.subscriptionType == null ? null : config.subscriptionType,
     rate_limit_tier: config.rateLimitTier == null ? null : config.rateLimitTier,
@@ -87,9 +114,17 @@ export function recordApiKeyEvidence(config, now = new Date()) {
 // counts as subscription proof while fresh — the reconcile re-verifies it weekly — which is the
 // one scoped exception to "billing.json's own source is never an input": the file here carries a
 // dated OBSERVATION, and the freshness window keeps a switch from asserting itself forever.
+//
+// A plan the Beezi server resolved for this machine's key (planSource 'key_resolution', written by
+// plan-writeback.mjs) counts too, and has to be checked separately: that writer SPREADS the
+// existing config, so a `detectedVia` left over from a previous interactive login survives next to
+// it. Reading provenance from detectedVia alone would then either mislabel a server answer as a
+// CLI capture, or — if the writer nulled detectedVia to stay honest — switch off the usage-snapshot
+// drain's plan donation and lose correct data. Accepting both fields keeps the two consistent.
 export function isFreshCliCapture(config, now = Date.now(), freshMs = STALE_MS) {
   if (config == null || config.selfReported === true) return false;
-  if (config.detectedVia !== 'cli_status' && config.detectedVia !== 'merged') return false;
+  const keyResolved = config.planSource === 'key_resolution';
+  if (!keyResolved && config.detectedVia !== 'cli_status' && config.detectedVia !== 'merged') return false;
   if (!config.plan || config.plan === 'unknown') return false;
   const capturedAt = Date.parse(config.capturedAt == null ? '' : config.capturedAt);
   if (Number.isNaN(capturedAt)) return false;
@@ -110,7 +145,7 @@ export function hasRecentStatuslineObservation(now = Date.now(), deps = {}) {
 
 // The single source-of-truth resolution, shared by the session-start hook and every checkpoint so
 // the two can never disagree about what this machine is billing.
-export function resolveSource(config, env = process.env, deps = {}) {
+export function resolveSource(config, env = oauthTokenEnv(process.env), deps = {}) {
   const readAccount = deps.readClaudeAccount == null ? readClaudeAccount : deps.readClaudeAccount;
   const readSignals = deps.readClaudeAuthSignals == null ? readClaudeAuthSignals : deps.readClaudeAuthSignals;
   const now = deps.now == null ? Date.now() : deps.now;
@@ -152,7 +187,7 @@ export function resolveSource(config, env = process.env, deps = {}) {
   return BillingSource.UNKNOWN;
 }
 
-export function resolveBilling(config, env = process.env, deps = {}) {
+export function resolveBilling(config, env = oauthTokenEnv(process.env), deps = {}) {
   const source = resolveSource(config, env, deps);
   return {
     billing_source: source,

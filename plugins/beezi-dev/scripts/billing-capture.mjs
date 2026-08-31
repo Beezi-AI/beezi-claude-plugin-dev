@@ -5,6 +5,7 @@ import { hasCustomGateway } from '../lib/billing.mjs';
 import { getAccessToken } from '../lib/token.mjs';
 import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
+import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
 
 // Report the freshly reconciled account to the portal. Forced — the user just asked for a re-read,
 // and an account switch is exactly what must not wait for the hash to drift. Silent throughout: an
@@ -14,7 +15,16 @@ async function reportAccount() {
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
   if (!token) return;
-  try { await syncAccountIfNeeded(token, { force: true, via: 'billing-capture' }); } catch { /* best-effort */ }
+  // Interactive command, so the token resolution runs the full chain — process.env → user
+  // settings file → persistent OS environment. Claude Code deletes CLAUDE_CODE_OAUTH_TOKEN from
+  // every child environment it builds, so nothing cheaper can see a setup token from here.
+  try {
+    await syncAccountIfNeeded(
+      token,
+      { force: true, via: 'billing-capture' },
+      { env: oauthTokenEnvWithOsProbe(process.env) },
+    );
+  } catch { /* best-effort */ }
 }
 
 async function run() {
@@ -29,13 +39,25 @@ async function run() {
     // (`claude auth status --json`), merge the non-secret oauthAccount metadata, detect an account
     // switch, protect a still-valid self-reported plan, stamp the anchor + heartbeat. No token or
     // credentials file is ever read; the model does not supply any values.
-    const { config, outcome } = reconcileBillingConfig({}, { force: true, via: parsed.via });
+    // Same probing env as the check-in above (cached per process, so this costs nothing extra):
+    // the reconcile decides the billing SOURCE, and on a setup-token machine that verdict is
+    // exactly what an un-probed process.env gets wrong.
+    const { config, outcome } = reconcileBillingConfig(
+      { env: oauthTokenEnvWithOsProbe(process.env) },
+      { force: true, via: parsed.via },
+    );
     if (outcome === 'no-signal' || config == null) {
       // A machine that never did a subscription login still needs /beezi:login to ask what its
       // endpoint bills, and this is the only line it will see.
       console.log(`Beezi: no Claude subscription info found on this machine — nothing captured.${gateway}`);
     } else if (outcome === 'kept') {
-      console.log('Beezi: Claude account info still does not name a plan — keeping the self-reported plan.');
+      // Name the plan we actually kept. `kept` protects two different things — a plan the user
+      // declared, and one the Beezi server resolved for this key — and calling the second
+      // "self-reported" tells the user their answer is being used when the portal's is.
+      const kept = config.planSource === 'key_resolution'
+        ? 'the plan Beezi resolved for this machine’s setup token'
+        : 'the self-reported plan';
+      console.log(`Beezi: Claude account info still does not name a plan — keeping ${kept}.`);
     } else {
       const via = config.detectedVia == null ? '' : ` via=${config.detectedVia.replace(/_/g, '-')}`;
       const switched = outcome === 'switched' ? ' account=changed' : '';
