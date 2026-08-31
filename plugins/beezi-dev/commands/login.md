@@ -127,6 +127,21 @@ applies on the next Claude Code session. If they decline, skip silently —
 usage is still captured from Claude Code's cache, just less often. To undo it
 later they can re-run this script with `--uninstall`.
 
+Step 3d — crash diagnostics (after Step 3b, before Step 4; both fresh links and
+already-linked machines). Ask the user ONE yes/no question: let Beezi collect
+anonymous crash reports about the plugin itself? Explain in one sentence: it
+sends only plugin and Claude Code versions, the OS, and which plugin file
+failed — never their code, prompts, file paths, or repository names — and it
+helps fix bugs that would otherwise go unseen. If they agree, run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.mjs on`
+
+If they decline, run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.mjs off`
+
+so the machine is not asked again at session start. Report its one-line output.
+
 Step 4 — upload past sessions (ALWAYS run this last, after Steps 2/3/3b, on both
 fresh links and already-linked machines). Run EXACTLY this one command:
 

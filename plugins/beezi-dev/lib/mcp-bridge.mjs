@@ -3,6 +3,8 @@ import { machineHeaders } from './machine-identity.mjs';
 import { apiBase } from './config.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { resolveAbortController } from './abort-compat.mjs';
+import { recordIssue } from './telemetry.mjs';
+import { DIAGNOSTIC_CODES, DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 
 // Stdio ⇄ Streamable-HTTP bridge for the Beezi MCP server. Claude Code runs the
 // bridge as a local stdio MCP server, so it never sees the portal's OAuth
@@ -313,9 +315,12 @@ export function createBridge(deps = {}) {
       // and stdio servers are never retried. Answer it locally instead and let the watcher
       // replay the real handshake once the portal is reachable again.
       if (isInitialize(msg)) {
+        recordIssue({ code: DIAGNOSTIC_CODES.MCP_HANDSHAKE_TIMEOUT, source: DIAGNOSTIC_SOURCES.MCP_BRIDGE, error });
         synthesizeHandshake(msg, 'Beezi tools activate once the Beezi server is reachable.');
         return;
       }
+      // Idle-deadline aborts are routine after a laptop sleep — benign-fallback noise, not a
+      // defect, so this does not record it (unlike the handshake timeout above).
       ids.forEach((id) =>
         errorResponse(id, `Beezi MCP request failed: ${error == null || error.message == null ? String(error) : error.message}`),
       );

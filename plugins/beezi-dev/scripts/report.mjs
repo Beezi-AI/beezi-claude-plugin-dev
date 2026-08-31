@@ -1,8 +1,8 @@
 import { readHookInput } from '../lib/hook-input.mjs';
 import { runCheckpoint } from '../lib/checkpoint.mjs';
-import { exitClean } from '../lib/shutdown.mjs';
+import { runHook } from '../lib/hook-runner.mjs';
+import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 
 const input = readHookInput();
 if (!input) process.exit(0);
-// Session end: emit the whole-session activity timeline alongside the final segment checkpoint.
-runCheckpoint(input, {}, { emitTimeline: true }).catch(() => {}).finally(() => exitClean(0));
+runHook(DIAGNOSTIC_SOURCES.REPORT, () => runCheckpoint(input, {}, { emitTimeline: true }));

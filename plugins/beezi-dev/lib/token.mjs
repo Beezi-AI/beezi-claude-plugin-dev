@@ -8,6 +8,8 @@ import {
 import { refreshTokens as _refreshTokens } from './oauth.mjs';
 import { setMachineClientId } from './machine-identity.mjs';
 import { beeziHome } from './paths.mjs';
+import { recordIssue } from './telemetry.mjs';
+import { DIAGNOSTIC_CODES } from './telemetry-codes.mjs';
 
 const SKEW_MS = 60_000;
 const LOCK_STALE_MS = 30_000;
@@ -90,7 +92,12 @@ export async function getAccessToken(deps = {}, options = {}) {
     // Transient failure (network, timeout, unreadable error body). Report "no usable token"
     // rather than returning the expired one: callers treat a 401 as a revoked link and drop
     // the credentials, so a stale token turns a blip into a permanent logout.
-    if (r.tokens == null || !r.tokens.access_token) return null;
+    if (r.tokens == null || !r.tokens.access_token) {
+      // No explicit source: this is reached from every hook, so it inherits whichever hook is
+      // in flight (published via hook-runner) rather than being mislabeled as the checkpoint.
+      recordIssue({ code: DIAGNOSTIC_CODES.TOKEN_REFRESH_FAILED });
+      return null;
+    }
     const next = {
       ...creds,
       access_token: r.tokens.access_token,

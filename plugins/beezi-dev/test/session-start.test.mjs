@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runSessionStart } from '../lib/session-start.mjs';
+import { markAsked } from '../lib/telemetry-consent.mjs';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,10 @@ function makeTmpDir(t) {
 
 function setHome(dir) {
   process.env.BEEZI_HOME = dir;
+  // These tests assert on the repo/link message, not the one-time consent ask — stamp it as
+  // already asked so it can't bleed into their expected strings (covered on its own in
+  // test/telemetry-consent-prompt.test.mjs).
+  markAsked();
 }
 
 function stateFilePath(homeDir, sessionId) {

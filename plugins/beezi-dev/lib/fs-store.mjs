@@ -1,6 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 
+// Guards the telemetry report a write failure schedules below: without it, a write failure
+// inside the telemetry directory itself would report, which writes, which fails, which
+// reports again — forever, starving the hook's event loop instead of ever reaching exitClean.
+let reportingWriteFailure = false;
+
 // Read + parse a JSON file, or return `fallback` on any read/parse failure.
 export function readJson(filePath, fallback = null) {
   try {
@@ -93,6 +98,18 @@ export function writeJsonSecure(filePath, obj, { dirMode = 0o700 } = {}) {
       fs.unlinkSync(tmp);
     } catch {
       /* nothing to clean up */
+    }
+    if (!reportingWriteFailure) {
+      reportingWriteFailure = true;
+      try {
+        // Lazy require-style import: fs-store is imported by telemetry, so a static import here
+        // would be a cycle. `source` is omitted: hook-runner publishes the true source, and
+        // recordIssue falls back to it.
+        import('./telemetry.mjs')
+          .then(({ recordIssue }) => recordIssue({ code: 'state_write_failed', error }))
+          .catch(() => {})
+          .finally(() => { reportingWriteFailure = false; });
+      } catch { /* never */ }
     }
     throw error;
   }

@@ -10,6 +10,9 @@ import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { postSessionError } from './session-error-report.mjs';
+import { recordIssue, rememberClaudeCodeVersion } from './telemetry.mjs';
+import { flushTelemetry } from './telemetry-flush.mjs';
+import { DIAGNOSTIC_CODES, DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { isApiKeyBillingEvidence } from './billing.mjs';
 import {
@@ -112,6 +115,13 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let token = null;
   try { token = await getAccessToken(); } catch { return { enqueued: 0, flush: null, sessionErrors: collectedErrors }; }
   if (!token) return { enqueued: 0, flush: null, sessionErrors: collectedErrors };
+
+  // Above the tracking gate on purpose: a dark-mode tenant has opted out of analytics about their
+  // work, not out of telling us our own plugin is broken. Consent is the only gate here.
+  try { await flushTelemetry(token, { postJsonImpl: deps.postJsonImpl }); } catch { /* never block the checkpoint */ }
+  // A bounded tail-read of the transcript, cached in telemetry.json for the recorder to stamp
+  // future events with — must never throw into the checkpoint either.
+  try { rememberClaudeCodeVersion(transcript_path); } catch { /* best-effort */ }
 
   // Tenant gate: audit-mode workspaces never track live — the server would 403 every report
   // anyway (TrackingEnabledGuard), this just spares the work and the noise. `gated` lets
@@ -585,6 +595,7 @@ export async function flushQueue(token, deps = {}) {
     // exactly as before — the server stays the judge of its contents.
     if (payload == null || (salvaged && payload.segmentId == null)) {
       result.quarantined += 1;
+      recordIssue({ code: DIAGNOSTIC_CODES.QUEUE_FILE_QUARANTINED, source: DIAGNOSTIC_SOURCES.CHECKPOINT });
       try { fs.renameSync(filePath, `${filePath}.corrupt`); } catch { /* best-effort */ }
       continue;
     }
@@ -633,6 +644,7 @@ export async function flushQueue(token, deps = {}) {
         fs.unlinkSync(filePath);
       } else {
         result.failed += 1; // keep for retry
+        recordIssue({ code: DIAGNOSTIC_CODES.QUEUE_FLUSH_HTTP_ERROR, source: DIAGNOSTIC_SOURCES.CHECKPOINT, httpStatus: res.status });
       }
     } catch {
       result.failed += 1; // keep file for retry on network error / throw

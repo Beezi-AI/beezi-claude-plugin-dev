@@ -36,6 +36,20 @@ import {
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
 import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.mjs';
+import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
+
+// A hook cannot prompt interactively, so the ask names the command that answers it. Stamped as
+// asked the moment it is shown, so it is shown exactly once per machine whatever the user does.
+// Only ever called for a linked machine (see the call site) — an unlinked machine's only
+// failures are auth failures, so there is nothing to ask.
+export function consentPrompt() {
+  if (hasBeenAsked()) return null;
+  markAsked();
+  return 'Beezi can send anonymous crash reports about the plugin itself — versions, OS, and '
+    + 'which plugin file failed. Never your code, prompts, or file paths. It helps us fix bugs '
+    + 'we would otherwise never see. Run /beezi:telemetry on to enable it, or /beezi:telemetry off '
+    + 'to decline.';
+}
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
 // Also records where the session lives (cwd + transcript path) so /beezi:track can find
@@ -282,6 +296,9 @@ ${nudge}` : nudge;
     policy = 'Beezi: run /beezi:login once to include your past sessions.';
   }
   if (policy) message = message ? `${message}\n${policy}` : policy;
+
+  const consentAsk = consentPrompt();
+  if (consentAsk) message = message ? `${message}\n${consentAsk}` : consentAsk;
 
   return message;
 }

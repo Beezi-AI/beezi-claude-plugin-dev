@@ -114,6 +114,45 @@ test('readJsonSalvaged recovers the payload hiding under trailing wreckage', (t)
   assert.equal(value.note, 'brace } and "quote" inside', 'braces inside strings do not end the scan');
 });
 
+// The bug: a write failure schedules a telemetry report via recordIssue, which itself writes
+// through writeJsonSecure. If THAT write also fails (e.g. the telemetry dir is unwritable), the
+// old code scheduled another report, which failed, which scheduled another — forever, spinning
+// the microtask queue instead of ever letting a timer fire. Reproduced upstream as a 1s timer
+// that never fired in 5s.
+test('a write failure inside the telemetry directory reports once and never starves the event loop', {
+  skip: process.platform === 'win32' ? 'chmod-based write denial is not meaningful on win32' : false,
+}, async (t) => {
+  const dir = tmpDir();
+  t.after(() => {
+    try { fs.chmodSync(path.join(dir, 'telemetry'), 0o700); } catch { /* best-effort */ }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const prevHome = process.env.BEEZI_HOME;
+  process.env.BEEZI_HOME = dir;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.BEEZI_HOME; else process.env.BEEZI_HOME = prevHome;
+  });
+
+  const { grantConsent } = await import('../lib/telemetry-consent.mjs?recursion');
+  grantConsent();
+
+  const telemetryDirPath = path.join(dir, 'telemetry');
+  fs.mkdirSync(telemetryDirPath, { recursive: true });
+  fs.chmodSync(telemetryDirPath, 0o500); // read + execute only: no new file can be created inside
+
+  const { writeJsonSecure } = await import('../lib/fs-store.mjs?recursion');
+
+  let timerFired = false;
+  const timer = setTimeout(() => { timerFired = true; }, 20);
+
+  assert.throws(() => writeJsonSecure(path.join(telemetryDirPath, 'blocked.json'), { a: 1 }));
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  clearTimeout(timer);
+  assert.equal(timerFired, true, 'the event loop kept processing timers instead of spinning on retries');
+});
+
 test('readJsonSalvaged leaves clean files untouched and gives up on junk', (t) => {
   const dir = tmpDir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
