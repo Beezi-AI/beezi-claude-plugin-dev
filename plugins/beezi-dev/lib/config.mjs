@@ -1,4 +1,4 @@
-import { ENV_API_BASE } from './paths.mjs';
+import { ENV_API_BASE, ENV_UPDATE_MANIFEST_URL } from './paths.mjs';
 
 // BEEZI_API_URL overrides for local development; otherwise the variant's baked env.json decides,
 // and a plugin without one (source checkout) talks to prod.
@@ -12,6 +12,14 @@ export function apiBase() {
 // root, outside the /api prefix.
 export function apiOrigin() {
   return new URL(apiBase()).origin;
+}
+
+// BEEZI_UPDATE_MANIFEST_URL overrides for local verification; otherwise the variant's baked
+// env.json decides. Unlike apiBase() there is NO hard-coded fallback: a variant built before this
+// key existed must stay silent rather than compare itself against another environment's manifest.
+export function updateManifestUrl() {
+  if (process.env.BEEZI_UPDATE_MANIFEST_URL != null) return process.env.BEEZI_UPDATE_MANIFEST_URL;
+  return ENV_UPDATE_MANIFEST_URL;
 }
 
 export const OAUTH_SCOPES = "email profile";

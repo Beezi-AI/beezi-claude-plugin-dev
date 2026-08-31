@@ -12,7 +12,17 @@ import { runSessionStart as _runSessionStart } from '../lib/session-start.mjs';
 function runSessionStart(input, deps = {}, ...rest) {
   const declared = Object.prototype.hasOwnProperty.call(deps, 'env')
     || Object.prototype.hasOwnProperty.call(deps, 'osEnvOauthToken');
-  return _runSessionStart(input, declared ? deps : { env: {}, ...deps }, ...rest);
+  const base = declared ? deps : { env: {}, ...deps };
+  // Same reasoning as the env guard above: the update check runs on EVERY path through
+  // runSessionStart, including both early returns, and would otherwise hit GitHub from a unit
+  // test. Default it to silence; test/session-start-update.test.mjs injects its own.
+  return _runSessionStart(
+    input,
+    Object.prototype.hasOwnProperty.call(deps, 'checkForUpdate')
+      ? base
+      : { checkForUpdate: async () => null, ...base },
+    ...rest,
+  );
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

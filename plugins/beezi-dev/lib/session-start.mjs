@@ -39,6 +39,13 @@ import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.
 import { recordResolvedKeyPlan as _recordResolvedKeyPlan } from './plan-writeback.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
+import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
+
+// The composition idiom used throughout this file, extracted for the three return points.
+function append(message, line) {
+  if (!line) return message;
+  return message ? `${message}\n${line}` : line;
+}
 
 // A hook cannot prompt interactively, so the ask names the command that answers it. Stamped as
 // asked the moment it is shown, so it is shown exactly once per machine whatever the user does.
@@ -146,10 +153,30 @@ export async function runSessionStart(input, deps = {}) {
   const statuslineCaptureDetached =
     deps.statuslineCaptureDetached == null ? _statuslineCaptureDetached : deps.statuslineCaptureDetached;
 
+  // The plugin's own version check. Started BEFORE the credential store is touched (getAccessToken
+  // may spawn `security` / `secret-tool` / PowerShell) and awaited only at the return points, so its
+  // bounded fetch overlaps work that was going to happen anyway and adds no serial latency.
+  //
+  // Deliberately NOT behind the token check or the liveAllowed gate: a stale plugin is stale whether
+  // or not this machine is linked or its tenant tracks anything, and an unlinked machine is exactly
+  // the one that may be unlinked because of a bug a newer build already fixes.
+  //
+  // It is NOT handed this call's fetchImpl: that one is a Beezi-API client with a Beezi bearer, and
+  // the manifest lives on raw.githubusercontent.com. update-check resolves its own, unauthenticated.
+  //
+  // .catch() at creation, not at the await: a promise created here and awaited three branches later
+  // must never be able to surface as an unhandledRejection in between.
+  const checkUpdate = deps.checkForUpdate == null ? _checkForUpdate : deps.checkForUpdate;
+  const updatePromise = Promise.resolve().then(() => checkUpdate()).catch(() => null);
+
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
-  if (!token)
-    return '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.';
+  if (!token) {
+    return append(
+      '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.',
+      await updatePromise,
+    );
+  }
 
   let probe = await probeToken(token, fetchImpl);
   if (probe.rejected) {
@@ -160,7 +187,10 @@ export async function runSessionStart(input, deps = {}) {
     const refreshed = await getAccessToken({}, { forceRefresh: true }).catch(() => null);
     probe = refreshed ? await probeToken(refreshed, fetchImpl) : { rejected: true, who: null };
     if (!refreshed || probe.rejected) {
-      return '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.';
+      return append(
+        '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.',
+        await updatePromise,
+      );
     }
     token = refreshed;
   }
@@ -333,5 +363,7 @@ ${nudge}` : nudge;
   const consentAsk = consentPrompt();
   if (consentAsk) message = message ? `${message}\n${consentAsk}` : consentAsk;
 
-  return message;
+  // Appended last, after the consent ask, so every existing assertion on the earlier lines is
+  // untouched by a nudge that only ever adds a trailing line.
+  return append(message, await updatePromise);
 }

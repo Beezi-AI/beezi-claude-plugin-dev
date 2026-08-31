@@ -27,6 +27,12 @@ export const BEEZI_ENV =
 // This variant's default API base; config.mjs owns the resolution order.
 export const ENV_API_BASE = typeof ENV_JSON.apiBase === 'string' ? ENV_JSON.apiBase : null;
 
+// Where this variant's PUBLISHED marketplace manifest lives, so the plugin can tell whether a
+// newer build of itself exists. prod ships the public raw URL; make-variant.sh writes the internal
+// one into dev/staging. config.mjs owns the resolution order.
+export const ENV_UPDATE_MANIFEST_URL =
+  typeof ENV_JSON.updateManifestUrl === 'string' ? ENV_JSON.updateManifestUrl : null;
+
 // '-dev' when namespaced, '' on prod.
 export function envSuffix() {
   return BEEZI_ENV ? `-${BEEZI_ENV}` : '';
@@ -73,6 +79,14 @@ export function trackingStateFile() {
 // would re-nag a user who already fixed their plan.
 export function oauthKeyStatusFile() {
   return path.join(beeziHome(), 'oauth-key-status.json');
+}
+
+// The last reading of the published marketplace manifest: { version, checkedAt, pluginName,
+// latestVersion, marketplaceName } — FACTS about the remote, never a verdict. Root-level for the
+// same pruneStale() reason as the tracking cache: an expiring reading would re-fetch GitHub on
+// every single session start.
+export function updateCheckFile() {
+  return path.join(beeziHome(), 'update-check.json');
 }
 
 export function accountSyncStateFile() {
