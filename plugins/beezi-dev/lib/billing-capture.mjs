@@ -13,7 +13,7 @@ import {
   isStale as _isStale,
 } from './billing-config.mjs';
 import { resolveClaudeSubscription as _resolveClaudeSubscription } from './claude-auth-status.mjs';
-import { oauthTokenAnchor as _oauthTokenAnchor } from './oauth-identity.mjs';
+import { oauthTokenAnchor as _oauthTokenAnchor, keyFingerprint } from './oauth-identity.mjs';
 import { readClaudeAccountAnchor as _readClaudeAccountAnchor } from './claude-account.mjs';
 import { oauthTokenEnv } from './claude-settings-env.mjs';
 import { UserError } from './friendly-error.mjs';
@@ -69,6 +69,17 @@ function declaredNonSubscriptionSource(plan) {
   if (plan === SELF_REPORTED_API_KEY) return BillingSource.ANTHROPIC_API_KEY;
   if (plan === SELF_REPORTED_GATEWAY) return BillingSource.THIRD_PARTY;
   return null;
+}
+
+// WHICH setup token this record describes, or null when the env in force exposes none. Stored
+// structurally rather than parsed back out of the anchor: the anchor slot is single-occupancy and
+// may legitimately hold an `email`/`account_uuid` identity while the plan came from a key.
+//
+// Null means "not stated", never "no key" — see sameKeyFingerprint in oauth-identity.mjs. The env
+// is the caller's already-resolved one, so this can never disagree with the fingerprint the
+// check-in and the session reports send.
+function fingerprintOf(env) {
+  return keyFingerprint(env == null ? null : env.CLAUDE_CODE_OAUTH_TOKEN);
 }
 
 // The stored accountAnchor field: identity value + which source produced it, dated. Null in →
@@ -128,6 +139,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
         accountAnchor: stampAnchor(anchor, now),
         accountUuid: resolveAccountUuid(account, anchor),
         accountEmail: resolveAccountEmail(account, anchor),
+        keyFingerprint: fingerprintOf(env),
       };
     }
     if (!SELF_REPORTED_PLANS.includes(plan)) {
@@ -161,6 +173,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
       accountAnchor: stampAnchor(anchor, now),
       accountUuid: resolveAccountUuid(account, anchor),
       accountEmail: resolveAccountEmail(account, anchor),
+      keyFingerprint: fingerprintOf(env),
     };
   }
   const subscriptionType = safeField(args.subscriptionType);
@@ -196,6 +209,7 @@ export function buildConfig(args, env = process.env, now = new Date(), account =
     accountAnchor: stampAnchor(anchor, now),
     accountUuid: resolveAccountUuid(account, anchor),
     accountEmail: resolveAccountEmail(account, anchor),
+    keyFingerprint: fingerprintOf(env),
   };
 }
 
@@ -228,6 +242,22 @@ export function shouldKeepExisting(freshConfig, existingConfig) {
   // The literal rather than an import: this must not couple the local capture to the writeback
   // module, and the vocabulary is documented in one place there.
   if (freshConfig.planSource === 'unresolved' && existingConfig.planSource === 'key_resolution') return true;
+  // A record that belongs to a KEY must not be overwritten by a capture that could not see one.
+  //
+  // Without this the reset undoes itself. When the token is exported from a shell profile it is
+  // invisible to all three env tiers, so the weekly heartbeat spawns the CLI with no token, gets
+  // `authMethod:'claude.ai'` describing the previous interactive login, and builds a fresh
+  // `claude_login` capture carrying that account's plan. Nothing above stops it — the fresh record
+  // is not 'unresolved', and the existing one is not selfReported — so learnedPlan() would make it
+  // win, restoring the wrong plan AND forcing the check-in ('captured') that re-binds the key.
+  //
+  // A capture whose env held no token is by construction not evidence about a key. Narrow on
+  // purpose: it does not touch self-reported records, does not block an 'unresolved' verdict (which
+  // is a real observation about this key), and does not reach the account-switch path, which
+  // bypasses this function entirely.
+  if (existingConfig.keyFingerprint != null
+    && freshConfig.keyFingerprint == null
+    && freshConfig.planSource === 'claude_login') return true;
   if (existingConfig.selfReported !== true) return false;
   const declaredTier = Boolean(existingConfig.plan) && existingConfig.plan !== 'unknown';
   // A declared api-key or gateway machine carries no plan at all — the source IS the declaration.
@@ -263,6 +293,46 @@ function sameAnchor(stored, current) {
   if (stored == null && current == null) return true;
   if (stored == null || current == null) return false;
   return stored.source === current.source && stored.value === current.value;
+}
+
+// How long before a machine that could not confirm an auth-mode switch is allowed to ask again.
+// Shorter than ANCHOR_RECHECK_MS because the question is answerable as soon as the CLI works;
+// long enough that a machine which can NEVER answer it does not spawn `claude auth status` on
+// every single session.
+const AUTH_MODE_RECHECK_MS = 6 * 60 * 60 * 1000;
+
+// Has this machine moved from an interactive login onto a setup token?
+//
+// The case anchorChanged structurally cannot see. Its rule — a mismatch counts only between anchors
+// of the SAME source — is right and must stay: a CLI email versus a file userID is two different
+// questions, not a changed answer, and treating it as a switch would wipe self-reported plans. But
+// the login → token transition is exactly a cross-source pair (`email`/`account_uuid`/`user_id` on
+// the record, `oauth_key` in force), so it read as inconclusive and nothing fired. The plan captured
+// from the previous login kept shipping under a key that may belong to someone else entirely.
+//
+// selfReported records are excluded on purpose, matching the invariant documented in
+// shouldKeepExisting: an `unresolved` verdict says nothing about the user's own testimony, and the
+// token may well belong to the very account they described. Their record is left to the heartbeat.
+//
+// This is only HALF the decision — it says the question is worth asking, not what the answer is.
+// The caller must additionally require that the CLI positively confirmed a setup token before
+// treating it as a switch; see the reconcile.
+function authModeSwitched(existing, tokenAnchor) {
+  if (tokenAnchor == null) return false;
+  if (existing == null || existing.accountAnchor == null) return false;
+  if (existing.accountAnchor.source === 'oauth_key') return false;
+  return existing.selfReported !== true;
+}
+
+// Bounds how often the above is allowed to cost a process spawn. anchorCheckedAt is stamped on
+// every reconcile attempt, including the kept and no-signal paths, so a machine that keeps failing
+// to confirm re-asks at most four times a day instead of once per session.
+function authModeCheckDue(existing, now) {
+  if (existing == null) return true;
+  const checkedAt = Date.parse(existing.anchorCheckedAt == null ? '' : existing.anchorCheckedAt);
+  if (Number.isNaN(checkedAt)) return true;
+  // A stamp from the future is a clock change, not a fresh check.
+  return now.getTime() - checkedAt > AUTH_MODE_RECHECK_MS || checkedAt > now.getTime();
 }
 
 // A capture that resolved a real subscription plan. Anything weaker must not overwrite an
@@ -339,6 +409,10 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       || isStaleImpl(existing, now.getTime())
       || anchorChanged(storedAnchor, fileAnchor)
       || anchorChanged(storedAnchor, tokenAnchor)
+      // The login → setup-token transition, which no anchorChanged pair can express. Rate-limited
+      // because a machine whose CLI cannot answer would otherwise re-ask on every session forever:
+      // the predicate stays true until a confirming capture rewrites the anchor to oauth_key.
+      || (authModeSwitched(existing, tokenAnchor) && authModeCheckDue(existing, now))
       || heartbeatDue;
 
     if (trigger) {
@@ -352,7 +426,21 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
       // through all three tiers; the resolver must judge by the same one.
       try { sub = resolveSubscription({ env }); } catch { sub = null; }
       const currentAnchor = sub != null && sub.anchor != null ? sub.anchor : fileAnchor;
-      const switched = anchorChanged(storedAnchor, currentAnchor);
+      // The transition counts as a switch ONLY once the CLI has confirmed it. `planSource
+      // 'unresolved'` is set by exactly one branch of resolveClaudeSubscription: the one that saw
+      // authMethod 'oauth_token', i.e. positive evidence that the credential in force is the setup
+      // token rather than the login on disk.
+      //
+      // Without this guard the 'switched' arm below — which writes wholesale and consults nothing —
+      // would stamp whatever resolveClaudeSubscription happened to return under a fresh oauth_key
+      // anchor and fingerprint. Two shapes make that actively destructive: a machine whose `claude`
+      // CLI is missing or slow still yields the stale oauthAccount profile (the previous login's
+      // plan, permanently key-scoped, and shipped as this key's tier in the check-in that binds it);
+      // and `sub == null` yields plan 'unknown', wiping a good key_resolution answer with junk.
+      // Both now fall through to the ordinary overwrite/kept logic, which is today's behaviour.
+      const authSwitch = authModeSwitched(existing, tokenAnchor)
+        && sub != null && sub.planSource === 'unresolved';
+      const switched = anchorChanged(storedAnchor, currentAnchor) || authSwitch;
       const fresh = buildConfig(
         {
           subscriptionType: sub == null ? null : sub.subscriptionType,
@@ -397,11 +485,19 @@ export function reconcileBillingConfig(deps = {}, options = {}) {
           : (sameAnchor(existing.accountAnchor, next) ? existing.accountAnchor : stampAnchor(next, now));
         const keptUuid = resolveAccountUuid(sub, currentAnchor);
         const keptEmail = resolveAccountEmail(sub, currentAnchor);
+        // A newly visible fingerprint is adopted on the same terms as the identity fields: it says
+        // which key this machine runs, and a record that knows it can no longer be overwritten by a
+        // capture that saw no key (see shouldKeepExisting). Never cleared here — an env that stopped
+        // exposing the token is not evidence the record stopped belonging to it.
+        const keptFingerprint = fingerprintOf(env);
         chosen = {
           ...existing,
           version: BILLING_CONFIG_VERSION,
           accountAnchor: keptAnchor,
           anchorCheckedAt: stampedNow,
+          keyFingerprint: keptFingerprint == null
+            ? (existing.keyFingerprint == null ? null : existing.keyFingerprint)
+            : keptFingerprint,
           accountUuid: keptUuid == null
             ? (existing.accountUuid == null ? null : existing.accountUuid)
             : keptUuid,

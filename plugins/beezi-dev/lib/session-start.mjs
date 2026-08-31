@@ -36,7 +36,11 @@ import {
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
 import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.mjs';
-import { recordResolvedKeyPlan as _recordResolvedKeyPlan } from './plan-writeback.mjs';
+import { recordResolvedKeyData as _recordResolvedKeyData } from './plan-writeback.mjs';
+import {
+  hasKeyBeenNotified as _hasKeyBeenNotified,
+  markKeyNotified as _markKeyNotified,
+} from './key-notice.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
 import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
@@ -270,14 +274,20 @@ export async function runSessionStart(input, deps = {}) {
   // A reconcile that switched accounts or captured fresh identity forces the send — that is the
   // only moment the portal can learn about an account switch.
   const syncAccount = deps.syncAccount == null ? _syncAccountIfNeeded : deps.syncAccount;
+  // The config the reconcile above just settled is handed over directly — re-reading billing.json
+  // here would be a second file read for an answer already in hand.
+  const reconciledConfig = billingConfig;
+  const syncDeps = { fetchImpl, env: oauthEnv, readBillingConfig: () => reconciledConfig };
+  // HELD, not discarded. Still fire-and-forget for every path that does not need it — the catch is
+  // attached here at creation, so awaiting it later can only yield a value, never throw. The one
+  // path that does await it is the unknown-key branch below: that check-in is what registers this
+  // key with the portal, so asking again before it lands would just re-read "unknown".
+  let syncPromise = null;
   try {
     const forced = billingOutcome === 'switched' || billingOutcome === 'captured';
-    // The config the reconcile above just settled is handed over directly — re-reading billing.json
-    // here would be a second file read for an answer already in hand.
-    const reconciledConfig = billingConfig;
-    Promise.resolve(
-      syncAccount(token, { force: forced, via: 'session-start' }, { fetchImpl, env: oauthEnv, readBillingConfig: () => reconciledConfig }),
-    ).catch(() => { /* best-effort */ });
+    syncPromise = Promise.resolve(
+      syncAccount(token, { force: forced, via: 'session-start' }, syncDeps),
+    ).catch(() => null);
   } catch { /* best-effort */ }
 
   let message = systemMessage;
@@ -308,16 +318,43 @@ export async function runSessionStart(input, deps = {}) {
     //
     // Answered from a cached verdict, so the steady state is one file read. A null answer means the
     // question could not be asked, which is not the same as "unresolved" and says nothing.
+    const fetchKeyStatus = deps.fetchOauthKeyStatus == null
+      ? _fetchOauthKeyStatus
+      : deps.fetchOauthKeyStatus;
     let keyStatus = null;
     try {
-      const fetchKeyStatus = deps.fetchOauthKeyStatus == null
-        ? _fetchOauthKeyStatus
-        : deps.fetchOauthKeyStatus;
       keyStatus = await fetchKeyStatus(token, { fetchImpl, env: oauthEnv });
     } catch { /* best-effort */ }
-    const recordKeyPlan = deps.recordResolvedKeyPlan == null
-      ? _recordResolvedKeyPlan
-      : deps.recordResolvedKeyPlan;
+
+    // A key the portal has never seen reports its usage unpriced and, worse, says nothing about it:
+    // the server withholds needsAttention for an unknown key on purpose, because the check-in that
+    // registers it rides this very hook and a first run would otherwise always nudge. So register
+    // it, then ask again.
+    //
+    // Gated on a REAL answer of `known: false`. A null is "could not ask" — offline, an older
+    // server, or no token on this machine at all — and nulls are never cached, so treating null as
+    // unknown would make every token-less and every offline machine pay a serial check-in plus a
+    // second probe on every single session, forever, for a question that has no answer.
+    if (keyStatus != null && keyStatus.known === false) {
+      try {
+        // Await whatever is already in flight, then force one. syncAccountIfNeeded's hash gate
+        // skips the POST when the payload is unchanged and the weekly resync is not due — which is
+        // exactly the state of a machine whose key is unknown to the portal for any reason other
+        // than a changed payload (a tenant switch after re-login, a server-side restore). Without
+        // the force the key stays unregistered for up to a week and no nudge ever fires, because
+        // needsAttention requires `known`.
+        if (syncPromise != null) await syncPromise;
+        await Promise.resolve(
+          syncAccount(token, { force: true, via: 'session-start' }, syncDeps),
+        ).catch(() => null);
+        const reprobed = await fetchKeyStatus(token, { fetchImpl, env: oauthEnv, refresh: true });
+        if (reprobed != null) keyStatus = reprobed;
+      } catch { /* best-effort */ }
+    }
+
+    const recordKeyData = deps.recordResolvedKeyData == null
+      ? _recordResolvedKeyData
+      : deps.recordResolvedKeyData;
     if (keyStatus != null && keyStatus.needsAttention) {
       // Points at /beezi:refresh, not at the portal: that command IS this flow — it reads the same
       // resolution, offers the same plans and subscriptions, and writes the answer back here.
@@ -327,11 +364,33 @@ export async function runSessionStart(input, deps = {}) {
       message = message ? `${message}
 ${nudge}` : nudge;
     } else if (keyStatus != null && keyStatus.known && keyStatus.subscriptionPlan != null) {
-      // The portal already knows what this key bills. Adopt it into billing.json so the reports
-      // carry it from this session on, instead of waiting for the user to run /beezi:refresh — and
-      // instead of shipping whatever plan a previous interactive login left behind. Best-effort and
-      // silent by contract: nothing changed for the user to read about.
-      try { recordKeyPlan(keyStatus.subscriptionPlan); } catch { /* best-effort */ }
+      // The portal already knows what this key bills. Adopt the WHOLE answer into billing.json —
+      // plan, subscription type, tier, account email, and the fingerprint it is all scoped to — so
+      // the reports carry it from this session on, instead of waiting for the user to run
+      // /beezi:refresh and instead of shipping whatever a previous interactive login left behind.
+      // Best-effort and silent by contract: nothing changed for the user to read about.
+      try { recordKeyData(keyStatus); } catch { /* best-effort */ }
+
+      // One exception to the silence. The portal priced this key against an account that carries an
+      // identity of its own — an email or a vendor uuid — and the plan was never confirmed for the
+      // key itself, only reported by some machine. That is what a key inheriting a subscription an
+      // interactive sign-in established looks like, and it may not be the subscription the token
+      // belongs to. The user cannot fix it from here (a /link refuses an account with its own
+      // identity), so this is a notice, not a nudge — said once per key, and re-armed by rotation.
+      if (keyStatus.accountAnchored === true && keyStatus.planSource === 'reported') {
+        const notified = deps.hasKeyBeenNotified == null
+          ? _hasKeyBeenNotified
+          : deps.hasKeyBeenNotified;
+        const markNotified = deps.markKeyNotified == null ? _markKeyNotified : deps.markKeyNotified;
+        try {
+          if (!notified(keyStatus.fingerprint)) {
+            const named = keyStatus.accountEmail == null ? '' : ` (${keyStatus.accountEmail})`;
+            const notice = `Beezi: this machine's Claude setup token bills a subscription${named} that an earlier sign-in established, not one confirmed for the key itself. If that is the wrong subscription, ask your Beezi admin to re-point it.`;
+            message = message ? `${message}\n${notice}` : notice;
+            markNotified(keyStatus.fingerprint);
+          }
+        } catch { /* best-effort */ }
+      }
     }
 
     // The status-line wrapper is the only source of LIVE plan-usage readings, and it is a

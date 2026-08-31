@@ -27,8 +27,8 @@ It prints exactly one JSON object. Read `status` from it and do exactly this:
 
 | `status`                          | What to do                                                                                  |
 | --------------------------------- | ------------------------------------------------------------------------------------------- |
-| `"resolved"`                      | Say the key's subscription is known, naming `subscriptionPlan`, and that it is now what Beezi reports for this machine. **Stop — do not run Step 2.** |
-| `"unknown_key"`                   | Say Beezi has not seen this key yet and it will register on the next session. **Stop — do not run Step 2.** |
+| `"resolved"`                      | Say the key's subscription is known, naming `subscriptionPlan`, and that it is now what Beezi reports for this machine. **Then, only if `accountAnchored` is `true` AND `planSource` is `"reported"`**, add that this plan comes from a subscription an earlier sign-in established rather than one confirmed for this key — name `accountEmail` when it is not null — and that re-pointing it is an admin's job, not something this command can do. **Stop — do not run Step 2.** |
+| `"unknown_key"`                   | The command already tried to register this key and ask again; reaching this row means that did not work. Say Beezi could not register this key with the server yet and to try `/beezi:refresh` again later. **Stop — do not run Step 2.** |
 | `"unlinked"`                      | Continue to Step 1a — this is the case worth asking about.                                   |
 | `"unavailable"`                   | Report the object's `message` verbatim. **Stop — do not run Step 2.**                        |
 | `"no_key"` / `"not_linked"`       | Report the object's `message` verbatim, then continue to Step 2. `"no_key"` means this machine is not on a setup token at all, so the local capture is the right answer for it. |
@@ -83,8 +83,10 @@ unresolved, so this machine’s usage is still reported without a plan. Do not f
 back to Step 2 to fill the gap — a local capture on a setup-token machine reads a
 previous login’s leftovers, which is what left the plan wrong in the first place.
 
-A resolve command that succeeds also records the plan locally, so the next session
-report carries it. Nothing else needs running.
+A resolve command that succeeds records what the server named, so the next session
+report carries it. `--plan` always names a plan. `--target` names one only when the
+server reports the joined subscription's plan; when it does not, the next session
+start fills it in from the resolution. Either way nothing else needs running.
 
 ## Step 2 — capture what a non-setup-token machine can prove
 

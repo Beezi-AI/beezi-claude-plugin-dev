@@ -381,14 +381,30 @@ test('12c. a resolved setup token is silent, and its plan is adopted locally', a
     ...quietBilling,
     fetchImpl: fakeFetchWhoamiOkNoRepo(),
     gitImpl: () => { throw new Error('not a git repo'); },
-    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: false, subscriptionPlan: 'max_20x' }),
-    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
+    fetchOauthKeyStatus: async () => ({
+      known: true,
+      needsAttention: false,
+      subscriptionPlan: 'max_20x',
+      subscriptionType: 'max',
+      rateLimitTier: 'default_claude_max_20x',
+      accountEmail: 'ci@example.com',
+      accountAnchored: false,
+      fingerprint: { prefix: 'sk-ant-oat01', last4: 'UQAA', length: 108 },
+    }),
+    recordResolvedKeyData: (status) => { recorded.push(status); return true; },
   });
 
   assert.doesNotMatch(result ?? '', /setup token/);
   // The whole point of the loop being closed: the server's answer reaches billing.json without the
   // user having to run /beezi:refresh first.
-  assert.deepEqual(recorded, ['max_20x']);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].subscriptionPlan, 'max_20x');
+  // The trimmings travel too. A setup-token machine cannot read any of these locally — the type and
+  // the tier would otherwise stay whatever a previous interactive login left in billing.json.
+  assert.equal(recorded[0].subscriptionType, 'max');
+  assert.equal(recorded[0].rateLimitTier, 'default_claude_max_20x');
+  assert.equal(recorded[0].accountEmail, 'ci@example.com');
+  assert.deepEqual(recorded[0].fingerprint, { prefix: 'sk-ant-oat01', last4: 'UQAA', length: 108 });
 });
 
 // A key the server has flagged is exactly the key whose plan must NOT be adopted: needsAttention

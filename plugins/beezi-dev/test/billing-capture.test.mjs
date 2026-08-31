@@ -33,7 +33,7 @@ test('buildConfig — subscription env yields plan + raw fields', () => {
     new Date('2026-07-07T00:00:00.000Z'),
     { subscriptionType: 'pro' },
   );
-  assert.equal(cfg.version, 3);
+  assert.equal(cfg.version, 4);
   assert.equal(cfg.source, 'subscription');
   assert.equal(cfg.subscriptionType, 'pro');
   assert.equal(cfg.rateLimitTier, 'default_claude_max_5x');
@@ -80,7 +80,7 @@ test('buildConfig — each self-reported plan derives type, keeps tier null, mar
   ];
   for (const [plan, type] of cases) {
     const cfg = buildConfig({ plan, via: 'login-user' }, {}, new Date('2026-07-14T00:00:00.000Z'));
-    assert.equal(cfg.version, 3);
+    assert.equal(cfg.version, 4);
     assert.equal(cfg.source, 'subscription');
     assert.equal(cfg.plan, plan);
     assert.equal(cfg.subscriptionType, type);
@@ -290,7 +290,7 @@ test('reconcile — stuck machine heals: source unknown + a CLI answer → captu
   assert.equal(config.source, 'subscription');
   assert.equal(config.capturedBy, 'session-start');
   assert.equal(config.detectedVia, 'cli_status');
-  assert.equal(config.version, 3);
+  assert.equal(config.version, 4);
   assert.deepEqual(
     { value: config.accountAnchor.value, source: config.accountAnchor.source },
     { value: 'b@corp.co', source: 'email' },
@@ -399,7 +399,7 @@ test('reconcile — v1 grandfathering adopts an anchor without trading max_20x f
   // since 'max' is not 'unknown' and nothing ever asks again. The identity work still lands.
   assert.equal(config.plan, 'max_20x');
   assert.equal(config.accountAnchor.value, 'b@corp.co');
-  assert.equal(config.version, 3);
+  assert.equal(config.version, 4);
 });
 
 test('losesMultiplier — only same-product detail loss is refused, never a real plan change', () => {
@@ -756,7 +756,7 @@ test('reconcile — buildConfig stamps detectedVia and the anchor on a CLI captu
     CLI_SUB,
     CLI_SUB.anchor,
   );
-  assert.equal(cfg.version, 3);
+  assert.equal(cfg.version, 4);
   assert.equal(cfg.detectedVia, 'cli_status');
   assert.deepEqual(cfg.accountAnchor, { value: 'b@corp.co', source: 'email', updatedAt: T0.toISOString() });
   assert.equal(cfg.plan, 'max');

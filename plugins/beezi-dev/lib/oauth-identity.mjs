@@ -13,9 +13,17 @@
 //
 // What the server does with a fingerprint-only check-in: it does NOT resolve the fingerprint to an
 // account — a fingerprint is low-entropy and unverifiable, so it is never treated as an identity
-// claim. It attributes the machine to the CALLER'S OWN existing membership, and when the caller has
-// no vendor account at all it MINTS one, identified by the credential row bound to it. Consequences
-// worth knowing here:
+// claim. With no accountUuid and no email in the payload there is nothing for it to resolve FROM,
+// so it binds the credential to whatever account that credential row already points at, and MINTS
+// an anonymous one when it points at nothing.
+//
+// The danger is therefore the check-in that is NOT fingerprint-only. Send a uuid or an email
+// alongside — which happens whenever the token is invisible to this plugin, since the suppression
+// below is what withholds them — and the server resolves that identity to an account and fills the
+// credential's binding with it. Bindings are filled but never moved, so a key bound that way to the
+// wrong person's account stays there. That is not a hypothetical; it is why the suppression exists.
+//
+// Consequences worth knowing here:
 //   - Rotating the token mints a new credential and therefore a new account row. Only a later
 //     check-in that reports a real accountUuid alongside the same fingerprint merges them.
 //   - A user who belongs to several vendor accounts gets the most recently active one. There is no
@@ -72,4 +80,17 @@ export function oauthTokenAnchor(env = process.env) {
     value: `${fingerprint.prefix}...${fingerprint.last4}:${fingerprint.length}`,
     source: 'oauth_key',
   };
+}
+
+// Do two fingerprints name the same credential? The server's identity for a credential is the
+// (prefix, last4, length) triple, so all three must match — a rotation that happened to reuse the
+// last4 is still a different key.
+//
+// NULL IS "NOT STATED", NEVER "DIFFERENT". A record written before billing.json v4, or by a capture
+// whose env held no token, carries no fingerprint at all; reading that as a mismatch would make
+// every such record look like it belonged to another key and invite callers to wipe it. Callers
+// that need "these are known to differ" must check for null themselves first.
+export function sameKeyFingerprint(a, b) {
+  if (a == null || b == null) return false;
+  return a.prefix === b.prefix && a.last4 === b.last4 && a.length === b.length;
 }

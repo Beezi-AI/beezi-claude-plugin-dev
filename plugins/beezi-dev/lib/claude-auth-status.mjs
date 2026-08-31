@@ -156,8 +156,13 @@ export function resolveClaudeSubscription(deps = {}) {
   // interpret is not evidence of anything: it must leave the pre-existing behavior alone.
   if (status != null && status.authMethod === 'oauth_token') {
     return {
-      accountUuid: account == null ? null : account.accountUuid,
-      email: account == null ? null : account.email,
+      // NOT copied from `account`. The CLI just told us the credential in force is the setup token,
+      // and under that auth mode Claude Code writes no account metadata — so ~/.claude.json's
+      // oauthAccount names whoever logged in interactively last, on a machine that may belong to
+      // someone else entirely. Returning it here is how a previous login's identity used to end up
+      // stored against a key's record and shipped in the check-in that binds it.
+      accountUuid: null,
+      email: null,
       subscriptionType: null,
       rateLimitTier: null,
       expiresAt: null,

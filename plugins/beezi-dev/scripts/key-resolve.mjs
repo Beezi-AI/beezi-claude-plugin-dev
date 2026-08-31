@@ -7,11 +7,15 @@ import {
 } from '../lib/key-resolution.mjs';
 import {
   recordResolvedKeyPlan,
-  resolvedPlanFrom,
+  recordResolvedKeyData,
+  resolvedKeyDataFrom,
   submittedPlanFrom,
 } from '../lib/plan-writeback.mjs';
 import { hasOauthTokenIdentity } from '../lib/oauth-identity.mjs';
 import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
+import { reconcileBillingConfig } from '../lib/billing-capture.mjs';
+import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
+import { clearOauthKeyStatus } from '../lib/oauth-key-status.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
 
 // Thin entrypoint for the interactive key-resolution flow in /beezi:refresh.
@@ -111,7 +115,28 @@ async function runStatus(token, env) {
     });
     return;
   }
-  const payload = await fetchKeyResolution(token, { env });
+  // Clean before asking. If billing.json still describes the interactive login this machine used to
+  // run under — or a key it no longer has — the reconcile's auth-mode/rotation detection resets it
+  // to hold only what belongs to the key in force. Reused rather than reimplemented: a second
+  // cleanup path here would be free to drift from the one the session-start hook runs.
+  // A record already scoped to this key is a no-op. Best-effort, like every other reconcile call.
+  try { reconcileBillingConfig({ env }, { via: 'refresh' }); } catch { /* best-effort */ }
+
+  let payload = await fetchKeyResolution(token, { env });
+
+  // A key the portal has never seen cannot be resolved: /key-resolution/plan and /link both refuse
+  // a fingerprint with no account behind it. Only the account check-in registers one, so run it and
+  // ask again rather than telling the user to come back next session — the whole point of them
+  // typing this command is that they want it settled now. `force` skips the unchanged-payload gate,
+  // which would otherwise send nothing at all on a machine whose payload has not moved.
+  if (payload != null && payload.status === 'unknown_key') {
+    try {
+      await syncAccountIfNeeded(token, { force: true, via: 'refresh' }, { env });
+      const reprobed = await fetchKeyResolution(token, { env });
+      if (reprobed != null) payload = reprobed;
+    } catch { /* best-effort — the unknown_key answer below is still honest */ }
+  }
+
   if (payload == null) {
     // "Could not ask", never "not resolved": a machine that cannot reach the portal must not be
     // told its key is unresolved, because that is not what it observed.
@@ -129,8 +154,10 @@ async function runStatus(token, env) {
   emit({ ok: true, ...rest });
   // A key the portal already resolved is an authoritative answer for this machine, not just
   // something to print: adopt it so the reports stop carrying the old login's plan without the user
-  // having to answer a question they are about to be told they do not need to answer.
-  recordResolvedKeyPlan(resolvedPlanFrom(payload));
+  // having to answer a question they are about to be told they do not need to answer. The whole
+  // payload, not just the plan — the type, tier and account email are equally unknowable locally.
+  const resolved = resolvedKeyDataFrom(payload);
+  if (resolved != null) recordResolvedKeyData(resolved);
 }
 
 async function main() {
@@ -148,16 +175,22 @@ async function main() {
     // The server's own wording where it gave one — the user is about to act on it.
     if (!result.ok) throw new UserError(result.message);
     recordResolvedKeyPlan(submittedPlanFrom(result));
+    // The cached verdict predates this answer and still says the key needs attention. Left in
+    // place it would nudge the user, for up to six hours, to do what they just did.
+    clearOauthKeyStatus();
     console.log(`✓ Beezi: this key’s subscription is now recorded as ${result.subscriptionPlan}.`);
     return;
   }
 
   const result = await submitKeyLink(token, parsed.target, { env });
   if (!result.ok) throw new UserError(result.message);
-  // Only when the server named the plan of the subscription this key joined. It usually does not,
-  // and submittedPlanFrom returns null there — a link is not a plan, and inventing one would put a
-  // tier nobody stated into every report.
+  // Only when the server named the plan of the subscription this key joined. A server that does not
+  // send one leaves submittedPlanFrom null and nothing is written — a link is not a plan, and
+  // inventing one would put a tier nobody stated into every report. The next session's adoption
+  // fills it from the resolution instead.
   recordResolvedKeyPlan(submittedPlanFrom(result));
+  // Same reason as the plan path: the cached verdict is about the world before this link.
+  clearOauthKeyStatus();
   console.log(formatLinkOutcome(result));
 }
 

@@ -81,6 +81,14 @@ export function oauthKeyStatusFile() {
   return path.join(beeziHome(), 'oauth-key-status.json');
 }
 
+// Which key fingerprints have already been told that they bill a subscription some earlier sign-in
+// established: { version, notified: [ "<prefix>...<last4>:<length>", ... ] }. Root-level for the
+// same pruneStale() reason as the others — an expiring marker would re-deliver a notice the user
+// has already read and cannot act on from here.
+export function keyNoticeFile() {
+  return path.join(beeziHome(), 'key-notice.json');
+}
+
 // The last reading of the published marketplace manifest: { version, checkedAt, pluginName,
 // latestVersion, marketplaceName } — FACTS about the remote, never a verdict. Root-level for the
 // same pruneStale() reason as the tracking cache: an expiring reading would re-fetch GitHub on
