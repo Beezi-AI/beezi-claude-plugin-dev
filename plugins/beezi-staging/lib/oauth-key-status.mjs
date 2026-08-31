@@ -4,6 +4,7 @@ import { resolveFetch } from './fetch-compat.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { oauthKeyStatusFile } from './paths.mjs';
 import { keyFingerprint } from './oauth-identity.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 const STATE_VERSION = 1;
 
@@ -57,7 +58,10 @@ function isUsable(cached, fingerprint, nowMs) {
 //
 // Best-effort by contract, like every other hook path: it never throws.
 export async function fetchOauthKeyStatus(token, deps = {}) {
-  const env = deps.env == null ? process.env : deps.env;
+  // A token set in ~/.claude/settings.json reaches us as process.env in a normal session; when it
+  // does not, oauthTokenEnv fills that one key. An INJECTED deps.env is trusted verbatim — it
+  // describes a machine under test, and a developer's own settings file must not leak into it.
+  const env = deps.env == null ? oauthTokenEnv(process.env) : deps.env;
   const fingerprint = keyFingerprint(env.CLAUDE_CODE_OAUTH_TOKEN);
   if (!token || fingerprint == null) return null;
 

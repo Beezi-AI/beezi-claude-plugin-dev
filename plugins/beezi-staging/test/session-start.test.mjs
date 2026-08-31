@@ -3,7 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runSessionStart } from '../lib/session-start.mjs';
+import { markAsked } from '../lib/telemetry-consent.mjs';
+import { runSessionStart as _runSessionStart } from '../lib/session-start.mjs';
+
+// Same guard as checkpoint.test.mjs: runSessionStart's env resolution ends in an OS-environment
+// probe that spawns and reads the developer's own machine. Default this suite to a machine with
+// no setup token; a test that wants the probe injects `osEnvOauthToken` (or its own `env`).
+function runSessionStart(input, deps = {}, ...rest) {
+  const declared = Object.prototype.hasOwnProperty.call(deps, 'env')
+    || Object.prototype.hasOwnProperty.call(deps, 'osEnvOauthToken');
+  return _runSessionStart(input, declared ? deps : { env: {}, ...deps }, ...rest);
+}
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -15,6 +25,10 @@ function makeTmpDir(t) {
 
 function setHome(dir) {
   process.env.BEEZI_HOME = dir;
+  // These tests assert on the repo/link message, not the one-time consent ask — stamp it as
+  // already asked so it can't bleed into their expected strings (covered on its own in
+  // test/telemetry-consent-prompt.test.mjs).
+  markAsked();
 }
 
 function stateFilePath(homeDir, sessionId) {
@@ -326,9 +340,10 @@ test('12. stale subscription plan — appends /beezi:refresh nudge', async (t) =
 
 // ─── setup-token nudge: the case neither billing nudge can structurally reach ──
 
-// billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN and isStale() is false for a config
-// that never resolved a plan, so without this check a CI runner reports unpriced usage in silence.
-test('12b. portal says the setup token has no plan — nudges to Connections', async (t) => {
+// billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN, so the UNKNOWN nudge can never fire
+// here, and the stale nudge points at a local re-capture a setup-token machine cannot do. Without
+// this check a CI runner reports unpriced usage in silence.
+test('12b. portal says the setup token has no plan — nudges to /beezi:refresh', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
@@ -341,19 +356,81 @@ test('12b. portal says the setup token has no plan — nudges to Connections', a
   });
 
   assert.match(result ?? '', /setup token/);
-  assert.match(result ?? '', /Connections/);
+  // Routed at the command that actually performs this resolution, not at the portal UI.
+  assert.match(result ?? '', /\/beezi:refresh/);
+  assert.doesNotMatch(result ?? '', /Connections/);
 });
 
-test('12c. a resolved setup token is silent', async (t) => {
+test('12c. a resolved setup token is silent, and its plan is adopted locally', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
+  const recorded = [];
   const result = await runSessionStart(baseInput({ session_id: 'sess-key-resolved' }), {
     getAccessToken: async () => 'tok',
     ...quietBilling,
     fetchImpl: fakeFetchWhoamiOkNoRepo(),
     gitImpl: () => { throw new Error('not a git repo'); },
     fetchOauthKeyStatus: async () => ({ known: true, needsAttention: false, subscriptionPlan: 'max_20x' }),
+    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
+  });
+
+  assert.doesNotMatch(result ?? '', /setup token/);
+  // The whole point of the loop being closed: the server's answer reaches billing.json without the
+  // user having to run /beezi:refresh first.
+  assert.deepEqual(recorded, ['max_20x']);
+});
+
+// A key the server has flagged is exactly the key whose plan must NOT be adopted: needsAttention
+// means the answer it has is not one to report.
+test('12c-i. a flagged setup token is nudged, never adopted', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const recorded = [];
+  await runSessionStart(baseInput({ session_id: 'sess-key-flagged' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: true, subscriptionPlan: 'max_20x' }),
+    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
+  });
+
+  assert.deepEqual(recorded, []);
+});
+
+// known=false is the server saying it has no record of this key; a plan alongside it would be
+// about something else.
+test('12c-ii. an unknown key with a plan is not adopted', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const recorded = [];
+  await runSessionStart(baseInput({ session_id: 'sess-key-unknown' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => ({ known: false, needsAttention: false, subscriptionPlan: 'pro' }),
+    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
+  });
+
+  assert.deepEqual(recorded, []);
+});
+
+// A write that blows up must not take session start with it.
+test('12c-iii. a throwing write-back is swallowed', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const result = await runSessionStart(baseInput({ session_id: 'sess-key-writefail' }), {
+    getAccessToken: async () => 'tok',
+    ...quietBilling,
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: false, subscriptionPlan: 'pro' }),
+    recordResolvedKeyPlan: () => { throw new Error('EACCES'); },
   });
 
   assert.doesNotMatch(result ?? '', /setup token/);
@@ -364,15 +441,18 @@ test('12d. an unanswerable probe says nothing', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
+  const recorded = [];
   const result = await runSessionStart(baseInput({ session_id: 'sess-key-offline' }), {
     getAccessToken: async () => 'tok',
     ...quietBilling,
     fetchImpl: fakeFetchWhoamiOkNoRepo(),
     gitImpl: () => { throw new Error('not a git repo'); },
     fetchOauthKeyStatus: async () => null,
+    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
   });
 
   assert.doesNotMatch(result ?? '', /setup token/);
+  assert.deepEqual(recorded, []);
 });
 
 // ─── test 13: fresh subscription plan → no nudge ─────────────────────────────
@@ -835,4 +915,60 @@ test('account sync — a rejecting check-in never breaks session start', async (
     });
   });
   assert.equal(result, 'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.');
+});
+
+// ─── end to end: the probed env reaches every consumer of the hook ───────────
+// runSessionStart resolves the token ONCE and hands the same env to the billing reconcile, the
+// account check-in and the key-status probe. If any of them fell back to its own default
+// parameter it would re-resolve WITHOUT the OS-environment tier and could disagree with the
+// others. The probe is injected, so nothing spawns and nothing reads this machine.
+
+test('OS-env probe — one probed env reaches the reconcile, the check-in and the key status', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  // Hermetic first two tiers: no exported token, and an empty CLAUDE_CONFIG_DIR so the
+  // developer's own settings file cannot answer before the probe does.
+  const cfgDir = makeTmpDir(t);
+  const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+  const prevToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.env.CLAUDE_CONFIG_DIR = cfgDir;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const { resetSettingsEnvCache } = await import('../lib/claude-settings-env.mjs');
+  resetSettingsEnvCache();
+  t.after(() => {
+    if (prevCfg == null) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+    if (prevToken != null) process.env.CLAUDE_CODE_OAUTH_TOKEN = prevToken;
+    resetSettingsEnvCache();
+  });
+
+  const OS_TOKEN = `sk-ant-oat01-${'d'.repeat(60)}`;
+  const seen = { reconcile: null, sync: null, keyStatus: null };
+  let probes = 0;
+
+  await runSessionStart(baseInput({ session_id: 'sess-osenv' }), {
+    getAccessToken: async () => 'tok',
+    fetchImpl: fakeFetchWhoamiOkNoRepo(),
+    gitImpl: () => { throw new Error('not a git repo'); },
+    osEnvOauthToken: () => { probes += 1; return OS_TOKEN; },
+    // Deliberately NOT stubbing reconcileBilling: the real reconcile is what forwards the env on
+    // to resolveSource, which is the only place the reconcile's own env is observable.
+    resolveSource: (_config, env) => { seen.reconcile = env; return 'subscription'; },
+    readBillingConfig: () => ({ source: 'subscription', plan: 'pro', capturedAt: new Date().toISOString(), anchorCheckedAt: new Date(Date.now() - 60_000).toISOString() }),
+    isStale: () => false,
+    writeBillingConfig: () => {},
+    resolveClaudeSubscription: () => null,
+    readClaudeAccountAnchor: () => null,
+    syncAccount: async (_token, _options, d) => { seen.sync = d.env; return { synced: false }; },
+    fetchOauthKeyStatus: async (_token, d) => { seen.keyStatus = d.env; return null; },
+  });
+
+  assert.equal(seen.reconcile == null ? null : seen.reconcile.CLAUDE_CODE_OAUTH_TOKEN, OS_TOKEN);
+  assert.equal(seen.sync == null ? null : seen.sync.CLAUDE_CODE_OAUTH_TOKEN, OS_TOKEN);
+  assert.equal(seen.keyStatus == null ? null : seen.keyStatus.CLAUDE_CODE_OAUTH_TOKEN, OS_TOKEN);
+  // All three share ONE object, which is what makes disagreement impossible rather than unlikely.
+  assert.equal(seen.sync, seen.keyStatus);
+  assert.equal(seen.reconcile, seen.sync);
+  // And the hook probed exactly once for all of them.
+  assert.equal(probes, 1);
 });

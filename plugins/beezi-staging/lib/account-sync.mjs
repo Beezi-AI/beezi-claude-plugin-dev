@@ -7,6 +7,7 @@ import { accountSyncStateFile } from './paths.mjs';
 import { hasCustomGateway } from './billing.mjs';
 import { readBillingConfig as _readBillingConfig } from './billing-config.mjs';
 import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // Re-exported from its leaf home so existing importers keep working; the definition moved so the
 // identity helpers could live in a module with no import cycle back into billing config.
@@ -186,7 +187,10 @@ function dueForResync(state, nowMs) {
 export async function syncAccountIfNeeded(token, options = {}, deps = {}) {
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const readConfig = deps.readBillingConfig == null ? _readBillingConfig : deps.readBillingConfig;
-  const env = deps.env == null ? process.env : deps.env;
+  // A token set in ~/.claude/settings.json reaches us as process.env in a normal session; when it
+  // does not, oauthTokenEnv fills that one key. An INJECTED deps.env is trusted verbatim — it
+  // describes a machine under test, and a developer's own settings file must not leak into it.
+  const env = deps.env == null ? oauthTokenEnv(process.env) : deps.env;
   const now = deps.now == null ? new Date() : deps.now;
   const force = options.force === true;
   if (!token) return { synced: false, reason: 'no-token' };

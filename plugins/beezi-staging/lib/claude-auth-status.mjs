@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { readClaudeAccount as _readClaudeAccount, readClaudeAccountAnchor as _readClaudeAccountAnchor } from './claude-account.mjs';
 import { oauthTokenAnchor as _oauthTokenAnchor } from './oauth-identity.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // Subscription info via Claude Code's OWN CLI (`claude auth status --json`), never its credential
 // store. The CLI reads its secret store itself — including the macOS Keychain, where it is the
@@ -21,6 +22,16 @@ function pickLabel(value) {
 export function runClaudeAuthStatus(deps = {}) {
   const exec = deps.exec == null ? execFileSync : deps.exec;
   const platform = deps.platform == null ? process.platform : deps.platform;
+  const baseEnv = deps.processEnv == null ? process.env : deps.processEnv;
+  // The token this process recovered, handed down so the CHILD authenticates the way this machine
+  // actually does. Claude Code deletes CLAUDE_CODE_OAUTH_TOKEN from every subprocess environment
+  // it builds, so without re-injecting it the `claude` we spawn reads the on-disk credential store
+  // and answers for whichever login last touched the disk — the stale account, every time.
+  //
+  // ENVIRONMENT ONLY. It must never reach argv: a process listing is world-readable, and the
+  // Windows fallback below hands its command line to a shell. Nothing here logs it either — the
+  // catch arms swallow the child's stderr and return null rather than surfacing a message.
+  const oauthToken = deps.oauthToken == null ? null : String(deps.oauthToken);
   const options = {
     timeout: AUTH_STATUS_TIMEOUT_MS,
     windowsHide: true,
@@ -28,6 +39,9 @@ export function runClaudeAuthStatus(deps = {}) {
     // stderr is discarded, not captured: an auth error message must never leak into output.
     stdio: ['ignore', 'pipe', 'ignore'],
   };
+  // Set only when there is a token: with none, the spawn stays byte-identical to the pre-existing
+  // one (inherited environment), which is the overwhelmingly common shape.
+  if (oauthToken) options.env = { ...baseEnv, CLAUDE_CODE_OAUTH_TOKEN: oauthToken };
   let stdout;
   try {
     // The native install exposes a real executable; PATH resolves it without a shell.
@@ -62,8 +76,8 @@ export function runClaudeAuthStatus(deps = {}) {
 // stale, its accountUuid naming the previous account — and userID, a last-resort opaque hash from
 // ~/.claude.json.
 //
-// Identity only. The plan tuple below still merges the CLI answer with oauthAccount's tier: a
-// token machine needs its Max multiplier like any other.
+// Identity only — the plan tuple is decided separately, and on a token machine it is decided by
+// asking the CLI rather than by reading the same disk this anchor already distrusts.
 function buildAnchor(status, fileAnchor, tokenAnchor) {
   if (tokenAnchor != null) return tokenAnchor;
   if (status != null && status.email != null) return { value: status.email, source: 'email' };
@@ -110,16 +124,53 @@ export function resolveClaudeSubscription(deps = {}) {
   const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   const readFileAnchor = deps.readClaudeAccountAnchor == null ? _readClaudeAccountAnchor : deps.readClaudeAccountAnchor;
   const readTokenAnchor = deps.oauthTokenAnchor == null ? _oauthTokenAnchor : deps.oauthTokenAnchor;
-  const env = deps.env == null ? process.env : deps.env;
+  // Resolved the same way as every other token read, so the anchor this returns cannot disagree
+  // with the fingerprint the check-in and the reports send. An injected deps.env is verbatim.
+  const env = deps.env == null ? oauthTokenEnv(process.env) : deps.env;
 
+  const oauthToken = env == null || env.CLAUDE_CODE_OAUTH_TOKEN == null ? null : env.CLAUDE_CODE_OAUTH_TOKEN;
   let status = null;
-  try { status = readStatus(); } catch { status = null; }
+  // The token goes DOWN into the spawn, never up into a log or a return value: it is the only way
+  // to make the CLI answer for the credential this machine actually authenticates with.
+  try { status = readStatus({ oauthToken }); } catch { status = null; }
   let account = null;
   try { account = readAccount(); } catch { account = null; }
   let fileAnchor = null;
   try { fileAnchor = readFileAnchor(); } catch { fileAnchor = null; }
   let tokenAnchor = null;
   try { tokenAnchor = readTokenAnchor(env); } catch { tokenAnchor = null; }
+
+  // The CLI naming `oauth_token` is a positive statement that the credential in force is the setup
+  // token we just handed it — NOT the interactive login whose leftovers are on disk. Claude Code
+  // emits email/orgId/subscriptionType only for `claude.ai`, so under a token it states no account
+  // and no product at all, and everything ~/.claude.json says describes whoever logged in last.
+  // The plan is therefore not merely unknown, it is known to be someone else's: clear it and say
+  // so, rather than reporting a tier this machine may not have.
+  //
+  // This is checked BEFORE the cliType gate below on purpose. A token answer carries no
+  // subscriptionType, so it would otherwise fall into the "no CLI answer" arm and return the whole
+  // stale profile — the same bug by a second route.
+  //
+  // Only `oauth_token` clears. `authMethod` is an open vocabulary (third_party, claude.ai,
+  // api_key_helper, oauth_token, api_key, none — and whatever ships next), and an answer we cannot
+  // interpret is not evidence of anything: it must leave the pre-existing behavior alone.
+  if (status != null && status.authMethod === 'oauth_token') {
+    return {
+      accountUuid: account == null ? null : account.accountUuid,
+      email: account == null ? null : account.email,
+      subscriptionType: null,
+      rateLimitTier: null,
+      expiresAt: null,
+      billingType: null,
+      seatTier: null,
+      organizationType: null,
+      // Distinct from "not captured yet": we asked, and the answer was that nothing local can
+      // name this credential's plan. Only the server, from the key row, can.
+      planSource: 'unresolved',
+      detectedVia: 'oauth_token',
+      anchor: buildAnchor(status, fileAnchor, tokenAnchor),
+    };
+  }
 
   const cliType = status != null && status.loggedIn === true ? status.subscriptionType : null;
   if (cliType == null) {

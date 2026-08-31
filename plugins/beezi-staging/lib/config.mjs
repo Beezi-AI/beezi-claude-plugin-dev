@@ -46,6 +46,8 @@ export const ENDPOINTS = Object.freeze({
   keyResolution: "/me/cli-agent/key-resolution",
   keyResolutionPlan: "/me/cli-agent/key-resolution/plan",
   keyResolutionLink: "/me/cli-agent/key-resolution/link",
+  // Plugin health, not user analytics: separate route, separate table, consent-gated client-side.
+  pluginDiagnostics: "/cli-agent/plugin-diagnostics",
 });
 
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";

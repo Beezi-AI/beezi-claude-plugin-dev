@@ -4,8 +4,9 @@ import { createBridge, mcpUrl } from '../lib/mcp-bridge.mjs';
 
 const URL_UNDER_TEST = 'https://api.test/api/mcp';
 
-// Each entry in `responses` answers one fetch, in order; an Error entry rejects.
-function bridgeWith({ responses = [], token = 'tok' } = {}) {
+// Each entry in `responses` answers one fetch, in order; an Error entry rejects, and a
+// function entry is called with the fetch init so it can react to the abort signal.
+function bridgeWith({ responses = [], token = 'tok', timeoutMs = 1000 } = {}) {
   const calls = [];
   const out = [];
   const bridge = createBridge({
@@ -15,11 +16,12 @@ function bridgeWith({ responses = [], token = 'tok' } = {}) {
       calls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
       const next = responses.shift();
       if (next instanceof Error) throw next;
+      if (typeof next === 'function') return next(init);
       return next;
     },
     write: (line) => out.push(JSON.parse(line)),
     logError: () => {},
-    timeoutMs: 1000,
+    timeoutMs,
   });
   return { bridge, calls, out };
 }
@@ -154,7 +156,7 @@ test('handleLine drops non-JSON input without writing', async () => {
 // ── lazy link: an unlinked machine must still hand Claude Code a healthy server ──
 
 // Harness with a MUTABLE token and captured interval callbacks, for the login-mid-session flow.
-function lazyBridgeWith({ responses = [] } = {}) {
+function lazyBridgeWith({ responses = [], timeoutMs = 1000 } = {}) {
   const calls = [];
   const out = [];
   const ticks = [];
@@ -166,11 +168,12 @@ function lazyBridgeWith({ responses = [] } = {}) {
       calls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
       const next = responses.shift();
       if (next instanceof Error) throw next;
+      if (typeof next === 'function') return next(init);
       return next;
     },
     write: (line) => out.push(JSON.parse(line)),
     logError: () => {},
-    timeoutMs: 1000,
+    timeoutMs,
     setIntervalImpl: (fn) => { ticks.push(fn); return { unref() {} }; },
     clearIntervalImpl: () => { state.cleared += 1; },
   });
@@ -252,4 +255,74 @@ test('linked startup is unchanged: initialize forwards and no watcher starts', a
   assert.equal(calls[0].body.method, 'initialize');
   assert.deepEqual(out, [INIT_RESULT]);
   assert.equal(ticks.length, 0, 'no watcher while linked');
+});
+
+// A stream that opens and then never produces an event: the shape a socket left half-open by a
+// laptop sleep has — headers already delivered, the rest of the response never arriving and no
+// FIN to end the read. It ends only when the request is aborted, exactly as undici behaves.
+function stalledSseRes(init) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name) => (String(name).toLowerCase() === "content-type" ? "text/event-stream" : null) },
+    body: (async function* () {
+      await new Promise((_resolve, reject) => {
+        const fail = () => {
+          const err = new Error("This operation was aborted");
+          err.name = "AbortError";
+          reject(err);
+        };
+        if (init.signal.aborted) fail();
+        else init.signal.addEventListener("abort", fail, { once: true });
+      });
+    })(),
+  };
+}
+
+test("a stream that stalls after the headers fails the request instead of hanging", { timeout: 5000 }, async () => {
+  const { bridge, out } = bridgeWith({ responses: [stalledSseRes], timeoutMs: 100 });
+  await bridge.handleMessage(CALL);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, 1);
+  assert.match(out[0].error.message, /Beezi MCP request failed/);
+});
+
+test("a stalled re-initialize does not wedge the messages behind it", { timeout: 5000 }, async () => {
+  const { bridge, out } = bridgeWith({
+    responses: [
+      sseRes([INIT_RESULT], { headers: { "mcp-session-id": "pre-sleep" } }),
+      jsonRes({ jsonrpc: "2.0", error: { code: -32001, message: "MCP session not found" }, id: null }, { status: 404 }),
+      stalledSseRes, // the transparent re-initialize lands on the dead socket
+      jsonRes(CALL_RESULT),
+    ],
+    timeoutMs: 100,
+  });
+  await bridge.handleMessage(INIT);
+  await bridge.handleMessage(CALL);
+  assert.match(out[1].error.message, /Beezi MCP request failed/);
+
+  // The next request must still be served: one dead stream may not kill the bridge.
+  await bridge.handleMessage(CALL);
+  assert.deepEqual(out.at(-1), CALL_RESULT);
+});
+
+test("an unreachable portal keeps the server alive instead of failing the handshake", { timeout: 5000 }, async () => {
+  const { bridge, calls, out, ticks, state } = lazyBridgeWith({
+    responses: [
+      stalledSseRes, // the handshake opens and then dies, the way a resumed socket does
+      sseRes([INIT_RESULT], { headers: { "mcp-session-id": "s9" } }),
+      new Response(null, { status: 202 }),
+    ],
+    timeoutMs: 100,
+  });
+  state.token = "tok";
+  await bridge.handleMessage(INIT);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, 0, "handshake answered locally rather than failed");
+  assert.equal(out[0].result.capabilities.tools.listChanged, true);
+  assert.equal(ticks.length, 1, "watcher started to replay the real handshake");
+
+  await ticks[0]();
+  assert.equal(calls[1].body.method, "initialize", "real handshake replayed once reachable");
+  assert.ok(out.some((m) => m.method === "notifications/tools/list_changed"));
 });

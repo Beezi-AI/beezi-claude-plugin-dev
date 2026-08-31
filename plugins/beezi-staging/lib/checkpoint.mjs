@@ -10,6 +10,9 @@ import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { postSessionError } from './session-error-report.mjs';
+import { recordIssue, rememberClaudeCodeVersion } from './telemetry.mjs';
+import { flushTelemetry } from './telemetry-flush.mjs';
+import { DIAGNOSTIC_CODES, DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { isApiKeyBillingEvidence } from './billing.mjs';
 import {
@@ -19,7 +22,7 @@ import {
   recordApiKeyEvidence,
 } from './billing-config.mjs';
 import { resolveSessionName } from './session-name.mjs';
-import { readJson, writeJsonSecure } from './fs-store.mjs';
+import { readJson, readJsonSalvaged, writeJsonSecure } from './fs-store.mjs';
 import {
   listSubagentTranscripts,
   buildTaskDescriptionMap,
@@ -32,6 +35,7 @@ import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
 import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
@@ -112,6 +116,13 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let token = null;
   try { token = await getAccessToken(); } catch { return { enqueued: 0, flush: null, sessionErrors: collectedErrors }; }
   if (!token) return { enqueued: 0, flush: null, sessionErrors: collectedErrors };
+
+  // Above the tracking gate on purpose: a dark-mode tenant has opted out of analytics about their
+  // work, not out of telling us our own plugin is broken. Consent is the only gate here.
+  try { await flushTelemetry(token, { postJsonImpl: deps.postJsonImpl }); } catch { /* never block the checkpoint */ }
+  // A bounded tail-read of the transcript, cached in telemetry.json for the recorder to stamp
+  // future events with — must never throw into the checkpoint either.
+  try { rememberClaudeCodeVersion(transcript_path); } catch { /* best-effort */ }
 
   // Tenant gate: audit-mode workspaces never track live — the server would 403 every report
   // anyway (TrackingEnabledGuard), this just spares the work and the noise. `gated` lets
@@ -218,7 +229,50 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
       billingConfig = recorded;
     }
   }
-  const billingFields = resolveBilling(billingConfig);
+  // Resolved HERE, above resolveBilling, and used for the identity stamp below too: both readings
+  // must come from ONE env. resolveBilling's `env` parameter defaults to oauthTokenEnv(process.env),
+  // so omitting it silently computed a SECOND, un-probed env — the source could then disagree with
+  // the fingerprint stamped ten lines further down. Passing it explicitly closes that.
+  //
+  // Why the probing variant: Claude Code 2.1.251 deletes CLAUDE_CODE_OAUTH_TOKEN from every child
+  // environment it builds, so a hook never inherits it however the user set it — process.env alone
+  // cannot answer here. The chain is process.env → user settings file → OS persistent environment.
+  //
+  // WHAT THIS COSTS, HONESTLY. This is the PostToolUse-Bash hook: a FRESH PROCESS on every Bash
+  // tool call. os-env-token's cache is per process, so it amortizes nothing across calls — the
+  // price below is paid once per Bash command, not once per session.
+  //
+  // Measured on Windows 11 after os-env-token learned to tell "reg ran and found nothing"
+  // (authoritative — no PowerShell) from "reg could not execute" (fall back):
+  //   token present in User scope, one `reg query` hit ......... 38ms median (34.8-46.0, n=8)
+  //   no token set, two `reg query` misses, no PowerShell ............... ~56ms
+  //   PowerShell fallback, only when reg cannot execute at all .......... ~261ms
+  // (the previous no-token behaviour, which always spawned PowerShell, was ~316ms). macOS is one
+  // ~10ms `launchctl getenv`; Linux has no OS-level persistent env store and spawns nothing at all.
+  //
+  // The 38ms is the figure to trust for this call site: it was taken at the ENTRYPOINT, spawning
+  // `node scripts/checkpoint.mjs` end to end (822ms with the probe firing vs 783ms with a token
+  // pre-set in process.env so it is skipped). That the entrypoint delta matches ONE isolated probe
+  // is also the evidence that the module-level cache holds here — no call site double-probes.
+  //
+  // And it is only paid when the two cheap tiers came up empty, so a machine whose token is
+  // exported or sits in settings.json never probes.
+  //
+  // That is accepted, with eyes open, as the price of a correct identity stamp: this is the path
+  // the fingerprint has to reach, and a setup-token machine that skips it reports usage no account
+  // can be resolved for. The alternative — SessionStart probing once and persisting the
+  // fingerprint under BEEZI_HOME for the hook to read — was considered and DEFERRED: it adds a
+  // cache that can outlive a rotated token and go quietly wrong, which is a worse failure than
+  // milliseconds. Do not build it here without deciding how it is invalidated.
+  //
+  // An INJECTED deps.env is trusted verbatim — it describes a machine under test, and a
+  // developer's own settings file (or registry) must not leak into it.
+  // Only the probe seam is forwarded, never the whole deps bag: os-env-token turns its own cache
+  // off when it sees an injected env/platform/run, and checkpoint's deps carry neither meaning.
+  const env = deps.env == null
+    ? oauthTokenEnvWithOsProbe(process.env, { osEnvOauthToken: deps.osEnvOauthToken })
+    : deps.env;
+  const billingFields = resolveBilling(billingConfig, env);
 
   // Subscription-usage stamp: account-level utilization correlated onto every payload of this
   // checkpoint. Keys are omitted (not null) when unknown. usage_account_uuid is the CACHE's own
@@ -235,7 +289,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // CLI-observed anchor in billing.json as fallback), and the setup-token fingerprint for CI
   // machines that expose nothing else. The server's ingest links the session to its account with
   // whichever arrives; a user_id anchor is a local hash and never identifies.
-  const env = deps.env == null ? process.env : deps.env;
+  // `env` was resolved above the billing block so both readings share one answer — see there.
   const anchor = billingConfig != null && billingConfig.accountAnchor != null ? billingConfig.accountAnchor : null;
   const accountEmail = claudeAccount != null && claudeAccount.email
     ? claudeAccount.email
@@ -541,7 +595,7 @@ function sweepHeldQueue(dir, result, now = Date.now()) {
 export async function flushQueue(token, deps = {}) {
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
-  const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, trackingDisabled: false, lastError: null };
+  const result = { flushed: 0, rejected: 0, failed: 0, expired: 0, salvaged: 0, quarantined: 0, trackingDisabled: false, lastError: null };
   const dir = queueDir();
 
   // Dark workspace: no readdir-and-post loop, just the hold-window sweep. Files stay for
@@ -574,9 +628,22 @@ export async function flushQueue(token, deps = {}) {
   }
 
   for (const file of files) {
+    // Only queued payloads. Skips the `.tmp` of a writer that died mid-write and the `.corrupt`
+    // files quarantined below, neither of which is ever postable; pruneStale expires both.
+    if (!file.endsWith('.json')) continue;
     const filePath = path.join(dir, file);
-    const payload = readJson(filePath);
-    if (payload == null) continue;
+    const { value: payload, salvaged } = readJsonSalvaged(filePath);
+    // Nothing recoverable, or what came back is not a postable payload. Quarantine rather than
+    // `continue`: an unparseable file used to be re-read on every flush forever, invisibly, and
+    // the session's analytics were lost without a signal. A cleanly parsed payload is posted
+    // exactly as before — the server stays the judge of its contents.
+    if (payload == null || (salvaged && payload.segmentId == null)) {
+      result.quarantined += 1;
+      recordIssue({ code: DIAGNOSTIC_CODES.QUEUE_FILE_QUARANTINED, source: DIAGNOSTIC_SOURCES.CHECKPOINT });
+      try { fs.renameSync(filePath, `${filePath}.corrupt`); } catch { /* best-effort */ }
+      continue;
+    }
+    if (salvaged) result.salvaged += 1;
 
     try {
       let res = await postJson(reportUrl, token, payload, { fetchImpl });
@@ -621,6 +688,7 @@ export async function flushQueue(token, deps = {}) {
         fs.unlinkSync(filePath);
       } else {
         result.failed += 1; // keep for retry
+        recordIssue({ code: DIAGNOSTIC_CODES.QUEUE_FLUSH_HTTP_ERROR, source: DIAGNOSTIC_SOURCES.CHECKPOINT, httpStatus: res.status });
       }
     } catch {
       result.failed += 1; // keep file for retry on network error / throw

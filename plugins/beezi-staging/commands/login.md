@@ -53,6 +53,26 @@ It asks Claude Code itself for the non-secret subscription info (`claude auth
 status`) and reads the non-secret account metadata from `~/.claude.json` — never
 any token, never the credentials file. Report its one-line summary. If it could not resolve the plan, continue to Step 3.
 
+Step 3s — is this machine's plan Step 2's to know? ALWAYS run this, before
+anything in Step 3, whatever Step 2 printed. Run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/key-resolve.mjs status`
+
+It prints exactly one JSON object and answers the question by itself — nothing
+about Step 2's output needs interpreting for it.
+
+- `status` is `"no_key"` → this machine does not sign in with a Claude setup
+  token, so Step 2 read its real plan. Say nothing about this command and
+  continue to Step 3 below as normal.
+- anything else → this machine signs in with `CLAUDE_CODE_OAUTH_TOKEN`. Claude
+  Code writes no account metadata under that auth mode, so a plan Step 2 printed
+  is a previous login's leftovers, not this machine's plan — accepting it
+  silently is how a wrong plan gets reported for months. Do not ask the tier
+  question either: the answer lives on the server, not with the user. Follow
+  `/beezi:refresh`'s Step 1 dispatch table on the JSON you just printed,
+  including its questions where that table asks them, then skip to Step 3b.
+  Do not run Step 3, 3a or 3c for this machine.
+
 Step 3 — ask the user how this machine pays. Two questions live here; which
 ones you ask depends on Step 2's output.
 
@@ -126,6 +146,21 @@ Report its one-line output; if the status line does not change right away it
 applies on the next Claude Code session. If they decline, skip silently —
 usage is still captured from Claude Code's cache, just less often. To undo it
 later they can re-run this script with `--uninstall`.
+
+Step 3d — crash diagnostics (after Step 3b, before Step 4; both fresh links and
+already-linked machines). Ask the user ONE yes/no question: let Beezi collect
+anonymous crash reports about the plugin itself? Explain in one sentence: it
+sends only plugin and Claude Code versions, the OS, and which plugin file
+failed — never their code, prompts, file paths, or repository names — and it
+helps fix bugs that would otherwise go unseen. If they agree, run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.mjs on`
+
+If they decline, run EXACTLY:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.mjs off`
+
+so the machine is not asked again at session start. Report its one-line output.
 
 Step 4 — upload past sessions (ALWAYS run this last, after Steps 2/3/3b, on both
 fresh links and already-linked machines). Run EXACTLY this one command:

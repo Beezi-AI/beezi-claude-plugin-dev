@@ -36,6 +36,22 @@ import {
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
 import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.mjs';
+import { recordResolvedKeyPlan as _recordResolvedKeyPlan } from './plan-writeback.mjs';
+import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
+import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
+
+// A hook cannot prompt interactively, so the ask names the command that answers it. Stamped as
+// asked the moment it is shown, so it is shown exactly once per machine whatever the user does.
+// Only ever called for a linked machine (see the call site) — an unlinked machine's only
+// failures are auth failures, so there is nothing to ask.
+export function consentPrompt() {
+  if (hasBeenAsked()) return null;
+  markAsked();
+  return 'Beezi can send anonymous crash reports about the plugin itself — versions, OS, and '
+    + 'which plugin file failed. Never your code, prompts, or file paths. It helps us fix bugs '
+    + 'we would otherwise never see. Run /beezi:telemetry on to enable it, or /beezi:telemetry off '
+    + 'to decline.';
+}
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.
 // Also records where the session lives (cwd + transcript path) so /beezi:track can find
@@ -149,6 +165,21 @@ export async function runSessionStart(input, deps = {}) {
     token = refreshed;
   }
 
+  // ONE env for the whole hook. Claude Code 2.1.251 deletes CLAUDE_CODE_OAUTH_TOKEN from every
+  // child environment it builds, so this hook never inherits a setup token however the user set
+  // it: the answer has to be recovered, from the user settings file and then from the OS-level
+  // persistent environment. That recovery can spawn, so it is done exactly once here and handed to
+  // every consumer below (billing reconcile, account check-in, key status) rather than letting each
+  // one re-resolve it off its own default parameter — which would also let them disagree.
+  //
+  // Deliberately below the token guards, not at the very top: a machine that is not linked, or
+  // whose link was rejected, has already returned by here and never pays for the probe.
+  // Only the probe seam is forwarded, never the whole deps bag — os-env-token disables its own
+  // per-process cache the moment it sees an injected env/platform/run.
+  const oauthEnv = deps.env == null
+    ? oauthTokenEnvWithOsProbe(process.env, { osEnvOauthToken: deps.osEnvOauthToken })
+    : deps.env;
+
   // Persist the tenant's tracking policy BEFORE the flush below, so a freshly-disabled tenant
   // never gets one last ungated drain. Bound to this login's client id — a workspace switch
   // must not inherit the previous tenant's flags.
@@ -188,6 +219,7 @@ export async function runSessionStart(input, deps = {}) {
       writeBillingConfig,
       resolveSource,
       isStale,
+      env: oauthEnv,
       resolveClaudeSubscription: deps.resolveClaudeSubscription,
       readClaudeAccountAnchor: deps.readClaudeAccountAnchor,
     }))
@@ -214,7 +246,7 @@ export async function runSessionStart(input, deps = {}) {
     // here would be a second file read for an answer already in hand.
     const reconciledConfig = billingConfig;
     Promise.resolve(
-      syncAccount(token, { force: forced, via: 'session-start' }, { fetchImpl, readBillingConfig: () => reconciledConfig }),
+      syncAccount(token, { force: forced, via: 'session-start' }, { fetchImpl, env: oauthEnv, readBillingConfig: () => reconciledConfig }),
     ).catch(() => { /* best-effort */ });
   } catch { /* best-effort */ }
 
@@ -236,11 +268,13 @@ export async function runSessionStart(input, deps = {}) {
       message = message ? `${message}\n${nudge}` : nudge;
     }
 
-    // A setup-token machine is the one case the two nudges above structurally cannot reach:
-    // billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN (so the UNKNOWN branch never
-    // fires) and isStale() is false for a config that never resolved a plan (so the stale branch
-    // never fires either). Its usage lands priced at nothing, and nothing local can tell — only the
-    // portal knows whether that key has been given an account and a plan.
+    // A setup-token machine is the one case the UNKNOWN nudge above structurally cannot reach:
+    // billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN, so that branch never fires. The
+    // stale branch CAN fire — isStale() returns true for a config carrying no plan, or one whose
+    // plan was deliberately cleared — but it says the wrong thing there: it points at a local
+    // re-capture, and a setup-token machine has nothing local to re-capture. Claude Code writes no
+    // account metadata under that auth mode, so only the portal knows whether that key has been
+    // given an account and a plan.
     //
     // Answered from a cached verdict, so the steady state is one file read. A null answer means the
     // question could not be asked, which is not the same as "unresolved" and says nothing.
@@ -249,12 +283,25 @@ export async function runSessionStart(input, deps = {}) {
       const fetchKeyStatus = deps.fetchOauthKeyStatus == null
         ? _fetchOauthKeyStatus
         : deps.fetchOauthKeyStatus;
-      keyStatus = await fetchKeyStatus(token, { fetchImpl });
+      keyStatus = await fetchKeyStatus(token, { fetchImpl, env: oauthEnv });
     } catch { /* best-effort */ }
+    const recordKeyPlan = deps.recordResolvedKeyPlan == null
+      ? _recordResolvedKeyPlan
+      : deps.recordResolvedKeyPlan;
     if (keyStatus != null && keyStatus.needsAttention) {
-      const nudge = 'Beezi: this machine signs in with a Claude setup token, and Beezi does not know which subscription it bills — its usage is reported without a plan. Open Beezi → Connections to set the plan or link it to an existing subscription.';
+      // Points at /beezi:refresh, not at the portal: that command IS this flow — it reads the same
+      // resolution, offers the same plans and subscriptions, and writes the answer back here.
+      // Sending the user to a web page to do what the prompt they are standing at can do is one
+      // context switch for nothing.
+      const nudge = 'Beezi: this machine signs in with a Claude setup token, and Beezi does not know which subscription it bills — its usage is reported without a plan. Run /beezi:refresh to set the plan or link this key to an existing subscription.';
       message = message ? `${message}
 ${nudge}` : nudge;
+    } else if (keyStatus != null && keyStatus.known && keyStatus.subscriptionPlan != null) {
+      // The portal already knows what this key bills. Adopt it into billing.json so the reports
+      // carry it from this session on, instead of waiting for the user to run /beezi:refresh — and
+      // instead of shipping whatever plan a previous interactive login left behind. Best-effort and
+      // silent by contract: nothing changed for the user to read about.
+      try { recordKeyPlan(keyStatus.subscriptionPlan); } catch { /* best-effort */ }
     }
 
     // The status-line wrapper is the only source of LIVE plan-usage readings, and it is a
@@ -282,6 +329,9 @@ ${nudge}` : nudge;
     policy = 'Beezi: run /beezi:login once to include your past sessions.';
   }
   if (policy) message = message ? `${message}\n${policy}` : policy;
+
+  const consentAsk = consentPrompt();
+  if (consentAsk) message = message ? `${message}\n${consentAsk}` : consentAsk;
 
   return message;
 }

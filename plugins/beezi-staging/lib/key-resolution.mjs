@@ -2,6 +2,7 @@ import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { keyFingerprint } from './oauth-identity.mjs';
+import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // Interactive resolution of the subscription behind CLAUDE_CODE_OAUTH_TOKEN.
 //
@@ -44,7 +45,10 @@ function num(value) {
 // The fingerprint of the setup token this machine exports, or null when there is nothing to ask
 // about (no token, or one too short for a prefix+suffix pair to hide anything).
 function fingerprintFrom(deps) {
-  const env = deps.env == null ? process.env : deps.env;
+  // A token set in ~/.claude/settings.json reaches us as process.env in a normal session; when it
+  // does not, oauthTokenEnv fills that one key. An INJECTED deps.env is trusted verbatim — it
+  // describes a machine under test, and a developer's own settings file must not leak into it.
+  const env = deps.env == null ? oauthTokenEnv(process.env) : deps.env;
   return keyFingerprint(env == null ? null : env.CLAUDE_CODE_OAUTH_TOKEN);
 }
 
@@ -212,6 +216,10 @@ export async function submitKeyLink(token, target, deps = {}) {
     ok: true,
     outcome: outcome === 'linked' || outcome === 'claimed' ? outcome : null,
     targetAccountId: body == null ? null : str(body.targetAccountId),
+    // Surfaced only when the server names it. Joining a subscription does not by itself tell this
+    // side which plan that subscription is on, so this is null far more often than not — and the
+    // caller must not fall back to a guess when it is. See lib/plan-writeback.mjs.
+    subscriptionPlan: body == null ? null : str(body.subscriptionPlan),
   };
 }
 

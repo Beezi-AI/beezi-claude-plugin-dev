@@ -592,6 +592,8 @@ test('reconcile — rotating to a different setup token is an account switch', (
       selfReported: true,
       capturedAt: iso(DAY_MS),
       anchorCheckedAt: iso(DAY_MS),
+      // The rotation is only visible AFTER the spawn (no file anchor on a token machine), so the
+      // weekly heartbeat is what brings the reconcile here at all.
       accountAnchor: { value: 'sk-ant-oat01...aaaa:53', source: 'oauth_key', updatedAt: iso(DAY_MS) },
     },
     sub: { ...CLI_SUB, anchor: OAUTH_ANCHOR },
@@ -759,4 +761,214 @@ test('reconcile — buildConfig stamps detectedVia and the anchor on a CLI captu
   assert.deepEqual(cfg.accountAnchor, { value: 'b@corp.co', source: 'email', updatedAt: T0.toISOString() });
   assert.equal(cfg.plan, 'max');
   assert.equal(JSON.stringify(cfg).includes('sk-ant'), false);
+});
+
+// ─── an unresolvable plan (setup token in force) ─────────────────────────────
+//
+// `claude auth status` answered `oauth_token`: the credential paying for this machine is the setup
+// token, and everything ~/.claude.json says belongs to whichever login last touched the disk. The
+// capture must record the ABSENCE as a verdict, and that verdict has to be able to win a write —
+// otherwise a machine that once captured `team` keeps reporting it forever.
+
+const UNRESOLVED_SUB = Object.freeze({
+  accountUuid: 'acc-uuid-1',
+  email: 'previous@corp.co',
+  subscriptionType: null,
+  rateLimitTier: null,
+  expiresAt: null,
+  billingType: null,
+  seatTier: null,
+  organizationType: null,
+  planSource: 'unresolved',
+  detectedVia: 'oauth_token',
+  anchor: { value: 'sk-ant-oat01...yyyy:53', source: 'oauth_key' },
+});
+
+test('buildConfig — an unresolved subscription writes NO plan, not a guessed one', () => {
+  const cfg = buildConfig(
+    { subscriptionType: null, rateLimitTier: null, expiresAt: null, via: 'session-start' },
+    {},
+    new Date('2026-07-07T00:00:00.000Z'),
+    UNRESOLVED_SUB,
+    UNRESOLVED_SUB.anchor,
+  );
+  assert.equal(cfg.source, 'subscription', 'a token still bills a subscription — just not a known plan');
+  assert.equal(cfg.subscriptionType, null);
+  assert.equal(cfg.rateLimitTier, null);
+  // normalizePlan(null, null) is 'unknown', which would read as "captured, could not classify".
+  assert.equal(cfg.plan, null, "null says we did not capture, 'unknown' would say we failed to classify");
+  assert.equal(cfg.planSource, 'unresolved');
+  assert.equal(cfg.detectedVia, 'oauth_token');
+});
+
+test('buildConfig — an ordinary CLI capture stamps planSource claude_login', () => {
+  const cfg = buildConfig(
+    { subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x', via: 'login' },
+    {},
+    new Date('2026-07-07T00:00:00.000Z'),
+    { subscriptionType: 'max', detectedVia: 'merged' },
+  );
+  assert.equal(cfg.plan, 'max_20x');
+  assert.equal(cfg.planSource, 'claude_login');
+});
+
+test('reconcile — an unresolved verdict OVERWRITES a stored plan (learnedPlan must not block it)', () => {
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'team',
+      subscriptionType: 'team',
+      planSource: 'claude_login',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS), // heartbeat trigger, automatic mode (no force)
+      accountAnchor: { value: 'sk-ant-oat01...yyyy:53', source: 'oauth_key', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: UNRESOLVED_SUB,
+  });
+  const { config, outcome } = reconcileBillingConfig({ ...h.deps, resolveSource: () => 'subscription' });
+  assert.equal(outcome, 'cleared');
+  assert.equal(config.plan, null, "the stored 'team' named a different account");
+  assert.equal(config.subscriptionType, null);
+  assert.equal(config.planSource, 'unresolved');
+});
+
+test('reconcile — rotating the setup token does NOT re-stamp the stale plan', () => {
+  // The path that made this worse than a no-op: anchorChanged on an oauth_key anchor fires
+  // 'switched', which re-derives a fresh capture — previously from the very same stale profile.
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'team',
+      subscriptionType: 'team',
+      planSource: 'claude_login',
+      capturedAt: iso(DAY_MS),
+      // A token machine writes no file anchor, so the rotation is only visible AFTER the spawn —
+      // the weekly heartbeat is what brings the reconcile here at all.
+      anchorCheckedAt: iso(8 * DAY_MS),
+      accountAnchor: { value: 'sk-ant-oat01...aaaa:53', source: 'oauth_key', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: UNRESOLVED_SUB,
+  });
+  const { config, outcome } = reconcileBillingConfig({ ...h.deps, resolveSource: () => 'subscription' });
+  assert.equal(outcome, 'switched');
+  assert.equal(config.accountAnchor.value, 'sk-ant-oat01...yyyy:53');
+  assert.equal(config.plan, null, 'a rotation must not re-stamp a plan read off the old login');
+  assert.equal(config.planSource, 'unresolved');
+});
+
+test('reconcile — an unresolved verdict does NOT wipe a self-reported plan', () => {
+  // The verdict says the on-disk PROFILE is not evidence for this credential. It says nothing
+  // about the user's own testimony, which no automatic capture can ever reconstruct.
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'max_20x',
+      subscriptionType: 'max',
+      selfReported: true,
+      planSource: 'self_reported',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS),
+      accountAnchor: { value: 'sk-ant-oat01...yyyy:53', source: 'oauth_key', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: UNRESOLVED_SUB,
+  });
+  const { config, outcome } = reconcileBillingConfig({ ...h.deps, resolveSource: () => 'subscription' });
+  assert.equal(outcome, 'kept');
+  assert.equal(config.plan, 'max_20x');
+  assert.equal(config.planSource, 'self_reported');
+});
+
+test('reconcile — an unresolved verdict does NOT wipe a server-resolved key plan', () => {
+  // planSource 'key_resolution' is written by plan-writeback.mjs from the Beezi portal's answer
+  // for this key's fingerprint. It is the ONLY thing that can price a setup-token machine, and
+  // every weekly heartbeat re-runs a capture that will keep saying 'unresolved'.
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'max_20x',
+      planSource: 'key_resolution',
+      planResolvedAt: iso(DAY_MS),
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS),
+      accountAnchor: { value: 'sk-ant-oat01...yyyy:53', source: 'oauth_key', updatedAt: iso(8 * DAY_MS) },
+    },
+    sub: UNRESOLVED_SUB,
+  });
+  const { config, outcome } = reconcileBillingConfig({ ...h.deps, resolveSource: () => 'subscription' });
+  assert.equal(outcome, 'kept');
+  assert.equal(config.plan, 'max_20x');
+  assert.equal(config.planSource, 'key_resolution');
+});
+
+test('reconcile — the setup token itself never reaches anything written to disk', () => {
+  const token = `sk-ant-oat01-${'y'.repeat(40)}`;
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'team',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(8 * DAY_MS),
+    },
+    sub: UNRESOLVED_SUB,
+    env: { CLAUDE_CODE_OAUTH_TOKEN: token },
+  });
+  reconcileBillingConfig({ ...h.deps, resolveSource: () => 'subscription' });
+  assert.ok(h.writes.length > 0);
+  const written = JSON.stringify(h.writes);
+  assert.equal(written.includes(token), false, 'only the fingerprint may ever be persisted');
+  assert.equal(written.includes('y'.repeat(20)), false, 'not even the middle of it');
+});
+
+// ─── key rotation is visible to the cheap precheck ───────────────────────────
+//
+// A setup token's anchor lives in the ENVIRONMENT, never in ~/.claude.json, so the file anchor
+// does not move when the key rotates. Before the token anchor joined the precheck, a token machine
+// compared two things that never differ: nothing triggered, and a plan the server had resolved for
+// the PREVIOUS fingerprint kept shipping under the new one.
+const OLD_TOKEN = `sk-ant-oat01-${'A'.repeat(91)}WXYZ`;
+const NEW_TOKEN = `sk-ant-oat01-${'B'.repeat(91)}UQAA`;
+const anchorOf = (token) => ({
+  value: `sk-ant-oat01...${token.slice(-4)}:${token.length}`,
+  source: 'oauth_key',
+  updatedAt: iso(DAY_MS),
+});
+
+test('reconcile — a rotated setup token triggers a re-check even when everything else looks fresh', () => {
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'pro',
+      planSource: 'key_resolution',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: anchorOf(OLD_TOKEN),
+    },
+    env: { CLAUDE_CODE_OAUTH_TOKEN: NEW_TOKEN },
+  });
+  reconcileBillingConfig(h.deps);
+  assert.equal(h.subCalls.count, 1, 'the rotation must trigger the re-check');
+});
+
+test('reconcile — the SAME setup token is steady state: no spawn, no write', () => {
+  const h = harness({
+    existing: {
+      version: 3,
+      source: 'subscription',
+      plan: 'pro',
+      planSource: 'key_resolution',
+      capturedAt: iso(DAY_MS),
+      anchorCheckedAt: iso(DAY_MS),
+      accountAnchor: anchorOf(OLD_TOKEN),
+    },
+    env: { CLAUDE_CODE_OAUTH_TOKEN: OLD_TOKEN },
+  });
+  reconcileBillingConfig(h.deps);
+  assert.equal(h.subCalls.count, 0, 'an unchanged token must not spawn the CLI');
+  assert.equal(h.writes.length, 0);
 });

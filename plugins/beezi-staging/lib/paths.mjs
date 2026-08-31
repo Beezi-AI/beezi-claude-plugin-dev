@@ -99,6 +99,18 @@ export function statuslineUsageFile() {
   return path.join(beeziHome(), 'statusline-usage.json');
 }
 
+// Pending diagnostic events awaiting the next drain. Under beeziHome() so a variant never
+// mixes its telemetry with another's, and so pruneStale's window applies.
+export function telemetryDir() {
+  return path.join(beeziHome(), 'telemetry');
+}
+
+// Per-machine consent record. Root-level, like the tracking cache: an expiring consent
+// record would silently re-ask (or worse, re-enable) after 14 days.
+export function telemetryConsentFile() {
+  return path.join(beeziHome(), 'telemetry.json');
+}
+
 // Claude Code's config root — `~/.claude`, relocatable via CLAUDE_CONFIG_DIR. Single source
 // for the dirs the plugin reads out of Claude Code (transcripts, live session store).
 export function claudeHome() {

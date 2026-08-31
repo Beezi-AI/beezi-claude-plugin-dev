@@ -3,7 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runCheckpoint, flushQueue } from '../lib/checkpoint.mjs';
+import { runCheckpoint as _runCheckpoint, flushQueue } from '../lib/checkpoint.mjs';
+
+// runCheckpoint resolves its env through oauthTokenEnvWithOsProbe, whose last tier reads the OS
+// persistent environment and SPAWNS to do it. A test that fell through to the real probe would
+// read the developer's registry — this box has a real 108-character token in HKCU\Environment —
+// and would then behave differently here than on a token-less machine or in CI.
+//
+// So the default for this suite is a machine with no setup token anywhere. A test that wants the
+// probe says so by injecting `osEnvOauthToken` (or its own `env`), and is then left alone.
+function runCheckpoint(input, deps = {}, ...rest) {
+  const declared = Object.prototype.hasOwnProperty.call(deps, 'env')
+    || Object.prototype.hasOwnProperty.call(deps, 'osEnvOauthToken');
+  return _runCheckpoint(input, declared ? deps : { env: {}, ...deps }, ...rest);
+}
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -2202,4 +2215,113 @@ test('claude_md_lines — reported from the segment repo root, omitted when the 
   const bareItems = readQueue(bare);
   assert.equal(bareItems.length, 1, 'exactly one queue file');
   assert.equal('claude_md_lines' in bareItems[0].payload, false);
+});
+
+// ─── end to end: an OS-environment token reaches the payload ─────────────────
+// The unit tests in claude-settings-env.test.mjs prove the resolver; this proves the WIRING —
+// runCheckpoint really does use the probing variant, and its answer really does land in the
+// identity stamp. The probe is injected, so nothing spawns and nothing reads this machine.
+
+test('OS-env probe — a recovered setup token stamps the fingerprint and suppresses uuid/email', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  // Hermetic first two tiers: no exported token, and CLAUDE_CONFIG_DIR points at an empty temp
+  // dir so the developer's own ~/.claude/settings.json cannot answer before the probe does.
+  const cfgDir = makeTmpDir(t);
+  const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+  const prevToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.env.CLAUDE_CONFIG_DIR = cfgDir;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const { resetSettingsEnvCache } = await import('../lib/claude-settings-env.mjs');
+  resetSettingsEnvCache();
+  t.after(() => {
+    if (prevCfg == null) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+    if (prevToken != null) process.env.CLAUDE_CODE_OAUTH_TOKEN = prevToken;
+    resetSettingsEnvCache();
+  });
+
+  const OS_TOKEN = `sk-ant-oat01-${'d'.repeat(60)}`;
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-osenv', transcript_path: transcript, cwd: dir },
+    usageDeps({
+      // No `env`: injecting the probe is what tells the suite-wide guard to stand down, so the
+      // resolution under test is the real one runCheckpoint performs.
+      osEnvOauthToken: () => OS_TOKEN,
+    }),
+  );
+
+  const p = readQueue(dir)[0].payload;
+  assert.equal(p.oauth_key_last4, OS_TOKEN.slice(-4));
+  assert.equal(p.oauth_key_length, OS_TOKEN.length);
+  assert.equal(typeof p.oauth_key_prefix, 'string');
+  // The fingerprint REPLACES the disk identity — a stale uuid would otherwise win server-side.
+  assert.equal('account_uuid' in p, false);
+  assert.equal('account_email' in p, false);
+  // The value itself never reaches the wire.
+  assert.equal(JSON.stringify(p).includes(OS_TOKEN), false);
+  // Billing read the SAME env: a setup token is positive subscription evidence.
+  assert.equal(p.billing_source, 'subscription');
+});
+
+// ─── corrupt queue files: salvage what is readable, quarantine what is not ───────────────
+
+// The exact wreckage two concurrent pre-atomic writers left behind: a whole payload followed by
+// the tail of a longer previous one. These used to be re-read and skipped on every flush forever.
+test('flushQueue salvages a payload buried under trailing wreckage and posts it', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  const p = path.join(qdir, 'seg-salvage.json');
+  const good = JSON.stringify({ segmentId: 'sess-salvage:1-1', sessionId: 'sess-salvage' });
+  fs.writeFileSync(p, good + '65070,"context_final_model":"claude-opus-5"}', 'utf-8');
+
+  const posted = [];
+  const fetchImpl = async (_url, opts) => { posted.push(JSON.parse(opts.body)); return { status: 200 }; };
+  const result = await flushQueue('tok', { fetchImpl });
+
+  assert.equal(posted.length, 1, 'the recovered payload was posted');
+  assert.equal(posted[0].segmentId, 'sess-salvage:1-1');
+  assert.equal(result.salvaged, 1);
+  assert.equal(result.flushed, 1);
+  assert.equal(fs.existsSync(p), false, 'file removed once accepted');
+});
+
+test('flushQueue quarantines an unreadable file instead of retrying it forever', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  const p = path.join(qdir, 'seg-garbage.json');
+  fs.writeFileSync(p, 'not json at all', 'utf-8');
+
+  let calls = 0;
+  const result = await flushQueue('tok', { fetchImpl: async () => { calls += 1; return { status: 200 }; } });
+
+  assert.equal(calls, 0, 'nothing postable, so nothing posted');
+  assert.equal(result.quarantined, 1);
+  assert.equal(fs.existsSync(p), false);
+  assert.equal(fs.existsSync(p + '.corrupt'), true, 'set aside, and pruneStale expires it');
+});
+
+test('flushQueue ignores stray .tmp and .corrupt entries', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
+
+  fs.writeFileSync(path.join(qdir, 'seg.json.1234.abcd.tmp'), '{"segmentId":"x:1-1"}', 'utf-8');
+  fs.writeFileSync(path.join(qdir, 'seg-old.json.corrupt'), 'garbage', 'utf-8');
+
+  let calls = 0;
+  const result = await flushQueue('tok', { fetchImpl: async () => { calls += 1; return { status: 200 }; } });
+
+  assert.equal(calls, 0, 'a half-written temp is never posted');
+  assert.equal(result.quarantined, 0, 'and an already-quarantined file is not re-quarantined');
 });
