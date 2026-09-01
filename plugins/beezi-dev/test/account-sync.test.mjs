@@ -516,3 +516,60 @@ test('sync — an unwritable marker still reports the successful POST', async ()
     assert.equal(res.synced, true);
   });
 });
+
+// ─── the shared suppression predicate ────────────────────────────────────────
+
+// The check-in and the identity stamp must withhold the uuid and the email on the SAME answer.
+// A machine whose check-in still carried an identity while its session reports carried only a
+// fingerprint would hand the server something to resolve, and a credential's account binding is
+// filled once and never moved — so the divergence is irreversible, not merely wrong.
+const STORED_FINGERPRINT = { prefix: 'sk-ant-oat01', last4: 'yyyy', length: 53 };
+
+// billing.json answers for the uuid, the email and the plan — never for which key is in force. Its
+// stored fingerprint is stamped from the same probed env this payload resolves, so it names no
+// token the env cannot see, and a disagreement is a stale record with no way out:
+// shouldKeepExisting's key guard blocks the rewrite on the forced path too, and authModeReverted
+// excuses selfReported records from the one escape. See oauth-identity.mjs.
+test('payload — a stored fingerprint alone suppresses nothing', () => {
+  const p = buildAccountSyncPayload({
+    config: config({ accountUuid: 'acc-uuid-1', keyFingerprint: STORED_FINGERPRINT }),
+    env: {},
+  });
+  assert.equal(p.accountUuid, 'acc-uuid-1');
+  assert.equal(p.email, 'dev@example.com');
+  assert.equal('keys' in p, false, 'a record is not a credential in force');
+});
+
+// The env is where the key in force is read, and the fingerprint it produces is what travels.
+test('payload — the live token is what suppresses and what travels', () => {
+  const p = buildAccountSyncPayload({
+    config: config({ accountUuid: 'acc-uuid-1', keyFingerprint: STORED_FINGERPRINT }),
+    env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN },
+  });
+  assert.equal('accountUuid' in p, false);
+  assert.equal('email' in p, false);
+  assert.equal(p.keys.length, 1);
+  assert.deepEqual(p.keys[0], { kind: CredentialKind.CLAUDE_OAUTH_TOKEN, ...keyFingerprint(OAUTH_TOKEN) });
+});
+
+// The divergence this predicate exists to make unrepresentable, pinned across both modules.
+test('the check-in and the identity stamp suppress on the same answer', async () => {
+  const { buildIdentityStamp } = await import('../lib/identity-stamp.mjs');
+  const cases = [
+    { config: config({ accountUuid: 'acc-uuid-1' }), env: {} },
+    { config: config({ accountUuid: 'acc-uuid-1' }), env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN } },
+    { config: config({ accountUuid: 'acc-uuid-1', keyFingerprint: STORED_FINGERPRINT }), env: {} },
+    { config: null, env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN } },
+    { config: null, env: {} },
+  ];
+  for (const c of cases) {
+    const payload = buildAccountSyncPayload(c);
+    const stamp = buildIdentityStamp(null, c.config, c.env);
+    assert.equal(
+      'accountUuid' in payload,
+      'account_uuid' in stamp,
+      `uuid suppression disagrees for ${JSON.stringify(c.env)}`,
+    );
+    assert.equal('email' in payload, 'account_email' in stamp);
+  }
+});

@@ -10,7 +10,13 @@ import { oauthTokenEnv } from './claude-settings-env.mjs';
 // v2 caches the rest of the portal's answer (subscription type, tier, account email, whether the
 // bound account has an identity of its own) so the session-start adoption can fill a whole record
 // from one probe. A v1 file fails the gate in readOauthKeyStatus and is simply re-probed once.
-const STATE_VERSION = 2;
+//
+// v3 adds planSource. The portal has always sent it and this module has always dropped it, which
+// made session-start's anchored-key notice — gated on `planSource === 'reported'` — unable to fire
+// at all: the property was undefined on every answer, live and cached. The version bump is what
+// makes the fix take effect today rather than whenever each machine's six-hour cache lapses; a v2
+// file fails the gate and is re-probed once, exactly as v1 was.
+const STATE_VERSION = 3;
 
 // How long an answer is trusted. Long enough that the steady state is one file read, short enough
 // that a user who fixes their plan in the portal stops being nagged the same working day.
@@ -100,6 +106,7 @@ export async function fetchOauthKeyStatus(token, deps = {}) {
       accountEmail: cached.accountEmail == null ? null : cached.accountEmail,
       accountLinked: cached.accountLinked === true,
       accountAnchored: cached.accountAnchored === true,
+      planSource: cached.planSource == null ? null : cached.planSource,
       fingerprint,
     };
   }
@@ -129,6 +136,11 @@ export async function fetchOauthKeyStatus(token, deps = {}) {
       // The bound account carries an identity of its own, so this key inherited a subscription some
       // interactive sign-in established rather than standing on its own.
       accountAnchored: body.accountAnchored === true,
+      // WHERE the plan came from: 'reported' when a machine asserted it, 'manual' when a person
+      // declared it in the portal. session-start pairs it with accountAnchored to decide whether
+      // this key is riding a subscription nobody confirmed for it. Guarded like every sibling —
+      // an older API that omits it yields null, never undefined leaking into a comparison.
+      planSource: typeof body.planSource === 'string' ? body.planSource : null,
     };
     writeOauthKeyStatus(
       { fingerprint, checkedAt: now.toISOString(), ...status },

@@ -6,7 +6,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { accountSyncStateFile } from './paths.mjs';
 import { hasCustomGateway } from './billing.mjs';
 import { readBillingConfig as _readBillingConfig } from './billing-config.mjs';
-import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { keyFingerprint, hasKeyIdentity } from './oauth-identity.mjs';
 import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // Re-exported from its leaf home so existing importers keep working; the definition moved so the
@@ -114,7 +114,13 @@ export function buildAccountSyncPayload({ config = null, env = process.env } = {
   const anchorSource = anchor == null ? null : anchor.source;
   const anchorValue = anchor == null ? null : label(anchor.value);
   const payload = {};
-  if (!hasOauthTokenIdentity(env)) {
+  // The SHARED predicate, not keyFingerprint(env) inline. The identity stamp suppresses on
+  // resolveKeyFingerprint, and this payload must suppress on exactly the same answer: a machine
+  // whose check-in still carried a uuid while its session reports carried only a fingerprint would
+  // hand the server an identity to resolve, and the credential's account binding — filled once,
+  // never moved — would be filled with it. `config` is passed for that shared shape alone; the
+  // predicate deliberately does not read it (see resolveKeyFingerprint).
+  if (!hasKeyIdentity(config, env)) {
     const storedUuid = config == null ? null : label(config.accountUuid);
     const accountUuid = storedUuid != null
       ? storedUuid

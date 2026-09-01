@@ -552,8 +552,16 @@ test('14b. billing source changed since last session — billing.json is realign
   assert.equal(writes[0].plan, 'max_5x', 'the dormant plan must survive the switch');
   assert.equal(writes[0].selfReported, true);
   assert.equal(writes[0].capturedAt, stored.capturedAt, 'capturedAt belongs to the plan capture');
-  // Silent: the switch itself is not something the user has to act on.
-  assert.equal(/billing/i.test(result ?? ''), false);
+  // REVERSED, deliberately. This used to assert silence, on the reasoning that a source switch is
+  // not something the user has to ACT on — which is still true, and is why the line names no
+  // command. But "nothing to do" is not "nothing to know": the machine just changed what every
+  // subsequent report is priced against, without asking, and the user is entitled to see that.
+  // The line is a statement of fact; the nudges elsewhere own the calls to action.
+  assert.match(result ?? '', /billing change detected/);
+  assert.match(result ?? '', /billing source subscription → anthropic_api_key/);
+  // Still no instruction attached — this switch is observed, not inferred, so there is nothing to
+  // second-guess. Only the setup-token → login migration carries a correction hint.
+  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
 });
 
 test('14c. billing source unchanged — billing.json is left alone', async (t) => {

@@ -94,3 +94,38 @@ export function sameKeyFingerprint(a, b) {
   if (a == null || b == null) return false;
   return a.prefix === b.prefix && a.last4 === b.last4 && a.length === b.length;
 }
+
+// THE ONE SUPPRESSION PREDICATE. Which setup token is in force, from the LIVE env.
+//
+// EVERY suppression site must call this rather than keyFingerprint(env) directly. The check-in
+// (account-sync.mjs) and the identity stamp (identity-stamp.mjs) both withhold the uuid and the
+// email on its answer, and a machine whose two payloads disagree is the irreversible failure: the
+// server fills a credential's account binding from whichever payload still carries an identity, and
+// bindings are filled but never moved. One function makes that divergence unrepresentable.
+//
+// `billingConfig` is accepted and DELIBERATELY NOT CONSULTED. The parameter is here so the sites
+// cannot drift back into reading it, because doing so is a trap that looks like an improvement:
+//
+//   - It buys nothing. billing.json's keyFingerprint is stamped by the reconcile from
+//     oauthTokenEnvWithOsProbe, and every suppression site resolves its env the same way
+//     (checkpoint.mjs, session-start.mjs). The stored value therefore names no token the env cannot
+//     see; it can only DISAGREE with the env, and every such disagreement is a stale record.
+//   - The stale case has no way out. billing-capture.mjs's `kept` branch never clears the
+//     fingerprint, shouldKeepExisting's key guard blocks the overwrite "on the forced path too"
+//     (/beezi:refresh included), and authModeReverted excuses selfReported records from the one
+//     escape. So a self-reported key-scoped machine that moved back to an interactive login would
+//     suppress its real identity forever and be minted an anonymous account row for a key it no
+//     longer uses.
+//
+// billing.json IS the source of truth for the uuid, the email and the plan — see identity-stamp.mjs.
+// The key in force is the one question it does not answer better than the env.
+export function resolveKeyFingerprint(billingConfig, env = process.env) {
+  return keyFingerprint(env == null ? null : env.CLAUDE_CODE_OAUTH_TOKEN);
+}
+
+// Does this machine identify by a setup token rather than by an account? The shared form of
+// hasOauthTokenIdentity, which stays for the callers asking it of the env alone with no billing
+// record in hand (the reconcile's own precheck, key-resolve's guard).
+export function hasKeyIdentity(billingConfig, env = process.env) {
+  return resolveKeyFingerprint(billingConfig, env) != null;
+}

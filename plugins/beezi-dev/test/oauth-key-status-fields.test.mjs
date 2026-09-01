@@ -9,7 +9,7 @@ import {
   clearOauthKeyStatus,
 } from '../lib/oauth-key-status.mjs';
 
-// The v2 cache: the whole portal answer, not just the plan, plus the two controls the session-start
+// The v3 cache: the whole portal answer, not just the plan, plus the two controls the session-start
 // flow needs — a forced re-read, and a way to throw the answer away once it is known to be stale.
 
 async function withTempHome(fn) {
@@ -52,14 +52,19 @@ test('the whole answer is returned and cached, fingerprint included', async () =
     assert.equal(status.accountEmail, 'ci@example.com');
     assert.equal(status.accountAnchored, true);
     assert.equal(status.accountLinked, true);
+    // planSource decides whether session-start warns that this key is riding a subscription an
+    // interactive sign-in established. It was dropped here for two versions, which left that
+    // notice comparing against undefined and unable to fire at all.
+    assert.equal(status.planSource, 'reported');
     // The fingerprint rides the return value so the caller scopes the adopted plan to the key it
     // was resolved for, instead of re-deriving it from a second env read.
     assert.deepEqual(status.fingerprint, { prefix: 'sk-ant-oat01', last4: 'yyyy', length: TOKEN.length });
 
     const cached = readOauthKeyStatus();
-    assert.equal(cached.version, 2);
+    assert.equal(cached.version, 3);
     assert.equal(cached.subscriptionType, 'max');
     assert.equal(cached.accountAnchored, true);
+    assert.equal(cached.planSource, 'reported');
   });
 });
 
@@ -76,6 +81,7 @@ test('a cache hit replays every field, not just the plan', async () => {
     assert.equal(status.subscriptionType, 'max');
     assert.equal(status.accountEmail, 'ci@example.com');
     assert.equal(status.accountAnchored, true);
+    assert.equal(status.planSource, 'reported');
     assert.deepEqual(status.fingerprint, { prefix: 'sk-ant-oat01', last4: 'yyyy', length: TOKEN.length });
   });
 });
@@ -91,6 +97,9 @@ test('an older server that sends only the plan yields nulls, never undefined', a
     assert.equal(status.rateLimitTier, null);
     assert.equal(status.accountEmail, null);
     assert.equal(status.accountAnchored, false);
+    // Null, not undefined: session-start compares this against a string literal, and undefined
+    // would make the comparison quietly unreachable rather than false.
+    assert.equal(status.planSource, null);
   });
 });
 
@@ -139,6 +148,36 @@ test('a v1 cache file is discarded rather than half-read', async () => {
   });
 });
 
+// The v2 → v3 bump exists so the planSource fix takes effect today rather than whenever each
+// machine's six-hour cache happens to lapse. A v2 file has every other field this reader wants,
+// so nothing but the version gate stops it being served — which is exactly what would leave the
+// anchored-key notice unable to fire for another six hours per machine.
+test('a v2 cache file is discarded too, so the planSource fix lands at once', async () => {
+  await withTempHome(async (dir) => {
+    fs.writeFileSync(
+      path.join(dir, 'oauth-key-status.json'),
+      JSON.stringify({
+        version: 2,
+        fingerprint: { prefix: 'sk-ant-oat01', last4: 'yyyy', length: TOKEN.length },
+        checkedAt: new Date().toISOString(),
+        known: true,
+        needsAttention: false,
+        subscriptionPlan: 'max_20x',
+        accountAnchored: true,
+        // No planSource — that is the whole reason a v2 file cannot be trusted.
+      }),
+    );
+
+    let calls = 0;
+    const status = await fetchOauthKeyStatus('tok', {
+      env: envWithToken,
+      fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
+    });
+    assert.equal(calls, 1, 'the version gate rejects it, so the portal is asked again');
+    assert.equal(status.planSource, 'reported');
+  });
+});
+
 test('clearOauthKeyStatus drops the answer so the next call asks again', async () => {
   await withTempHome(async () => {
     await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl: respond(FULL) });
@@ -159,5 +198,37 @@ test('clearOauthKeyStatus drops the answer so the next call asks again', async (
 test('clearing an absent cache is not an error — it is a cache', async () => {
   await withTempHome(async () => {
     assert.equal(clearOauthKeyStatus(), false);
+  });
+});
+
+// Contract guard between this module and its one consumer.
+//
+// session-start.mjs reads keyStatus.planSource and compares it against a string literal. This
+// module dropped that field for two versions, so the comparison was always undefined === 'reported'
+// — false, silently, forever — and the notice it gates could not fire. The suite stayed green the
+// whole time because session-start's own tests stub fetchOauthKeyStatus with a hand-written object
+// that DID carry planSource, i.e. they asserted against a shape this function never produced.
+//
+// So: assert the real return value carries every field the consumer reads. A stub can lie about
+// the shape; this cannot.
+test('the returned answer carries every field session-start reads', async () => {
+  await withTempHome(async () => {
+    const live = await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl: respond(FULL) });
+    // Read straight out of lib/session-start.mjs's key block.
+    const consumed = [
+      'known', 'needsAttention', 'subscriptionPlan', 'subscriptionType', 'rateLimitTier',
+      'accountEmail', 'accountAnchored', 'planSource', 'fingerprint',
+    ];
+    const missing = consumed.filter((k) => !(k in live));
+    assert.deepEqual(missing, [], `fields the consumer reads but this module never sends: ${missing}`);
+
+    // And again off the cache, which is a separately hand-written object literal — the exact
+    // shape of duplication that let the two drift apart in the first place.
+    const cachedAnswer = await fetchOauthKeyStatus('tok', {
+      env: envWithToken,
+      fetchImpl: () => { throw new Error('must be served from cache'); },
+    });
+    const missingCached = consumed.filter((k) => !(k in cachedAnswer));
+    assert.deepEqual(missingCached, [], `fields missing from the CACHED answer: ${missingCached}`);
   });
 });

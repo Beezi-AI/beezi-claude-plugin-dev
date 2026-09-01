@@ -256,16 +256,24 @@ export async function runSessionStart(input, deps = {}) {
       env: oauthEnv,
       resolveClaudeSubscription: deps.resolveClaudeSubscription,
       readClaudeAccountAnchor: deps.readClaudeAccountAnchor,
+      // The account fields behind the anchor. Forwarded for the same reason the anchor is: the
+      // reconcile compares them against billing.json to catch a switch to another Claude account,
+      // and a test that cannot inject them would read the developer's own ~/.claude.json.
+      readClaudeAccount: deps.readClaudeAccount,
     }))
     : deps.reconcileBilling;
   let billingConfig = null;
   let billingSource = BillingSource.UNKNOWN;
   let billingOutcome = 'none';
+  // What moved in billing.json, as a human-readable list. Empty on a no-op reconcile, on a first
+  // capture, and on an injected reconcile seam that predates the field.
+  let billingChanges = [];
   try {
     const reconciled = reconcileBilling();
     billingConfig = reconciled.config;
     billingSource = reconciled.source;
     billingOutcome = reconciled.outcome == null ? 'none' : reconciled.outcome;
+    billingChanges = Array.isArray(reconciled.changes) ? reconciled.changes : [];
   } catch { /* best-effort */ }
 
   // Tell the portal which Claude account and credentials this machine is on. Fire-and-forget: the
@@ -284,7 +292,12 @@ export async function runSessionStart(input, deps = {}) {
   // key with the portal, so asking again before it lands would just re-read "unknown".
   let syncPromise = null;
   try {
-    const forced = billingOutcome === 'switched' || billingOutcome === 'captured';
+    // 'migrated' belongs here for the same reason 'switched' does: the machine just moved off a
+    // setup token onto an interactive login, so the portal is holding the wrong account and the
+    // wrong plan for it until this check-in lands.
+    const forced = billingOutcome === 'switched'
+      || billingOutcome === 'captured'
+      || billingOutcome === 'migrated';
     syncPromise = Promise.resolve(
       syncAccount(token, { force: forced, via: 'session-start' }, syncDeps),
     ).catch(() => null);
@@ -293,6 +306,28 @@ export async function runSessionStart(input, deps = {}) {
   let message = systemMessage;
   // Billing nudges are noise for a workspace that reports nothing live.
   if (liveAllowed) {
+    // Every automatic rewrite of the billing record is announced, because every one of them
+    // changes what subsequent reports are priced against and none of them asked the user first.
+    //
+    // Driven by the reconcile's DIFF, not by its outcome: a write is not a change. The weekly
+    // heartbeat re-captures the same tuple and reports 'captured' each time, and a line that fires
+    // on that would be noise the user learns to skip — which would cost them the one time it
+    // matters. An empty diff, and a first capture on a machine that had no record, say nothing.
+    //
+    // A STATEMENT, not a nudge, and it names no command. The nudges below already own "what you
+    // must do": pointing at /beezi:refresh here would fire alongside the unknown-source nudge that
+    // deliberately routes to /beezi:login, and hand the user two different instructions for one
+    // situation. The single exception is the setup-token → login migration, which the machine
+    // infers from evidence that cannot fully distinguish it from a token it merely cannot see —
+    // there, and only there, the user is told how to correct a wrong guess.
+    if (billingChanges.length > 0) {
+      const inferred = billingChanges.indexOf('setup token → Claude login') !== -1;
+      const tail = inferred
+        ? ' Run /beezi:refresh if this machine still uses a setup token.'
+        : '';
+      const notice = `Beezi: billing change detected — ${billingChanges.join('; ')}. Data updated.${tail}`;
+      message = message ? `${message}\n${notice}` : notice;
+    }
     if (billingSource === BillingSource.SUBSCRIPTION && isStale(billingConfig)) {
       const nudge = 'Beezi: subscription plan info is missing or stale — run /beezi:refresh to update it.';
       message = message ? `${message}\n${nudge}` : nudge;
