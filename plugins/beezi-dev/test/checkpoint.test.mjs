@@ -2325,3 +2325,54 @@ test('flushQueue ignores stray .tmp and .corrupt entries', async (t) => {
   assert.equal(calls, 0, 'a half-written temp is never posted');
   assert.equal(result.quarantined, 0, 'and an already-quarantined file is not re-quarantined');
 });
+
+// ─── advisor legs inside a SUBAGENT transcript ──────────────────────────────
+//
+// Subagent files get their own computeDelta window (a separate call site from the main
+// transcript), so the advisor handling has to be proven there too — a subagent that consults
+// the advisor bills on the parent's account exactly like the main thread does.
+
+test('advisor legs inside a subagent transcript reach the subagent segment', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', {
+      input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    }, '2024-01-01T10:00:00.000Z'),
+  ]);
+  writeSubagentTranscript(dir, 'sess-adv-sub', 'agent-deadbeef', [
+    assistantLine('main', 'model-a', {
+      input_tokens: 2, output_tokens: 20, cache_read_input_tokens: 500, cache_creation_input_tokens: 40,
+      iterations: [
+        { type: 'message', input_tokens: 2, output_tokens: 20, cache_read_input_tokens: 500, cache_creation_input_tokens: 40 },
+        { type: 'advisor_message', model: 'advisor-b', input_tokens: 30000, output_tokens: 1500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      ],
+    }, '2024-01-01T10:00:30.000Z', undefined, 'xhigh'),
+  ]);
+  fs.writeFileSync(
+    path.join(dir, 'sess-adv-sub', 'subagents', 'agent-deadbeef.meta.json'),
+    JSON.stringify({ agentType: 'Explore', spawnDepth: 1, toolUseId: 'toolu_y' }),
+    'utf-8',
+  );
+
+  await runCheckpoint(
+    { session_id: 'sess-adv-sub', transcript_path: transcript, cwd: dir },
+    {
+      getAccessToken: async () => 'tok',
+      gitImpl: fakeGitRepo('main', 'https://host/org/repo.git'),
+      fetchImpl: fakeFetch(503), // 503 keeps the queue files on disk for inspection
+    },
+  );
+
+  const agent = readQueue(dir).find(i => i.payload.segmentId === 'sess-adv-sub:agent-deadbeef:1-1');
+  assert.ok(agent, 'subagent segment exists');
+  const models = agent.payload.models;
+
+  assert.ok(models['advisor-b'], 'the advisor leg is billed from inside the subagent segment');
+  assert.equal(models['advisor-b'].token_input, 30000);
+  assert.equal(models['advisor-b'].token_output, 1500);
+  assert.equal(models['advisor-b'].by_effort.xhigh.token_input, 30000, 'bucketed under the subagent line effort');
+  assert.equal(models['model-a'].token_input, 2, 'the subagent parent tally is untouched');
+  assert.equal(agent.payload.token_total, 2 + 20 + 500 + 40 + 30000 + 1500, 'advisor tokens are inside the segment total');
+});
