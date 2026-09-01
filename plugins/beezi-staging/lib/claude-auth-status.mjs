@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process';
 import { readClaudeAccount as _readClaudeAccount, readClaudeAccountAnchor as _readClaudeAccountAnchor } from './claude-account.mjs';
-import { oauthTokenAnchor as _oauthTokenAnchor } from './oauth-identity.mjs';
+import { oauthTokenAnchor as _oauthTokenAnchor, hasOauthTokenIdentity } from './oauth-identity.mjs';
 import { oauthTokenEnv } from './claude-settings-env.mjs';
 
 // Subscription info via Claude Code's OWN CLI (`claude auth status --json`), never its credential
@@ -154,10 +154,33 @@ export function resolveClaudeSubscription(deps = {}) {
   // Only `oauth_token` clears. `authMethod` is an open vocabulary (third_party, claude.ai,
   // api_key_helper, oauth_token, api_key, none — and whatever ships next), and an answer we cannot
   // interpret is not evidence of anything: it must leave the pre-existing behavior alone.
-  if (status != null && status.authMethod === 'oauth_token') {
+  //
+  // SECOND ROUTE IN, and it does not consult the CLI at all: a fingerprintable token in the
+  // resolved env. `env` here has already been through every tier — process.env, Claude Code's
+  // settings file, and the OS environment (Windows registry, macOS launchctl) — so seeing one is a
+  // positive statement that this machine authenticates by key, made without asking anyone.
+  //
+  // It has to outrank a contradicting CLI answer, because the rest of the plugin already believes
+  // it: hasOauthTokenIdentity gates the identity stamp, so with a token visible every report
+  // already withholds the local uuid and email and sends the fingerprint instead. Trusting the CLI
+  // here while the reports trust the env produced the exact hazard this branch exists to prevent —
+  // billing.json keeping the previous login's plan, the report stamping it with the KEY's
+  // fingerprint, and the server pricing that key's account with a tier it may not have.
+  //
+  // The CLI can disagree for mundane reasons (a token it rejected, a build too old to report
+  // authMethod, a spawn that timed out), and none of them make the local profile evidence about
+  // the credential in force. Clearing is the honest answer either way: the server prices a key
+  // from its own credential row, which is the only thing that can.
+  const tokenInForce = hasOauthTokenIdentity(env);
+  if (tokenInForce || (status != null && status.authMethod === 'oauth_token')) {
     return {
-      accountUuid: account == null ? null : account.accountUuid,
-      email: account == null ? null : account.email,
+      // NOT copied from `account`. The CLI just told us the credential in force is the setup token,
+      // and under that auth mode Claude Code writes no account metadata — so ~/.claude.json's
+      // oauthAccount names whoever logged in interactively last, on a machine that may belong to
+      // someone else entirely. Returning it here is how a previous login's identity used to end up
+      // stored against a key's record and shipped in the check-in that binds it.
+      accountUuid: null,
+      email: null,
       subscriptionType: null,
       rateLimitTier: null,
       expiresAt: null,

@@ -12,7 +12,17 @@ import { runSessionStart as _runSessionStart } from '../lib/session-start.mjs';
 function runSessionStart(input, deps = {}, ...rest) {
   const declared = Object.prototype.hasOwnProperty.call(deps, 'env')
     || Object.prototype.hasOwnProperty.call(deps, 'osEnvOauthToken');
-  return _runSessionStart(input, declared ? deps : { env: {}, ...deps }, ...rest);
+  const base = declared ? deps : { env: {}, ...deps };
+  // Same reasoning as the env guard above: the update check runs on EVERY path through
+  // runSessionStart, including both early returns, and would otherwise hit GitHub from a unit
+  // test. Default it to silence; test/session-start-update.test.mjs injects its own.
+  return _runSessionStart(
+    input,
+    Object.prototype.hasOwnProperty.call(deps, 'checkForUpdate')
+      ? base
+      : { checkForUpdate: async () => null, ...base },
+    ...rest,
+  );
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -371,14 +381,30 @@ test('12c. a resolved setup token is silent, and its plan is adopted locally', a
     ...quietBilling,
     fetchImpl: fakeFetchWhoamiOkNoRepo(),
     gitImpl: () => { throw new Error('not a git repo'); },
-    fetchOauthKeyStatus: async () => ({ known: true, needsAttention: false, subscriptionPlan: 'max_20x' }),
-    recordResolvedKeyPlan: (plan) => { recorded.push(plan); return true; },
+    fetchOauthKeyStatus: async () => ({
+      known: true,
+      needsAttention: false,
+      subscriptionPlan: 'max_20x',
+      subscriptionType: 'max',
+      rateLimitTier: 'default_claude_max_20x',
+      accountEmail: 'ci@example.com',
+      accountAnchored: false,
+      fingerprint: { prefix: 'sk-ant-oat01', last4: 'UQAA', length: 108 },
+    }),
+    recordResolvedKeyData: (status) => { recorded.push(status); return true; },
   });
 
   assert.doesNotMatch(result ?? '', /setup token/);
   // The whole point of the loop being closed: the server's answer reaches billing.json without the
   // user having to run /beezi:refresh first.
-  assert.deepEqual(recorded, ['max_20x']);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].subscriptionPlan, 'max_20x');
+  // The trimmings travel too. A setup-token machine cannot read any of these locally — the type and
+  // the tier would otherwise stay whatever a previous interactive login left in billing.json.
+  assert.equal(recorded[0].subscriptionType, 'max');
+  assert.equal(recorded[0].rateLimitTier, 'default_claude_max_20x');
+  assert.equal(recorded[0].accountEmail, 'ci@example.com');
+  assert.deepEqual(recorded[0].fingerprint, { prefix: 'sk-ant-oat01', last4: 'UQAA', length: 108 });
 });
 
 // A key the server has flagged is exactly the key whose plan must NOT be adopted: needsAttention
@@ -526,8 +552,16 @@ test('14b. billing source changed since last session — billing.json is realign
   assert.equal(writes[0].plan, 'max_5x', 'the dormant plan must survive the switch');
   assert.equal(writes[0].selfReported, true);
   assert.equal(writes[0].capturedAt, stored.capturedAt, 'capturedAt belongs to the plan capture');
-  // Silent: the switch itself is not something the user has to act on.
-  assert.equal(/billing/i.test(result ?? ''), false);
+  // REVERSED, deliberately. This used to assert silence, on the reasoning that a source switch is
+  // not something the user has to ACT on — which is still true, and is why the line names no
+  // command. But "nothing to do" is not "nothing to know": the machine just changed what every
+  // subsequent report is priced against, without asking, and the user is entitled to see that.
+  // The line is a statement of fact; the nudges elsewhere own the calls to action.
+  assert.match(result ?? '', /billing change detected/);
+  assert.match(result ?? '', /billing source subscription → anthropic_api_key/);
+  // Still no instruction attached — this switch is observed, not inferred, so there is nothing to
+  // second-guess. Only the setup-token → login migration carries a correction hint.
+  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
 });
 
 test('14c. billing source unchanged — billing.json is left alone', async (t) => {

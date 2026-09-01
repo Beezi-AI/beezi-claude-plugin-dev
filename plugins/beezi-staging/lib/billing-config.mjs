@@ -14,8 +14,10 @@ import { oauthTokenEnv } from './claude-settings-env.mjs';
 // account-switch detection). v3 adds accountEmail (the vendor email stored alongside accountUuid
 // so a check-in can present both). Readers stay tolerant across all of it: readBillingConfig has
 // no version gate and the reconcile's kept path restamps the version — the same mechanism that
-// grandfathered v1 → v2.
-export const BILLING_CONFIG_VERSION = 3;
+// grandfathered v1 → v2. v4 adds keyFingerprint: WHICH setup token this record describes, so a plan
+// the server resolved for one key is never served under another, and a local capture that could not
+// see a key cannot overwrite a record that belongs to one.
+export const BILLING_CONFIG_VERSION = 4;
 
 const STALE_MS = 7 * 24 * 60 * 60 * 1000; // refresh plan info at least weekly
 

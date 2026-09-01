@@ -34,7 +34,7 @@ import { claudeMdLines } from './claude-md.mjs';
 import { isLiveTrackingAllowed, markTrackingDisabled } from './tracking.mjs';
 import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
 import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
-import { keyFingerprint, hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { buildIdentityStamp } from './identity-stamp.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
@@ -285,27 +285,16 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let claudeAccount = null;
   try { claudeAccount = readAccount(); } catch { claudeAccount = null; }
   // Identity stamp: which vendor account this machine is logged into NOW, in every shape it can
-  // prove — the uuid when oauthAccount carries one, the email otherwise (oauthAccount first, the
-  // CLI-observed anchor in billing.json as fallback), and the setup-token fingerprint for CI
-  // machines that expose nothing else. The server's ingest links the session to its account with
-  // whichever arrives; a user_id anchor is a local hash and never identifies.
+  // prove — the uuid, the email, and the setup-token fingerprint for CI machines that expose
+  // nothing else. The server's ingest links the session to its account with whichever arrives.
+  //
+  // Built by the shared builder, NOT inline, because the usage-snapshot report has to send the
+  // identical stamp: it posts to a different route that resolves an account the same way, and two
+  // builders reading the same sources in a different order would land this machine's sessions and
+  // its limits data on two different accounts. See lib/identity-stamp.mjs.
   // `env` was resolved above the billing block so both readings share one answer — see there.
-  const anchor = billingConfig != null && billingConfig.accountAnchor != null ? billingConfig.accountAnchor : null;
-  const accountEmail = claudeAccount != null && claudeAccount.email
-    ? claudeAccount.email
-    : (anchor != null && anchor.source === 'email' && anchor.value != null ? anchor.value : null);
-  // A fingerprintable setup token REPLACES the uuid/email here, exactly as it does in the account
-  // check-in: the server resolves a session's account by uuid, then email, then by oauth
-  // fingerprint, so a stale uuid alongside a live fingerprint would win the resolution outright.
-  // The fingerprint arm reaches the account the check-in bound this credential to.
-  const oauthKey = keyFingerprint(env.CLAUDE_CODE_OAUTH_TOKEN);
-  const oauthIdentity = hasOauthTokenIdentity(env);
   const usageStamp = {
-    ...(!oauthIdentity && claudeAccount != null && claudeAccount.accountUuid ? { account_uuid: claudeAccount.accountUuid } : {}),
-    ...(!oauthIdentity && accountEmail != null ? { account_email: accountEmail } : {}),
-    ...(oauthKey != null
-      ? { oauth_key_prefix: oauthKey.prefix, oauth_key_last4: oauthKey.last4, oauth_key_length: oauthKey.length }
-      : {}),
+    ...buildIdentityStamp(claudeAccount, billingConfig, env),
     ...(utilization
       ? {
           usage_five_hour_pct: utilization.fiveHourPct,
@@ -497,12 +486,16 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     // Fleet utilization snapshot — deduped by (account, fetchedAt); best-effort like the
     // timeline. StopFailure also runs with emitTimeline, so a turn that died on a rate-limit
     // error still ships its snapshot — the moment it matters most.
+    // `env` is forwarded, not left to default: both callees build the same identity stamp this
+    // checkpoint's session reports carry, and the token behind it may live in Claude Code's
+    // settings file or the OS environment, where a bare process.env cannot see it. Without this
+    // the two would report different identities from the same machine, in the same second.
     const postSnapshot = deps.maybePostUsageSnapshot == null ? _maybePostUsageSnapshot : deps.maybePostUsageSnapshot;
-    try { await postSnapshot(token, { fetchImpl }); } catch { /* best-effort */ }
+    try { await postSnapshot(token, { fetchImpl, env }); } catch { /* best-effort */ }
     // Live rate-limit rows the status line recorded between hooks — the observations no
     // hook was running to see.
     const drainSnapshots = deps.drainStatuslineSnapshots == null ? _drainStatuslineSnapshots : deps.drainStatuslineSnapshots;
-    try { await drainSnapshots(token, { fetchImpl }); } catch { /* best-effort */ }
+    try { await drainSnapshots(token, { fetchImpl, env }); } catch { /* best-effort */ }
   }
 
   // Claude Code renames a session after the first prompt. The new name normally rides on the

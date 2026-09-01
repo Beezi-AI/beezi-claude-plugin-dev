@@ -230,9 +230,23 @@ test('resolveClaudeSubscription — a CLAUDE_CODE_OAUTH_TOKEN outranks BOTH the 
     source: 'oauth_key',
   });
   assert.equal(r.anchor.value.includes(token.slice(12, -4)), false, 'the middle never leaves the process');
-  // Identity only — the plan tuple still comes from the CLI + oauthAccount merge.
-  assert.equal(r.subscriptionType, 'max');
-  assert.equal(r.rateLimitTier, 'default_claude_max_20x');
+  // REVERSED, deliberately. This used to assert "identity only — the plan tuple still comes from
+  // the CLI + oauthAccount merge", i.e. a visible token moved the anchor but left the previous
+  // login's plan in place. That split the plugin against itself: hasOauthTokenIdentity gates the
+  // identity stamp, so with a token visible every report already withheld the local uuid and email
+  // and sent the fingerprint — while billing.json still carried the login's tier. The server then
+  // resolved the KEY's account and priced it with a plan belonging to someone else.
+  //
+  // A fingerprintable token in the resolved env is now positive evidence of key auth on its own,
+  // whatever the CLI says, so the plan clears here exactly as it does on an `oauth_token` answer.
+  assert.equal(r.planSource, 'unresolved');
+  assert.equal(r.detectedVia, 'oauth_token');
+  assert.equal(r.subscriptionType, null);
+  assert.equal(r.rateLimitTier, null);
+  // And the identity is not copied off the stale profile either — under key auth it describes
+  // whoever logged in last, on a machine that may belong to someone else entirely.
+  assert.equal(r.accountUuid, null);
+  assert.equal(r.email, null);
 });
 
 test('resolveClaudeSubscription — a token too short to fingerprint yields no anchor of its own', () => {
@@ -408,4 +422,66 @@ test('resolveClaudeSubscription — an unavailable or unparseable CLI clears not
     assert.equal(r.rateLimitTier, 'default_claude_max_20x');
     assert.equal(r.planSource, undefined);
   }
+});
+
+// The env token is the second route into the clearing branch, and it consults nobody.
+//
+// `env` reaching resolveClaudeSubscription has already been through every tier — process.env,
+// Claude Code's settings file, and the OS environment (Windows registry, macOS launchctl) — so a
+// fingerprintable token in it is a positive statement that this machine authenticates by key.
+// The CLI can disagree for mundane reasons: a token it rejected, a build too old to report
+// authMethod, a spawn that timed out. None of those make ~/.claude.json evidence about the
+// credential actually in force.
+test('resolveClaudeSubscription — an env token clears the plan even when the CLI says claude.ai', () => {
+  const token = `sk-ant-oat01-${'y'.repeat(40)}`;
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }), // authMethod: claude.ai
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: { CLAUDE_CODE_OAUTH_TOKEN: token },
+  });
+  assert.equal(r.planSource, 'unresolved');
+  assert.equal(r.subscriptionType, null);
+});
+
+// Same, with no CLI answer at all. Previously this fell through to the "no CLI answer" arm and
+// returned the whole stale oauthAccount profile — the previous login's plan, on a key machine.
+test('resolveClaudeSubscription — an env token clears the plan when the CLI cannot answer', () => {
+  const token = `sk-ant-oat01-${'y'.repeat(40)}`;
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: () => null,
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: { CLAUDE_CODE_OAUTH_TOKEN: token },
+  });
+  assert.equal(r.planSource, 'unresolved');
+  assert.equal(r.subscriptionType, null);
+  assert.equal(r.email, null);
+});
+
+// Truthiness is not enough, here as everywhere: a value too short to fingerprint identifies
+// nothing, the server would drop the key entry, and clearing on it would trade a usable plan for
+// none at all.
+test('resolveClaudeSubscription — a token too short to fingerprint clears nothing', () => {
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01' },
+  });
+  assert.notEqual(r.planSource, 'unresolved');
+  assert.equal(r.subscriptionType, 'max');
+});
+
+// No token anywhere: the ordinary login path is untouched by any of this.
+test('resolveClaudeSubscription — no token leaves the login merge exactly as it was', () => {
+  const r = resolveClaudeSubscription({
+    runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+    env: {},
+  });
+  assert.notEqual(r.planSource, 'unresolved');
+  assert.equal(r.subscriptionType, 'max');
+  assert.equal(r.rateLimitTier, 'default_claude_max_20x');
 });

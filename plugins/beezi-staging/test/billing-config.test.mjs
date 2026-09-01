@@ -218,7 +218,7 @@ test('syncBillingSource — realigns back to subscription with the plan still in
 
 test('recordApiKeyEvidence — stamps a machine with no billing.json at all', () => {
   const rec = recordApiKeyEvidence(null, new Date(1_000_000_000_000));
-  assert.equal(rec.version, 3);
+  assert.equal(rec.version, 4);
   assert.equal(rec.apiKeyEvidenceAt, new Date(1_000_000_000_000).toISOString());
 });
 

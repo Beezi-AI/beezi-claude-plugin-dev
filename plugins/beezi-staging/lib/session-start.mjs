@@ -36,9 +36,20 @@ import {
 import { reconcileBillingConfig as _reconcileBillingConfig } from './billing-capture.mjs';
 import { syncAccountIfNeeded as _syncAccountIfNeeded } from './account-sync.mjs';
 import { fetchOauthKeyStatus as _fetchOauthKeyStatus } from './oauth-key-status.mjs';
-import { recordResolvedKeyPlan as _recordResolvedKeyPlan } from './plan-writeback.mjs';
+import { recordResolvedKeyData as _recordResolvedKeyData } from './plan-writeback.mjs';
+import {
+  hasKeyBeenNotified as _hasKeyBeenNotified,
+  markKeyNotified as _markKeyNotified,
+} from './key-notice.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
+import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
+
+// The composition idiom used throughout this file, extracted for the three return points.
+function append(message, line) {
+  if (!line) return message;
+  return message ? `${message}\n${line}` : line;
+}
 
 // A hook cannot prompt interactively, so the ask names the command that answers it. Stamped as
 // asked the moment it is shown, so it is shown exactly once per machine whatever the user does.
@@ -146,10 +157,30 @@ export async function runSessionStart(input, deps = {}) {
   const statuslineCaptureDetached =
     deps.statuslineCaptureDetached == null ? _statuslineCaptureDetached : deps.statuslineCaptureDetached;
 
+  // The plugin's own version check. Started BEFORE the credential store is touched (getAccessToken
+  // may spawn `security` / `secret-tool` / PowerShell) and awaited only at the return points, so its
+  // bounded fetch overlaps work that was going to happen anyway and adds no serial latency.
+  //
+  // Deliberately NOT behind the token check or the liveAllowed gate: a stale plugin is stale whether
+  // or not this machine is linked or its tenant tracks anything, and an unlinked machine is exactly
+  // the one that may be unlinked because of a bug a newer build already fixes.
+  //
+  // It is NOT handed this call's fetchImpl: that one is a Beezi-API client with a Beezi bearer, and
+  // the manifest lives on raw.githubusercontent.com. update-check resolves its own, unauthenticated.
+  //
+  // .catch() at creation, not at the await: a promise created here and awaited three branches later
+  // must never be able to surface as an unhandledRejection in between.
+  const checkUpdate = deps.checkForUpdate == null ? _checkForUpdate : deps.checkForUpdate;
+  const updatePromise = Promise.resolve().then(() => checkUpdate()).catch(() => null);
+
   let token = null;
   try { token = await getAccessToken(); } catch { token = null; }
-  if (!token)
-    return '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.';
+  if (!token) {
+    return append(
+      '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.',
+      await updatePromise,
+    );
+  }
 
   let probe = await probeToken(token, fetchImpl);
   if (probe.rejected) {
@@ -160,7 +191,10 @@ export async function runSessionStart(input, deps = {}) {
     const refreshed = await getAccessToken({}, { forceRefresh: true }).catch(() => null);
     probe = refreshed ? await probeToken(refreshed, fetchImpl) : { rejected: true, who: null };
     if (!refreshed || probe.rejected) {
-      return '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.';
+      return append(
+        '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.',
+        await updatePromise,
+      );
     }
     token = refreshed;
   }
@@ -222,16 +256,24 @@ export async function runSessionStart(input, deps = {}) {
       env: oauthEnv,
       resolveClaudeSubscription: deps.resolveClaudeSubscription,
       readClaudeAccountAnchor: deps.readClaudeAccountAnchor,
+      // The account fields behind the anchor. Forwarded for the same reason the anchor is: the
+      // reconcile compares them against billing.json to catch a switch to another Claude account,
+      // and a test that cannot inject them would read the developer's own ~/.claude.json.
+      readClaudeAccount: deps.readClaudeAccount,
     }))
     : deps.reconcileBilling;
   let billingConfig = null;
   let billingSource = BillingSource.UNKNOWN;
   let billingOutcome = 'none';
+  // What moved in billing.json, as a human-readable list. Empty on a no-op reconcile, on a first
+  // capture, and on an injected reconcile seam that predates the field.
+  let billingChanges = [];
   try {
     const reconciled = reconcileBilling();
     billingConfig = reconciled.config;
     billingSource = reconciled.source;
     billingOutcome = reconciled.outcome == null ? 'none' : reconciled.outcome;
+    billingChanges = Array.isArray(reconciled.changes) ? reconciled.changes : [];
   } catch { /* best-effort */ }
 
   // Tell the portal which Claude account and credentials this machine is on. Fire-and-forget: the
@@ -240,19 +282,52 @@ export async function runSessionStart(input, deps = {}) {
   // A reconcile that switched accounts or captured fresh identity forces the send — that is the
   // only moment the portal can learn about an account switch.
   const syncAccount = deps.syncAccount == null ? _syncAccountIfNeeded : deps.syncAccount;
+  // The config the reconcile above just settled is handed over directly — re-reading billing.json
+  // here would be a second file read for an answer already in hand.
+  const reconciledConfig = billingConfig;
+  const syncDeps = { fetchImpl, env: oauthEnv, readBillingConfig: () => reconciledConfig };
+  // HELD, not discarded. Still fire-and-forget for every path that does not need it — the catch is
+  // attached here at creation, so awaiting it later can only yield a value, never throw. The one
+  // path that does await it is the unknown-key branch below: that check-in is what registers this
+  // key with the portal, so asking again before it lands would just re-read "unknown".
+  let syncPromise = null;
   try {
-    const forced = billingOutcome === 'switched' || billingOutcome === 'captured';
-    // The config the reconcile above just settled is handed over directly — re-reading billing.json
-    // here would be a second file read for an answer already in hand.
-    const reconciledConfig = billingConfig;
-    Promise.resolve(
-      syncAccount(token, { force: forced, via: 'session-start' }, { fetchImpl, env: oauthEnv, readBillingConfig: () => reconciledConfig }),
-    ).catch(() => { /* best-effort */ });
+    // 'migrated' belongs here for the same reason 'switched' does: the machine just moved off a
+    // setup token onto an interactive login, so the portal is holding the wrong account and the
+    // wrong plan for it until this check-in lands.
+    const forced = billingOutcome === 'switched'
+      || billingOutcome === 'captured'
+      || billingOutcome === 'migrated';
+    syncPromise = Promise.resolve(
+      syncAccount(token, { force: forced, via: 'session-start' }, syncDeps),
+    ).catch(() => null);
   } catch { /* best-effort */ }
 
   let message = systemMessage;
   // Billing nudges are noise for a workspace that reports nothing live.
   if (liveAllowed) {
+    // Every automatic rewrite of the billing record is announced, because every one of them
+    // changes what subsequent reports are priced against and none of them asked the user first.
+    //
+    // Driven by the reconcile's DIFF, not by its outcome: a write is not a change. The weekly
+    // heartbeat re-captures the same tuple and reports 'captured' each time, and a line that fires
+    // on that would be noise the user learns to skip — which would cost them the one time it
+    // matters. An empty diff, and a first capture on a machine that had no record, say nothing.
+    //
+    // A STATEMENT, not a nudge, and it names no command. The nudges below already own "what you
+    // must do": pointing at /beezi:refresh here would fire alongside the unknown-source nudge that
+    // deliberately routes to /beezi:login, and hand the user two different instructions for one
+    // situation. The single exception is the setup-token → login migration, which the machine
+    // infers from evidence that cannot fully distinguish it from a token it merely cannot see —
+    // there, and only there, the user is told how to correct a wrong guess.
+    if (billingChanges.length > 0) {
+      const inferred = billingChanges.indexOf('setup token → Claude login') !== -1;
+      const tail = inferred
+        ? ' Run /beezi:refresh if this machine still uses a setup token.'
+        : '';
+      const notice = `Beezi: billing change detected — ${billingChanges.join('; ')}. Data updated.${tail}`;
+      message = message ? `${message}\n${notice}` : notice;
+    }
     if (billingSource === BillingSource.SUBSCRIPTION && isStale(billingConfig)) {
       const nudge = 'Beezi: subscription plan info is missing or stale — run /beezi:refresh to update it.';
       message = message ? `${message}\n${nudge}` : nudge;
@@ -278,16 +353,43 @@ export async function runSessionStart(input, deps = {}) {
     //
     // Answered from a cached verdict, so the steady state is one file read. A null answer means the
     // question could not be asked, which is not the same as "unresolved" and says nothing.
+    const fetchKeyStatus = deps.fetchOauthKeyStatus == null
+      ? _fetchOauthKeyStatus
+      : deps.fetchOauthKeyStatus;
     let keyStatus = null;
     try {
-      const fetchKeyStatus = deps.fetchOauthKeyStatus == null
-        ? _fetchOauthKeyStatus
-        : deps.fetchOauthKeyStatus;
       keyStatus = await fetchKeyStatus(token, { fetchImpl, env: oauthEnv });
     } catch { /* best-effort */ }
-    const recordKeyPlan = deps.recordResolvedKeyPlan == null
-      ? _recordResolvedKeyPlan
-      : deps.recordResolvedKeyPlan;
+
+    // A key the portal has never seen reports its usage unpriced and, worse, says nothing about it:
+    // the server withholds needsAttention for an unknown key on purpose, because the check-in that
+    // registers it rides this very hook and a first run would otherwise always nudge. So register
+    // it, then ask again.
+    //
+    // Gated on a REAL answer of `known: false`. A null is "could not ask" — offline, an older
+    // server, or no token on this machine at all — and nulls are never cached, so treating null as
+    // unknown would make every token-less and every offline machine pay a serial check-in plus a
+    // second probe on every single session, forever, for a question that has no answer.
+    if (keyStatus != null && keyStatus.known === false) {
+      try {
+        // Await whatever is already in flight, then force one. syncAccountIfNeeded's hash gate
+        // skips the POST when the payload is unchanged and the weekly resync is not due — which is
+        // exactly the state of a machine whose key is unknown to the portal for any reason other
+        // than a changed payload (a tenant switch after re-login, a server-side restore). Without
+        // the force the key stays unregistered for up to a week and no nudge ever fires, because
+        // needsAttention requires `known`.
+        if (syncPromise != null) await syncPromise;
+        await Promise.resolve(
+          syncAccount(token, { force: true, via: 'session-start' }, syncDeps),
+        ).catch(() => null);
+        const reprobed = await fetchKeyStatus(token, { fetchImpl, env: oauthEnv, refresh: true });
+        if (reprobed != null) keyStatus = reprobed;
+      } catch { /* best-effort */ }
+    }
+
+    const recordKeyData = deps.recordResolvedKeyData == null
+      ? _recordResolvedKeyData
+      : deps.recordResolvedKeyData;
     if (keyStatus != null && keyStatus.needsAttention) {
       // Points at /beezi:refresh, not at the portal: that command IS this flow — it reads the same
       // resolution, offers the same plans and subscriptions, and writes the answer back here.
@@ -297,11 +399,33 @@ export async function runSessionStart(input, deps = {}) {
       message = message ? `${message}
 ${nudge}` : nudge;
     } else if (keyStatus != null && keyStatus.known && keyStatus.subscriptionPlan != null) {
-      // The portal already knows what this key bills. Adopt it into billing.json so the reports
-      // carry it from this session on, instead of waiting for the user to run /beezi:refresh — and
-      // instead of shipping whatever plan a previous interactive login left behind. Best-effort and
-      // silent by contract: nothing changed for the user to read about.
-      try { recordKeyPlan(keyStatus.subscriptionPlan); } catch { /* best-effort */ }
+      // The portal already knows what this key bills. Adopt the WHOLE answer into billing.json —
+      // plan, subscription type, tier, account email, and the fingerprint it is all scoped to — so
+      // the reports carry it from this session on, instead of waiting for the user to run
+      // /beezi:refresh and instead of shipping whatever a previous interactive login left behind.
+      // Best-effort and silent by contract: nothing changed for the user to read about.
+      try { recordKeyData(keyStatus); } catch { /* best-effort */ }
+
+      // One exception to the silence. The portal priced this key against an account that carries an
+      // identity of its own — an email or a vendor uuid — and the plan was never confirmed for the
+      // key itself, only reported by some machine. That is what a key inheriting a subscription an
+      // interactive sign-in established looks like, and it may not be the subscription the token
+      // belongs to. The user cannot fix it from here (a /link refuses an account with its own
+      // identity), so this is a notice, not a nudge — said once per key, and re-armed by rotation.
+      if (keyStatus.accountAnchored === true && keyStatus.planSource === 'reported') {
+        const notified = deps.hasKeyBeenNotified == null
+          ? _hasKeyBeenNotified
+          : deps.hasKeyBeenNotified;
+        const markNotified = deps.markKeyNotified == null ? _markKeyNotified : deps.markKeyNotified;
+        try {
+          if (!notified(keyStatus.fingerprint)) {
+            const named = keyStatus.accountEmail == null ? '' : ` (${keyStatus.accountEmail})`;
+            const notice = `Beezi: this machine's Claude setup token bills a subscription${named} that an earlier sign-in established, not one confirmed for the key itself. If that is the wrong subscription, ask your Beezi admin to re-point it.`;
+            message = message ? `${message}\n${notice}` : notice;
+            markNotified(keyStatus.fingerprint);
+          }
+        } catch { /* best-effort */ }
+      }
     }
 
     // The status-line wrapper is the only source of LIVE plan-usage readings, and it is a
@@ -333,5 +457,7 @@ ${nudge}` : nudge;
   const consentAsk = consentPrompt();
   if (consentAsk) message = message ? `${message}\n${consentAsk}` : consentAsk;
 
-  return message;
+  // Appended last, after the consent ask, so every existing assertion on the earlier lines is
+  // untouched by a nudge that only ever adds a trailing line.
+  return append(message, await updatePromise);
 }

@@ -46,12 +46,18 @@ Every report carries `subscription_plan` / `subscription_type` / `rate_limit_tie
 
 | `planSource`     | Meaning                                                                          |
 | ---------------- | -------------------------------------------------------------------------------- |
-| `key_resolution` | the Beezi server's answer for this setup token's fingerprint                       |
+| `key_resolution` | the Beezi server's answer for this setup token's fingerprint (stamped with `keyFingerprint`, so it is never served under a different key) |
 | `claude_login`   | observed locally from `claude auth status` / `oauthAccount`                        |
 | `self_reported`  | what the user declared in `/beezi:login`                                           |
 | `unresolved`     | this machine signs in with a setup token and its plan is not knowable locally — nothing is reported rather than a leftover being reported as fact |
 
 A resolution the server does not have yet shows up as a SessionStart nudge pointing at `/beezi:refresh`, which is the same flow end to end: it reads the resolution, offers the plans and subscriptions the server listed, writes the answer back, and records it locally. Nothing about it needs the portal UI.
+
+**Switching auth modes, and key rotation.** A machine that captured its plan from an interactive login and later runs under `CLAUDE_CODE_OAUTH_TOKEN` is a different billing subject, but `anchorChanged` cannot see it: that check counts a mismatch only between anchors of the *same* source, and this is a cross-source pair (`email`/`account_uuid`/`user_id` on the record, `oauth_key` in force). `authModeSwitched` in `lib/billing-capture.mjs` covers exactly that gap — but only *asks* the question. The reset happens only once `claude auth status` positively confirms a setup token (`planSource: 'unresolved'`); a machine whose CLI is missing or slow falls through to the ordinary rules rather than stamping the previous login's plan onto the new key. Self-reported records are exempt throughout: the token may well belong to the account the user described. The transition is re-checked at most every 6h, and rotation (`oauth_key` → a different `oauth_key`) already fired through `anchorChanged` and still does.
+
+Once reset, the record carries `keyFingerprint` and nothing else that belonged to the old account. Two things then rely on it: `recordResolvedKeyData` stamps the server's answer with the key it was resolved for, and `shouldKeepExisting` refuses to let a local capture that could *not* see a key overwrite a record that belongs to one — which is what stops the weekly heartbeat, run while the token is invisible, from restoring the previous login's plan.
+
+**A key that inherited a subscription.** When the server reports `accountAnchored: true` alongside `planSource: 'reported'`, this key is bound to an account that some interactive sign-in established and nobody ever confirmed a plan for the key itself. The plan is still adopted — unpriced usage is worse — but the machine says so once per fingerprint (`~/.beezi/key-notice.json`), and `/beezi:refresh` repeats it every time it is run. It is a notice rather than a nudge because there is nothing the terminal can offer: `/link` refuses an account that carries its own identity, so re-pointing it is an admin's job.
 
 ## Dependencies
 
