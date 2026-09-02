@@ -5,6 +5,7 @@ import { IDLE_GAP_SEC, isTimingAnchor } from './delta.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
+import { readPermissionMarkers } from './permission-markers.mjs';
 
 // Work done while a plan permission mode is active is `planning`. Matched loosely (substring) so a
 // schema tweak — 'plan', 'plan_mode', 'planning' — still classifies as planning instead of silently
@@ -19,6 +20,34 @@ const STATE = {
   IDLE: 'idle',
   BREAK: 'break',
 };
+
+// WHY the human was being waited on, carried on `waiting_user` periods only. Every member names
+// what was being waited ON, never the event that ended the wait — keep that convention if one is
+// added, or the vocabulary stops meaning one thing.
+//
+// An absent subtype is NOT the same as NEXT_INSTRUCTION: it means the timeline came from a plugin
+// old enough to predate this field. The server relies on that distinction, so a period must never
+// carry the key with a null/undefined value.
+const WAITING = {
+  PLAN_APPROVAL: 'plan_approval',
+  QUESTION_ANSWER: 'question_answer',
+  COMMAND_APPROVAL: 'command_approval',
+  NEXT_INSTRUCTION: 'next_instruction',
+};
+
+// Permission modes in which the prompt is never actually put to a human: the call is auto-denied
+// or auto-allowed. A marker written under one of these is a machine event, not a wait.
+const UNATTENDED_PERMISSION_MODES = { dontAsk: true, bypassPermissions: true };
+
+// A marker whose next anchor lands within this window was answered too fast to have been a human
+// reading a dialog — almost certainly an auto-resolved prompt. Charging it to the human would
+// pepper the timeline with sub-second waiting bands.
+const MARKER_MIN_WAIT_MS = 1000;
+
+// How far back a marker may be pulled onto a matching tool_use anchor. Covers the case where
+// Claude Code runs the permission check before it stamps the assistant line, which would otherwise
+// sort the marker in front of the tool_use and lose the wait entirely.
+const MARKER_SNAP_MS = 5000;
 
 // Past this, the session was not waited on — it was abandoned and later resumed, usually
 // overnight. Charted as `break` so a client can collapse it to a marker instead of drawing
@@ -243,19 +272,31 @@ function buildToolUseNames(lines) {
   return names;
 }
 
-// Is this line the human answering something the agent put to them — a question, a plan waiting on
-// approval, or a permission prompt they declined?
-function isUserDecision(line, toolUseNames) {
-  if (line == null || line.type !== 'user') return false;
+// Which decision is this line the human answering — a question, a plan waiting on approval, or a
+// permission prompt they declined? Returns the waiting subtype, or null when the line is not a
+// decision at all.
+//
+// The tool name was always resolved here to answer "is this a decision"; it is now kept rather
+// than collapsed to a boolean, which is the whole of the plan/question half of this feature.
+function userDecisionKind(line, toolUseNames) {
+  if (line == null || line.type !== 'user') return null;
   const message = line.message == null ? undefined : line.message;
   const content = message == null ? undefined : message.content;
-  if (!Array.isArray(content)) return false;
+  if (!Array.isArray(content)) return null;
   for (const b of content) {
     if (b == null || b.type !== 'tool_result') continue;
-    if (b.tool_use_id && USER_DECISION_TOOLS[toolUseNames.get(b.tool_use_id)] === true) return true;
-    if (typeof b.content === 'string' && b.content.indexOf(PERMISSION_DECLINED_PREFIX) === 0) return true;
+    if (b.tool_use_id) {
+      const name = toolUseNames.get(b.tool_use_id);
+      if (name === 'ExitPlanMode') return WAITING.PLAN_APPROVAL;
+      if (name === 'AskUserQuestion') return WAITING.QUESTION_ANSWER;
+    }
+    // A decline can come back from ANY tool, so it is matched on the marker text. Checked after
+    // the named tools so a declined plan still reads as a plan approval.
+    if (typeof b.content === 'string' && b.content.indexOf(PERMISSION_DECLINED_PREFIX) === 0) {
+      return WAITING.COMMAND_APPROVAL;
+    }
   }
-  return false;
+  return null;
 }
 
 // A genuine user turn-start, as opposed to a tool_result echo (Claude Code writes those as
@@ -276,11 +317,115 @@ function isRealUserPrompt(line) {
   return false;
 }
 
+// Names of the tools this line opens a tool_use for. Lets a marker be snapped onto the anchor of
+// the very call it belongs to when the two are stamped out of order.
+function toolUseNamesOf(line) {
+  const message = line == null ? undefined : line.message;
+  const content = message == null ? undefined : message.content;
+  if (!Array.isArray(content)) return null;
+  let names = null;
+  for (const b of content) {
+    if (b != null && b.type === 'tool_use' && typeof b.name === 'string') {
+      if (names === null) names = [];
+      names.push(b.name);
+    }
+  }
+  return names;
+}
+
+// Fold permission-prompt markers into the sorted anchor list, in place.
+//
+// A marker is not a transcript line, so it becomes a synthetic anchor whose only job is to open a
+// waiting interval. Everything here exists because the merge loop drops a bad anchor SILENTLY
+// (`if (cur.ts <= prev.ts) continue`), so a marker landing in the wrong place would not fail — it
+// would just quietly chart nothing.
+function applyPermissionMarkers(anchors, markers) {
+  if (!Array.isArray(markers) || markers.length === 0 || anchors.length === 0) return;
+  const firstTs = anchors[0].ts;
+  const lastTs = anchors[anchors.length - 1].ts;
+  const injected = [];
+  let lastAcceptedTs = -Infinity;
+
+  for (const marker of markers) {
+    if (marker == null || !Number.isFinite(marker.ts)) continue;
+    // Prompts for these are already read off the transcript, with a more specific subtype.
+    if (marker.toolName != null && USER_DECISION_TOOLS[marker.toolName] === true) continue;
+    // No human was asked: the call was auto-allowed or auto-denied.
+    if (marker.permissionMode != null && UNATTENDED_PERMISSION_MODES[marker.permissionMode] === true) continue;
+    // Outside the charted span — lead-in dropped by dropLeadIn, or a stale file from an earlier
+    // run of a session that was later resumed.
+    if (marker.ts < firstTs || marker.ts >= lastTs) continue;
+
+    let ts = marker.ts;
+    // The hook may be stamped just BEFORE the assistant tool_use line it belongs to, depending on
+    // whether Claude Code writes the transcript entry before or after running the permission
+    // check. Pull it onto that call so the wait opens at the anchor rather than in front of it.
+    const snapped = snapToToolUse(anchors, ts, marker.toolName);
+    if (snapped != null) ts = snapped;
+
+    const idx = precedingAnchorIndex(anchors, ts);
+    if (idx === -1) continue;
+    const next = anchors[idx + 1];
+    // Answered too fast to have been read by a human — an auto-resolved prompt.
+    if (next != null && next.ts - ts < MARKER_MIN_WAIT_MS) continue;
+    // Several prompts between the same pair of real anchors (a parallel tool batch) describe one
+    // continuous wait; the earliest opens it and the rest are noise.
+    if (ts <= lastAcceptedTs) continue;
+
+    if (ts <= anchors[idx].ts) {
+      // Landing exactly on an existing anchor, so there is nothing to inject between. Flagging is
+      // only safe when the snap matched — that anchor IS the tool call being asked about. Without
+      // a match the anchor is merely whatever happened to be stamped at that instant, and flagging
+      // it would charge the human for the agent's work leading up to the prompt.
+      if (snapped == null) continue;
+      anchors[idx].isPermissionMarker = true;
+      lastAcceptedTs = anchors[idx].ts;
+      continue;
+    }
+    injected.push({
+      ts,
+      isPrompt: false,
+      isTaskNotif: false,
+      decisionKind: null,
+      toolUseNames: null,
+      isPermissionMarker: true,
+      mode: anchors[idx].mode,
+    });
+    lastAcceptedTs = ts;
+  }
+
+  if (injected.length === 0) return;
+  for (const a of injected) anchors.push(a);
+  anchors.sort((a, b) => a.ts - b.ts);
+}
+
+// Index of the last anchor at or before `ts`, or -1 when `ts` precedes them all.
+function precedingAnchorIndex(anchors, ts) {
+  let found = -1;
+  for (let i = 0; i < anchors.length; i++) {
+    if (anchors[i].ts > ts) break;
+    found = i;
+  }
+  return found;
+}
+
+// If a tool_use anchor for this tool sits within MARKER_SNAP_MS after the marker, return its
+// timestamp so the marker can be moved onto it. Null when there is nothing to snap to.
+function snapToToolUse(anchors, ts, toolName) {
+  if (toolName == null) return null;
+  for (const a of anchors) {
+    if (a.ts < ts) continue;
+    if (a.ts - ts > MARKER_SNAP_MS) return null;
+    if (a.toolUseNames != null && a.toolUseNames.indexOf(toolName) !== -1) return a.ts;
+  }
+  return null;
+}
+
 // Walk the transcript in file order, tracking the active permission mode (set by permission-mode
 // change lines and the permissionMode field on user lines; assistant work lines inherit the last
 // value). Classify each interval between consecutive timestamped anchors, then merge adjacent
 // same-state runs into periods.
-function buildPeriods(lines, skillPlanIntervals) {
+function buildPeriods(lines, skillPlanIntervals, permissionMarkers) {
   // A skill-plan window (buildSkillPlanCycles) classifies as `planning` too — same rank as the
   // plan permission mode, so everything above it in the chain still outranks it.
   const inSkillPlan = (ms) => {
@@ -307,11 +452,14 @@ function buildPeriods(lines, skillPlanIntervals) {
       ts: ms,
       isPrompt: isRealUserPrompt(line),
       isTaskNotif: isTaskNotification(line),
-      isUserDecision: isUserDecision(line, toolUseNames),
+      decisionKind: userDecisionKind(line, toolUseNames),
+      toolUseNames: toolUseNamesOf(line),
+      isPermissionMarker: false,
       mode: currentMode,
     });
   }
   anchors.sort((a, b) => a.ts - b.ts);
+  applyPermissionMarkers(anchors, permissionMarkers);
 
   const merged = [];
   for (let i = 1; i < anchors.length; i++) {
@@ -325,6 +473,7 @@ function buildPeriods(lines, skillPlanIntervals) {
     // notification breaks. Checked FIRST so a long-running background agent is never mistaken for
     // the human walking away — no local band ≥6h overlaps a live subagent today, but one that did
     // would be real work.
+    let subtype = null;
     if (cur.isTaskNotif) state = STATE.IDLE;
     // Abandoned and resumed, rather than waited on. This outranks the prompt rule below: these
     // gaps DO end at a real prompt (the human returning), which is exactly why they used to be
@@ -335,21 +484,42 @@ function buildPeriods(lines, skillPlanIntervals) {
     // question, an approved or rejected plan, a declined permission all arrive as a tool_result
     // rather than a turn-start, but the wait was still theirs. Note this outranks the plan-mode
     // check below, so a plan sitting unapproved is the human's time, not more planning.
-    else if (cur.isPrompt || cur.isUserDecision) state = STATE.WAITING_USER;
+    else if (cur.isPrompt) { state = STATE.WAITING_USER; subtype = WAITING.NEXT_INSTRUCTION; }
+    // Outranks the permission marker below on purpose: if PermissionRequest turns out to fire for
+    // ExitPlanMode or AskUserQuestion too, the transcript's answer is the more specific one and a
+    // plan approval must not be relabelled as a bare command approval.
+    else if (cur.decisionKind != null) { state = STATE.WAITING_USER; subtype = cur.decisionKind; }
+    // The one backward-looking rule in this loop. Every other branch classifies the interval
+    // [prev, cur] by what CUR is; a permission marker instead marks where the wait BEGAN, so the
+    // interval it describes is the one it opens. Reading it off `cur` would paint the stretch
+    // before the prompt — the agent's own work — as waiting.
+    //
+    // Sits above the idle rule deliberately: an approval the human took ten minutes over is still
+    // their time, and the gap threshold would otherwise swallow every slow one as `idle`.
+    else if (prev.isPermissionMarker) { state = STATE.WAITING_USER; subtype = WAITING.COMMAND_APPROVAL; }
     // The `>=` gap fallback matches delta.mjs, which accrues a gap only while it is strictly under
     // the threshold. With `>` an exactly-300s gap read as WORKING here but was dropped there.
     else if (cur.ts - prev.ts >= IDLE_GAP_SEC * 1000) state = STATE.IDLE;
     else state = (isPlanMode(cur.mode) || inSkillPlan(cur.ts)) ? STATE.PLANNING : STATE.WORKING;
 
+    // Merged on state AND subtype: two adjacent waits for different reasons are two periods, or
+    // one reason would silently win the whole run. Splitting preserves total waiting time (the
+    // halves are contiguous) but does raise the period count.
     const last = merged[merged.length - 1];
-    if (last && last.state === state) last.endMs = cur.ts;
-    else merged.push({ state, startMs: prev.ts, endMs: cur.ts });
+    if (last && last.state === state && last.subtype === subtype) last.endMs = cur.ts;
+    else merged.push({ state, subtype, startMs: prev.ts, endMs: cur.ts });
   }
-  return merged.map((m) => ({
-    state: m.state,
-    started_at: new Date(m.startMs).toISOString(),
-    ended_at: new Date(m.endMs).toISOString(),
-  }));
+  return merged.map((m) => {
+    const period = {
+      state: m.state,
+      started_at: new Date(m.startMs).toISOString(),
+      ended_at: new Date(m.endMs).toISOString(),
+    };
+    // Emitted only where it means something. Stamping the key as null/undefined on every period
+    // would both bloat the stored blob and destroy the server's "absent = older plugin" reading.
+    if (m.state === STATE.WAITING_USER && m.subtype != null) period.waiting_subtype = m.subtype;
+    return period;
+  });
 }
 
 // Does this line carry an assistant `ExitPlanMode` tool_use block? That block marks Claude
@@ -491,14 +661,20 @@ function dropLeadIn(lines) {
 // Derive the whole session timeline from the transcript. Returns null when there's nothing to
 // place on a time axis (no user prompt, or no timestamped lines). generated_at stamps when it was
 // computed.
-export function computeSessionTimeline(transcriptPath, sessionId) {
+// `deps.readPermissionMarkers` is injectable so the tests never touch the developer's real
+// ~/.beezi/state — a stray marker file there would otherwise flip assertions on unrelated runs.
+export function computeSessionTimeline(transcriptPath, sessionId, deps = {}) {
   let lines;
   try { lines = parseTranscript(transcriptPath); } catch { return null; }
   lines = dropLeadIn(lines);
   if (lines === null) return null;
 
+  const readMarkers = deps.readPermissionMarkers == null ? readPermissionMarkers : deps.readPermissionMarkers;
+  let markers;
+  try { markers = readMarkers(sessionId); } catch { markers = []; }
+
   const skillPlan = buildSkillPlanCycles(lines);
-  const periods = buildPeriods(lines, skillPlan.intervals);
+  const periods = buildPeriods(lines, skillPlan.intervals, markers);
   const plan_events = buildPlanEvents(lines)
     .concat(skillPlan.events)
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
