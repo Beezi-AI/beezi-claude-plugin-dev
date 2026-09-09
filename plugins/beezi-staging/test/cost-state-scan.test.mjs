@@ -44,6 +44,9 @@ function makeDeps(overrides) {
       readState: () => null,
       markSuccessImpl: () => {},
       markAttemptImpl: () => {},
+      // Stubbed by DEFAULT, not per-test: the real one writes ~/.beezi/tracking.json, and a 403
+      // fixture that reached it would dark-mode the machine running the suite.
+      markTrackingDisabledImpl: () => {},
       now: () => NOW,
       postJsonImpl: async (url, token, body) => {
         posted.push(body);
@@ -260,4 +263,93 @@ test('the wire item carries the API field names, not the block camelCase', async
   assert.strictEqual(item.has_unknown_model_cost, false);
   assert.strictEqual(item.captured_at, new Date(RECENT).toISOString());
   assert.strictEqual(item.models[0].model, 'claude-opus-5');
+});
+
+// Two chunks' worth, so a halt can be told apart from "there was only ever one chunk".
+const manyTranscripts = () => Array.from({ length: 40 }, (_, i) => transcript('s' + i, RECENT));
+
+test('a 403 TRACKING_DISABLED halts the run, records the verdict and stops posting', async () => {
+  const disabled = [];
+  let posts = 0;
+  const { deps } = makeDeps({
+    listTranscripts: manyTranscripts,
+    readBlock: () => block('x', 1),
+    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    postJsonImpl: async () => {
+      posts += 1;
+      return response(403, { code: 'TRACKING_DISABLED', message: 'workspace is in audit mode' });
+    },
+  });
+  const res = await runCostStateScan(deps);
+  assert.equal(res.halted, 'tracking-disabled');
+  assert.equal(res.clean, false);
+  assert.equal(res.stored, 0);
+  // Broke out after the first refusal instead of posting the second chunk.
+  assert.equal(res.chunks, 1);
+  assert.equal(posts, 1);
+  assert.deepEqual(disabled, ['workspace is in audit mode']);
+});
+
+test('a 403 TRACKING_DISABLED stamps the attempt, never progress', async () => {
+  let success = 0;
+  let attempts = 0;
+  const { deps } = makeDeps({
+    markSuccessImpl: () => { success += 1; },
+    markAttemptImpl: () => { attempts += 1; },
+    postJsonImpl: async () => response(403, { code: 'TRACKING_DISABLED', message: null }),
+  });
+  await runCostStateScan(deps);
+  assert.equal(success, 0);
+  assert.equal(attempts, 1);
+});
+
+// A revoked seat or a deactivated user is reversible. Halt the run, but never write the local
+// opt-out — that would stop the hourly gate from ever retrying once access comes back.
+test('a code-less 403 halts without recording a tracking opt-out', async () => {
+  const disabled = [];
+  let posts = 0;
+  const { deps } = makeDeps({
+    listTranscripts: manyTranscripts,
+    readBlock: () => block('x', 1),
+    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    postJsonImpl: async () => { posts += 1; return response(403, { message: 'seat revoked' }); },
+  });
+  const res = await runCostStateScan(deps);
+  assert.equal(res.halted, 'forbidden');
+  assert.equal(res.clean, false);
+  assert.equal(res.chunks, 1);
+  assert.equal(posts, 1);
+  assert.deepEqual(disabled, []);
+});
+
+// The 401 retry goes through the same funnel, so a 403 landing on the SECOND attempt is caught
+// too — not misread as an ordinary failed chunk.
+test('a 403 on the 401 retry is handled as a 403', async () => {
+  const disabled = [];
+  let calls = 0;
+  const { deps } = makeDeps({
+    getAccessToken: async () => 'token',
+    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    postJsonImpl: async () => {
+      calls += 1;
+      return calls === 1
+        ? response(401, {})
+        : response(403, { code: 'TRACKING_DISABLED', message: 'audit mode' });
+    },
+  });
+  const res = await runCostStateScan(deps);
+  assert.equal(res.halted, 'tracking-disabled');
+  assert.equal(res.clean, false);
+  assert.deepEqual(disabled, ['audit mode']);
+});
+
+// A throw out of the local write must not take the run down with it.
+test('a failing tracking write still halts cleanly', async () => {
+  const { deps } = makeDeps({
+    markTrackingDisabledImpl: () => { throw new Error('EACCES'); },
+    postJsonImpl: async () => response(403, { code: 'TRACKING_DISABLED', message: null }),
+  });
+  const res = await runCostStateScan(deps);
+  assert.equal(res.halted, 'tracking-disabled');
+  assert.equal(res.clean, false);
 });

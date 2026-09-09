@@ -6,6 +6,7 @@ import { getAccessToken as _getAccessToken } from './token.mjs';
 import { listAllTranscripts } from './transcript-index.mjs';
 import { readLastCostState, toWireModels } from './cost-state.mjs';
 import { readSyncState, scanFloorMs, markSuccess, markAttempt } from './cost-state-sync-state.mjs';
+import { markTrackingDisabled as _markTrackingDisabled } from './tracking.mjs';
 
 // The product decision is 30 per batch. Deliberately below audit-flush.mjs's MAX_CHUNK_ITEMS = 50
 // and mirrored by MAX_COST_STATE_SESSIONS on the API's DTO — both ends must agree or a legal chunk
@@ -39,6 +40,7 @@ export async function runCostStateScan(deps = {}) {
   const markSuccessImpl = deps.markSuccessImpl == null ? markSuccess : deps.markSuccessImpl;
   const markAttemptImpl = deps.markAttemptImpl == null ? markAttempt : deps.markAttemptImpl;
   const post = deps.postJsonImpl == null ? postJson : deps.postJsonImpl;
+  const markDisabled = deps.markTrackingDisabledImpl == null ? _markTrackingDisabled : deps.markTrackingDisabledImpl;
   const now = deps.now == null ? (() => Date.now()) : deps.now;
 
   // `clean` is a gate, not a statistic: it is what decides between markSuccess (which advances the
@@ -113,6 +115,28 @@ export async function runCostStateScan(deps = {}) {
   // and an `error.status === 404` branch could never fire. Same shape audit-flush.mjs's sendChunk
   // uses — and postJson itself stays untouched, because every other caller in this plugin depends
   // on it NOT throwing on status.
+
+  // 403 is authenticated-but-not-permitted: no token resolves it, and every remaining chunk would
+  // be refused identically, so it ends the run rather than costing three more round trips.
+  //
+  // A coded TRACKING_DISABLED is also written to tracking.json, which is what closes the loop:
+  // cost-state-trigger reads that record and stops spawning this child at all from the next Stop
+  // hook onward, instead of rediscovering the same 403 every hour. Branch on the machine-readable
+  // code and never the message, as checkpoint.mjs and audit-flush.mjs do — a code-less 403 (seat
+  // revoked, deactivated user) is a different, reversible thing and must not go dark locally.
+  const outcomeFor = async (res) => {
+    if (res != null && res.status === 403) {
+      const read = await readResponseBody(res);
+      const code = read == null ? null : read.code;
+      if (code === 'TRACKING_DISABLED') {
+        try { markDisabled(read.message == null ? null : read.message); } catch { /* best-effort */ }
+        return { ok: false, trackingDisabled: true };
+      }
+      return { ok: false, forbidden: true };
+    }
+    return readOutcome(res);
+  };
+
   const send = async (chunk) => {
     const res = await post(url, token, { sessions: chunk }, {
       fetchImpl: fetchImpl,
@@ -130,9 +154,10 @@ export async function runCostStateScan(deps = {}) {
         fetchImpl: fetchImpl,
         timeoutMs: UPLOAD_TIMEOUT_MS,
       });
-      return readOutcome(retry);
+      // Through the same funnel: the retry can 403 just as the first attempt can.
+      return outcomeFor(retry);
     }
-    return readOutcome(res);
+    return outcomeFor(res);
   };
 
   for (const chunk of planCostStateChunks(items, MAX_COST_STATE_ITEMS)) {
@@ -153,6 +178,19 @@ export async function runCostStateScan(deps = {}) {
     }
     if (outcome.unlinked === true) {
       result.halted = 'not-linked';
+      result.clean = false;
+      break;
+    }
+    if (outcome.trackingDisabled === true) {
+      // The tenant has opted out. Recorded locally already; the gate takes it from here.
+      result.halted = 'tracking-disabled';
+      result.clean = false;
+      break;
+    }
+    if (outcome.forbidden === true) {
+      // Reversible (a revoked seat, a deactivated user) — halt the run, but leave tracking.json
+      // alone so the hourly gate keeps trying and recovers on its own once access returns.
+      result.halted = 'forbidden';
       result.clean = false;
       break;
     }
@@ -178,6 +216,9 @@ export async function runCostStateScan(deps = {}) {
   return result;
 }
 
+// Reads a NON-403 response: outcomeFor peels that status off first, so this stays a pure body
+// reader with no local side effects.
+//
 // 404 (and 405, if the path exists under another verb) means the server does not know this route.
 //
 // The body goes through audit-flush's readResponseBody rather than res.json(): it consumes the
