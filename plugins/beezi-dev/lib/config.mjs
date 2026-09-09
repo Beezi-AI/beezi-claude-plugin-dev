@@ -35,6 +35,11 @@ export const ENDPOINTS = Object.freeze({
   // and the client resumes from there so a re-send is never narrower than what is stored.
   sessionsSync: "/sessions/sync",
   sessionsCoverage: "/sessions/coverage",
+  // Hourly background upload of the `cost-state` block Claude Code writes into each transcript —
+  // its own cost accounting, which is higher than anything we can tally from the transcript
+  // (advisor iterations and retried API attempts never land there). Backfill only: the live
+  // /sessions/report path is untouched.
+  sessionsCostState: "/sessions/cost-state",
   sessionErrors: "/sessions/errors",
   sessionsTimeline: "/sessions/timeline",
   reposStatus: "/repos/status",

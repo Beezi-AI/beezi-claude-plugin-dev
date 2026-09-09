@@ -97,6 +97,13 @@ export function updateCheckFile() {
   return path.join(beeziHome(), 'update-check.json');
 }
 
+// The hourly gate for the background cost-state backfill: { version, attemptedAt, lastScanAt }.
+// Root of beeziHome(), NOT state/ — pruneStale() clears that directory after 14 days, and an
+// expiring gate would re-run the whole scan on the next Stop hook after a quiet fortnight.
+export function costStateSyncFile() {
+  return path.join(beeziHome(), 'cost-state-sync.json');
+}
+
 export function accountSyncStateFile() {
   return path.join(beeziHome(), 'account-sync.json');
 }
