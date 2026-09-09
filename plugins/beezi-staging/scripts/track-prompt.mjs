@@ -1,4 +1,5 @@
 import { readHookInput } from '../lib/hook-input.mjs';
+import { recordPermissionMode } from '../lib/permission-mode-store.mjs';
 import { runHook } from '../lib/hook-runner.mjs';
 import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 
@@ -7,6 +8,15 @@ import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 // trip, so /beezi:track shows its result even when the API is down (no credits, outage),
 // which is exactly when it gets reached for. Every other prompt exits on this fast path.
 const input = readHookInput();
+
+// Before the fast exit, and whatever the prompt turns out to be: this is the hook that fires for
+// a SLASH COMMAND — verified carrying permission_mode on Claude Code 2.1.263 — and a slash
+// command's transcript line carries no mode at all. It also fires BEFORE any of that command's
+// own commands run, which is what lets /beezi:login's preflight see a Shift+Tab the user made a
+// second ago instead of the mode of the last thing they typed.
+// Cheap: a read, and a write only when the mode moved.
+if (input != null) recordPermissionMode(input.session_id, input.permission_mode);
+
 const prompt = input != null && typeof input.prompt === 'string' ? input.prompt.trim() : '';
 if (!/^\/beezi:track\b/.test(prompt)) process.exit(0);
 
