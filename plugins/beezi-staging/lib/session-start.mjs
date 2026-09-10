@@ -47,7 +47,7 @@ import {
   markKeyNotified as _markKeyNotified,
 } from './key-notice.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
-import { hasBeenAsked, markAsked, correlationPrompt } from './telemetry-consent.mjs';
+import { hasBeenAsked, markAsked, markCorrelationAsked, correlationPrompt } from './telemetry-consent.mjs';
 import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
 
 // Tests (and only tests) inject a bare `getAccessToken`. Map its two answers onto the typed
@@ -77,10 +77,14 @@ function append(message, line) {
 export function consentPrompt() {
   if (hasBeenAsked()) return null;
   markAsked();
-  return 'Beezi can send anonymous crash reports about the plugin itself — versions, OS, and '
-    + 'which plugin file failed. Never your code, prompts, or file paths. It helps us fix bugs '
-    + 'we would otherwise never see. Run /beezi:telemetry on to enable it, or /beezi:telemetry off '
-    + 'to decline.';
+  // The one ask covers correlation too, so the standalone correlation offer never repeats it.
+  markCorrelationAsked();
+  return 'Beezi can send crash reports about the plugin itself — versions, OS, which plugin file '
+    + 'failed, and whether it was signed in. Never your code, prompts, or file paths. It helps us '
+    + 'fix bugs we would otherwise never see. Recommended: /beezi:telemetry correlate — the same '
+    + 'reports plus a random installation ID, so support can find yours and tell you when it is '
+    + 'fixed. Prefer to stay anonymous? /beezi:telemetry on sends the reports without that ID. '
+    + '/beezi:telemetry off declines everything.';
 }
 
 // Resume guard: create cursor=0 ONLY if absent; never reset an existing session's cursor.

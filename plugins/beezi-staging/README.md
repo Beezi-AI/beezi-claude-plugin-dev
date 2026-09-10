@@ -45,11 +45,15 @@ to your account the next time authenticated activity succeeds, and attached to l
 support can find yours. It is stored outside the credential store, survives refresh failures and
 reauthorization, and is discarded on `/beezi:logout`.
 
-- `/beezi:telemetry on` — anonymous diagnostics.
+- `/beezi:telemetry correlate` — **recommended**: diagnostics on, with the installation ID
+  attached so support can find your report.
+- `/beezi:telemetry on` — the same diagnostics, anonymous, with no installation ID.
 - `/beezi:telemetry off` — everything off; pending reports and the installation ID are deleted.
-- `/beezi:telemetry correlate` — add the installation ID.
 - `/beezi:telemetry anonymous` — drop the installation ID and the reports carrying it, keeping
   anonymous diagnostics on.
+
+The one-time prompt offers all three, and recommends `correlate`. Recommending is all it does:
+nothing is collected until you answer, and `on` stays a first-class answer.
 
 Pending reports live in `~/.beezi/telemetry/`, are capped at 200 events, and expire locally after
 14 days.
