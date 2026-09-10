@@ -13,7 +13,8 @@ Report its one-line output verbatim. If the user asks what is collected: plugin 
 versions, OS, and which plugin file failed — never their code, prompts, file paths, or repository
 names.
 
-The four settings, if asked: `on` enables anonymous diagnostics, `off` disables everything and
-deletes what is pending, `correlate` additionally attaches a random installation ID so a report
-can be associated with the last Beezi account linked on this machine, and `anonymous` removes
-that ID again while keeping diagnostics on.
+The four settings, if asked: `correlate` is the recommended way to turn diagnostics on — it sends
+the reports and attaches a random installation ID so one can be associated with the last Beezi
+account linked on this machine; `on` sends the same reports without that ID; `off` disables
+everything and deletes what is pending; and `anonymous` removes the ID again while keeping
+diagnostics on. Never talk the user out of `on` or `off` — recommended is not required.

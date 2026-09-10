@@ -11,7 +11,7 @@ const CORRELATION_OFF = 'Reports are anonymous — no installation ID is attache
 export function setTelemetry(mode) {
   if (mode === 'on') {
     grantConsent();
-    return `Beezi diagnostics are ON. Crash reports about the plugin will be sent — never your code or prompts. ${isCorrelationGranted() ? CORRELATION_ON : CORRELATION_OFF} Use /beezi:telemetry correlate to attach one.`;
+    return `Beezi diagnostics are ON. Crash reports about the plugin will be sent — never your code or prompts. ${isCorrelationGranted() ? CORRELATION_ON : CORRELATION_OFF} Recommended: /beezi:telemetry correlate attaches one so support can find your report.`;
   }
   if (mode === 'off') {
     denyConsent();
