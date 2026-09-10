@@ -39,3 +39,45 @@ test('markAsked records the ask without granting anything', async (t) => {
   assert.equal(m.hasBeenAsked(), true, 'so the prompt never fires twice');
   assert.equal(m.isTelemetryGranted(), false, 'being asked is not consenting');
 });
+
+test('an existing anonymous grant keeps working and does not imply correlation', async (t) => {
+  withHome(t);
+  const m = await import('../lib/telemetry-consent.mjs?4');
+  m.grantConsent();
+  assert.equal(m.isTelemetryGranted(), true);
+  assert.equal(m.isCorrelationGranted(), false, 'correlation is a separate, later opt-in');
+  assert.equal(m.hasCorrelationBeenAsked(), false);
+});
+
+test('correlation can be granted and withdrawn without touching basic diagnostics', async (t) => {
+  withHome(t);
+  const m = await import('../lib/telemetry-consent.mjs?5');
+  m.grantCorrelation();
+  assert.equal(m.isTelemetryGranted(), true);
+  assert.equal(m.isCorrelationGranted(), true);
+  m.denyCorrelation();
+  assert.equal(m.isCorrelationGranted(), false);
+  assert.equal(m.isTelemetryGranted(), true, 'anonymous reporting continues');
+});
+
+test('a complete opt-out takes correlation with it, and re-enabling does not restore it', async (t) => {
+  withHome(t);
+  const m = await import('../lib/telemetry-consent.mjs?6');
+  m.grantCorrelation();
+  m.denyConsent();
+  assert.equal(m.isTelemetryGranted(), false);
+  m.grantConsent();
+  assert.equal(m.isCorrelationGranted(), false, 'correlation must be re-given explicitly');
+});
+
+test('the correlation offer is made once, and only to a machine already sending diagnostics', async (t) => {
+  withHome(t);
+  const m = await import('../lib/telemetry-consent.mjs?7');
+  assert.equal(m.correlationPrompt(), null, 'nothing to offer before diagnostics are on');
+  m.grantConsent();
+  const offer = m.correlationPrompt();
+  assert.match(offer, /correlate/);
+  assert.equal(m.correlationPrompt(), null, 'offered exactly once');
+  assert.equal(m.isTelemetryGranted(), true, 'the offer never blocks anonymous reporting');
+  assert.equal(m.isCorrelationGranted(), false, 'being asked is not consenting');
+});

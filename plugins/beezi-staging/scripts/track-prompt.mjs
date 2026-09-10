@@ -1,6 +1,6 @@
 import { readHookInput } from '../lib/hook-input.mjs';
 import { recordPermissionMode } from '../lib/permission-mode-store.mjs';
-import { runHook } from '../lib/hook-runner.mjs';
+import { runHook, importHookModule } from '../lib/hook-runner.mjs';
 import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 
 // UserPromptSubmit hook: when the user submits /beezi:track, run the tracking flow HERE and
@@ -22,10 +22,11 @@ if (!/^\/beezi:track\b/.test(prompt)) process.exit(0);
 
 runHook(DIAGNOSTIC_SOURCES.TRACK_PROMPT, async () => {
   // Heavy imports only on the slow path so the every-prompt cost stays at node startup.
-  const { trackSession } = await import('../lib/track-session.mjs');
+  const track = await importHookModule('./track-session.mjs');
   const { friendlyMessage } = await import('../lib/friendly-error.mjs');
+  if (track == null) return null;
 
-  const { ok, message } = await trackSession({
+  const { ok, message } = await track.trackSession({
     sessionId: input.session_id,
     transcriptPath: input.transcript_path,
     cwd: input.cwd,

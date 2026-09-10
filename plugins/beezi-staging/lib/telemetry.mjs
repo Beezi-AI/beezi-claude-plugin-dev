@@ -7,6 +7,8 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { telemetryDir, telemetryConsentFile } from './paths.mjs';
 import { isTelemetryGranted } from './telemetry-consent.mjs';
 import { isKnownCode, isKnownSource, DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
+import { isKnownAuthState, isKnownAuthReason } from './auth-state.mjs';
+import { currentInstallationId } from './installation-id.mjs';
 
 const PLUGIN_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAX_PENDING = 200;
@@ -20,6 +22,13 @@ const OS_RELEASE = /^[A-Za-z0-9._-]{1,80}$/;    // 25.4.0, 6.8.0-45-generic
 // keep the two in lockstep so a shape only this side considers valid can never fail server-side.
 const SITE = /^[A-Za-z0-9_./-]+:\d+$/;
 
+// Set for the lifetime of the diagnostics worker process. Recursion protection: a failure while
+// delivering diagnostics must never enqueue another diagnostic about that failure.
+let suppressed = false;
+export function suppressRecording(value = true) {
+  suppressed = value;
+}
+
 let currentSource = null;
 // Published by hook-runner for the duration of a hook. A call site that does not know its own
 // source (fs-store, token) falls back to it instead of guessing.
@@ -32,6 +41,11 @@ const shaped = (value, pattern) => {
   const text = String(value);
   return pattern.test(text) ? text : null;
 };
+
+// Never let a correlation lookup be the reason a diagnostic is lost.
+function installationIdOrNull() {
+  try { return currentInstallationId(); } catch { return null; }
+}
 
 function pluginVersion() {
   const pkg = readJson(path.join(PLUGIN_ROOT, 'package.json'));
@@ -65,8 +79,9 @@ export function siteFrom(error, pluginRoot = PLUGIN_ROOT) {
 
 // Structured fields only. There is deliberately no branch that can put error.message,
 // a stack, or any caller-supplied string into the record.
-export function recordIssue({ code, source, error, httpStatus } = {}, deps = {}) {
+export function recordIssue({ code, source, error, httpStatus, authState, reason } = {}, deps = {}) {
   try {
+    if (suppressed) return false;
     // A call site that does not know its own source (fs-store, token) falls back to the source
     // hook-runner published for the hook currently in flight, then to a neutral default.
     const effectiveSource = source == null ? (currentSource == null ? DIAGNOSTIC_SOURCES.UNKNOWN : currentSource) : source;
@@ -77,9 +92,15 @@ export function recordIssue({ code, source, error, httpStatus } = {}, deps = {})
     const errorCode = shaped(error == null ? null : error.code, IDENTIFIER);
     const site = siteFrom(error);
     const version = pluginVersion();
+    // Unknown vocabulary is dropped rather than sent: the server rejects an event carrying a
+    // value its enum lacks, and a rejected event is deleted rather than retried.
+    const state = isKnownAuthState(authState) ? authState : null;
+    const why = isKnownAuthReason(reason) ? reason : null;
 
+    // Repeated notices of the same shape — a prompt on every turn of an unlinked machine — fold
+    // into one event's count instead of minting a new event each time.
     const key = crypto.createHash('sha1')
-      .update([code, effectiveSource, site, errorName, errorCode, version].join('|'))
+      .update([code, effectiveSource, site, errorName, errorCode, version, state, why].join('|'))
       .digest('hex')
       .slice(0, 16);
 
@@ -108,6 +129,11 @@ export function recordIssue({ code, source, error, httpStatus } = {}, deps = {})
       errorName,
       errorCode,
       httpStatus: typeof httpStatus === 'number' ? httpStatus : null,
+      authState: state,
+      reason: why,
+      // Stamped once, at queue time. An event keeps the identity it was queued under even if the
+      // machine later rotates or drops it, so a report is never re-attributed after the fact.
+      installationId: installationIdOrNull(),
       pluginVersion: version,
       claudeCodeVersion: shaped(consent == null ? null : consent.claudeCodeVersion, VERSION),
       nodeVersion: process.version,

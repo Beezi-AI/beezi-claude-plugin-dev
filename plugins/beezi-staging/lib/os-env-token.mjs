@@ -59,7 +59,7 @@ const VAR = 'CLAUDE_CODE_OAUTH_TOKEN';
 
 // Absolute paths — never a bare name. A bare `reg.exe` / `powershell.exe` is resolved against the
 // child's current directory first, so a file dropped into a repo the user opens could be executed
-// instead. Same pinning lib/credentials.mjs already does; the bare name is the last resort for a
+// instead. Same pinning lib/credential-backends.mjs already does; the bare name is the last resort for a
 // machine with no SystemRoot at all, where there is nothing better to pin to.
 function systemBinary(...parts) {
   const root = process.env.SystemRoot;
@@ -86,7 +86,7 @@ function text(value) {
 }
 
 // Run with no shell (argv array) and never throw — { ok, stdout, stderr } so every caller can just
-// fall through to the next probe. Modelled on defaultRun in lib/credentials.mjs, with one
+// fall through to the next probe. Modelled on defaultRun in lib/credential-backends.mjs, with one
 // deliberate difference: stderr is CAPTURED, not discarded.
 //
 // That capture is what makes this module cheap enough for a hook path. `reg query` exits non-zero

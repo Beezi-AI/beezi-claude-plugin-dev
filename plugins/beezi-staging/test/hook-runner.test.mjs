@@ -13,6 +13,7 @@ test('runHook swallows a rejection, records it, and still exits clean', async ()
   await runHook(DIAGNOSTIC_SOURCES.STOP, async () => { throw new TypeError('boom'); }, {
     recordIssue: (event) => { recorded.push(event); return true; },
     exitClean: (code) => { exited = code; },
+    maybeSpawnDiagnostics: () => false,
   });
 
   assert.equal(exited, 0, 'exit behaviour is unchanged');
@@ -30,6 +31,7 @@ test('runHook records nothing when the hook succeeds', async () => {
   await runHook(DIAGNOSTIC_SOURCES.PULSE, async () => 'fine', {
     recordIssue: (e) => { recorded.push(e); return true; },
     exitClean: (code) => { exited = code; },
+    maybeSpawnDiagnostics: () => false,
   });
   assert.deepEqual(recorded, []);
   assert.equal(exited, 0);
@@ -65,7 +67,8 @@ test('a state-write failure inherits the hook source instead of a hardcoded labe
 
   await runHook(DIAGNOSTIC_SOURCES.STOP, async () => {
     writeJsonSecure(path.join(blocked, 'x.json'), { a: 1 });
-  }, { exitClean: async () => {} });
+    // Never let a unit test spawn a real detached worker that would POST to the live API.
+  }, { exitClean: async () => {}, maybeSpawnDiagnostics: () => false });
 
   // fs-store's own report is fire-and-forgotten via a lazy import; give its microtasks a turn.
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -84,7 +87,54 @@ test('a hook returning a value still gets its result to the caller', async () =>
   await runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => 'msg', {
     recordIssue: () => true,
     exitClean: () => {},
+    maybeSpawnDiagnostics: () => false,
     onResult: (value) => seen.push(value),
   });
   assert.deepEqual(seen, ['msg'], 'session-start needs its systemMessage');
+});
+
+test('the diagnostics worker is triggered at hook startup and again at completion', async () => {
+  const { runHook } = await import('../lib/hook-runner.mjs?trigger');
+  const { DIAGNOSTIC_SOURCES } = await import('../lib/telemetry-codes.mjs?trigger');
+  const spawns = [];
+  await runHook(DIAGNOSTIC_SOURCES.STOP, async () => { spawns.push('hook'); }, {
+    recordIssue: () => true,
+    exitClean: () => {},
+    maybeSpawnDiagnostics: () => { spawns.push('spawn'); return true; },
+  });
+  assert.deepEqual(spawns, ['spawn', 'hook', 'spawn'], 'delivery no longer waits for a token');
+});
+
+test('a crashing hook still triggers delivery, so the crash report goes out', async () => {
+  const { runHook } = await import('../lib/hook-runner.mjs?trigger2');
+  const { DIAGNOSTIC_SOURCES } = await import('../lib/telemetry-codes.mjs?trigger2');
+  let spawns = 0;
+  await runHook(DIAGNOSTIC_SOURCES.STOP, async () => { throw new Error('boom'); }, {
+    recordIssue: () => true,
+    exitClean: () => {},
+    maybeSpawnDiagnostics: () => { spawns += 1; return true; },
+  });
+  assert.equal(spawns, 2);
+});
+
+// The bug this prevents: a hook script that statically imports a module which throws on import
+// dies before the recorder exists, so the failure is invisible.
+test('an implementation module that throws on import is recorded, not silently fatal', async () => {
+  const { importHookModule } = await import('../lib/hook-runner.mjs?imp');
+  const { DIAGNOSTIC_CODES } = await import('../lib/telemetry-codes.mjs?imp');
+  const recorded = [];
+  const mod = await importHookModule('./nope.mjs', {
+    recordIssue: (event) => { recorded.push(event); return true; },
+    importImpl: () => { throw Object.assign(new Error('missing'), { code: 'ERR_MODULE_NOT_FOUND' }); },
+  });
+  assert.equal(mod, null, 'the hook body sees null and does nothing');
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].code, DIAGNOSTIC_CODES.HOOK_IMPORT_FAILED);
+  assert.equal(recorded[0].error.code, 'ERR_MODULE_NOT_FOUND');
+});
+
+test('a real implementation module still loads through the same seam', async () => {
+  const { importHookModule } = await import('../lib/hook-runner.mjs?imp2');
+  const mod = await importHookModule('./telemetry-codes.mjs');
+  assert.ok(mod != null && mod.DIAGNOSTIC_CODES != null, 'the specifier resolves against lib/');
 });

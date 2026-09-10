@@ -22,7 +22,10 @@ export function updateManifestUrl() {
   return ENV_UPDATE_MANIFEST_URL;
 }
 
-export const OAUTH_SCOPES = "email profile";
+// offline_access is what earns a refresh token: without it the grant lasts one access-token
+// lifetime and every later refresh submits nothing (finding 7). Registration and the
+// authorization request both send exactly this string.
+export const OAUTH_SCOPES = "email profile offline_access";
 
 // The Beezi REST surface, in one place. Paths are relative to apiBase().
 export const ENDPOINTS = Object.freeze({
@@ -61,6 +64,12 @@ export const ENDPOINTS = Object.freeze({
   keyResolutionLink: "/me/cli-agent/key-resolution/link",
   // Plugin health, not user analytics: separate route, separate table, consent-gated client-side.
   pluginDiagnostics: "/cli-agent/plugin-diagnostics",
+  // Authorization-free ingestion: losing OAuth must not also lose the evidence about losing it.
+  // Nothing authenticated is ever sent here (see lib/diagnostics-transport.mjs).
+  pluginDiagnosticsPublic: "/cli-agent/plugin-diagnostics/public",
+  // The one AUTHENTICATED half: associates this installation's random ID with the caller's
+  // account, and only after the user opted into correlation separately.
+  pluginDiagnosticsInstallation: "/cli-agent/plugin-diagnostics/installation",
 });
 
 export const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";

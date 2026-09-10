@@ -106,7 +106,7 @@ test('2. nudge is appended after the rejected-token early return', async (t) => 
 
   assert.equal(
     result,
-    '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.'
+    '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to authorize it again.'
       + '\n' + NUDGE,
   );
 });

@@ -1,7 +1,6 @@
 import { readHookInput } from '../lib/hook-input.mjs';
-import { runSessionStart } from '../lib/session-start.mjs';
 import { recordPermissionMode } from '../lib/permission-mode-store.mjs';
-import { runHook } from '../lib/hook-runner.mjs';
+import { runHook, importHookModule } from '../lib/hook-runner.mjs';
 import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 
 const input = readHookInput();
@@ -11,6 +10,9 @@ if (!input) process.exit(0);
 // preflight does not depend on this one. Claude Code documents permission_mode as absent from
 // some events, and a payload without it records nothing rather than clearing what is there.
 recordPermissionMode(input.session_id, input.permission_mode);
-runHook(DIAGNOSTIC_SOURCES.SESSION_START, () => runSessionStart(input), {
+runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
+  const mod = await importHookModule('./session-start.mjs');
+  return mod == null ? null : mod.runSessionStart(input);
+}, {
   onResult: (msg) => { if (msg) process.stdout.write(JSON.stringify({ systemMessage: msg })); },
 });
