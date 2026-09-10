@@ -12,10 +12,12 @@ import { spawn } from 'child_process';
 //
 // Never throws: a machine that refuses to spawn (EPERM, EMFILE, a locked-down policy) must cost
 // the hook nothing at all.
-export function spawnDetached(scriptPath, deps = {}) {
+// `args` are visible to every process on the machine (`ps`), so they carry only values a
+// bystander could already read out of the local store — never a token.
+export function spawnDetached(scriptPath, deps = {}, args = []) {
   const spawnImpl = deps.spawnImpl == null ? spawn : deps.spawnImpl;
   try {
-    const child = spawnImpl(process.execPath, [scriptPath], {
+    const child = spawnImpl(process.execPath, [scriptPath, ...args], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,

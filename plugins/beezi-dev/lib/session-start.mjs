@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { getAccessToken as _getAccessToken } from './token.mjs';
+import { getAccessToken as _getAccessToken, getAuthentication as _getAuthentication } from './token.mjs';
 import { flushQueue } from './checkpoint.mjs';
 import { git as _git, resolveOriginRemote } from './git.mjs';
 import { resolveRepoRoot } from './repo-timeline.mjs';
@@ -16,7 +16,12 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
-import { whoami } from './whoami.mjs';
+import { whoami, probeIdentity, PROBE_OUTCOMES } from './whoami.mjs';
+import { AUTH_STATES, AUTH_REASONS } from './auth-state.mjs';
+import { authNotice, FORBIDDEN_NOTICE, UPGRADE_RESTART_NOTICE } from './auth-messages.mjs';
+import { takeUpgradeNotice as _takeUpgradeNotice } from './auth-markers.mjs';
+import { recordAuthResult as _recordAuthResult } from './telemetry-auth.mjs';
+import { DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 import { getMachineClientId } from './machine-identity.mjs';
 import {
   recordWhoami,
@@ -42,8 +47,22 @@ import {
   markKeyNotified as _markKeyNotified,
 } from './key-notice.mjs';
 import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
-import { hasBeenAsked, markAsked } from './telemetry-consent.mjs';
+import { hasBeenAsked, markAsked, correlationPrompt } from './telemetry-consent.mjs';
 import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
+
+// Tests (and only tests) inject a bare `getAccessToken`. Map its two answers onto the typed
+// shape so the hook has exactly one code path: a token is ready, no token is unlinked, and a
+// credential layer that throws is a temporary failure — never a missing link.
+function authFromToken(getToken, deps, options) {
+  return Promise.resolve()
+    .then(() => getToken(deps, options))
+    .then((token) => (token
+      ? { authState: AUTH_STATES.READY, reason: AUTH_REASONS.OK, accessToken: token }
+      : { authState: AUTH_STATES.UNLINKED, reason: AUTH_REASONS.NO_CREDENTIALS, accessToken: null }))
+    .catch(() => ({
+      authState: AUTH_STATES.UNAVAILABLE, reason: AUTH_REASONS.STORAGE_UNAVAILABLE, accessToken: null,
+    }));
+}
 
 // The composition idiom used throughout this file, extracted for the three return points.
 function append(message, line) {
@@ -133,20 +152,28 @@ async function announceRepo(cwd, token, fetchImpl, gitImpl) {
   } catch { return null; } // offline — silent
 }
 
-// whoami reports invalid for any 401/403, which covers an expired token and a permissions
-// or wrong-environment refusal as well as a genuine revocation — too coarse to delete on.
-// So this only decides what to *tell* the user; discarding credentials is left to the token
-// endpoint naming the grant revoked, or to the user re-running /beezi:login.
-// Offline/unknown (null) still reads as fine, so a check we couldn't run stays silent.
-// The body is returned alongside the verdict — it carries the tenant's tracking policy.
+// The portal's verdict on the token, kept at full resolution. 401 is a verdict on the
+// credential and one refresh may fix it; 403 is a verdict on the account and no refresh can;
+// anything else is a check we could not run, which stays silent. Nothing here ever discards
+// credentials — that is the loop that used to delete a refreshable session (findings 1, 2).
+// `who` carries the tenant's tracking policy for the rest of the hook.
 async function probeToken(token, fetchImpl) {
-  const who = await whoami(token, { fetchImpl });
-  return { rejected: who != null && who.valid === false, who };
+  const probe = await probeIdentity(token, { fetchImpl });
+  return {
+    outcome: probe.outcome,
+    reason: probe.reason == null ? null : probe.reason,
+    who: probe.outcome === PROBE_OUTCOMES.AUTHENTICATED ? { valid: true, ...probe.identity } : null,
+  };
 }
 
 // Returns an optional systemMessage string (or null). Never throws for expected failures.
 export async function runSessionStart(input, deps = {}) {
   const getAccessToken = deps.getAccessToken == null ? _getAccessToken : deps.getAccessToken;
+  const getAuthentication = deps.getAuthentication != null
+    ? deps.getAuthentication
+    : (deps.getAccessToken == null ? _getAuthentication : ((d, o) => authFromToken(getAccessToken, d, o)));
+  const takeUpgradeNotice = deps.takeUpgradeNotice == null ? _takeUpgradeNotice : deps.takeUpgradeNotice;
+  const recordAuthResultImpl = deps.recordAuthResult == null ? _recordAuthResult : deps.recordAuthResult;
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const gitImpl = deps.gitImpl == null ? _git : deps.gitImpl;
   const resolveSource = deps.resolveSource == null ? _resolveSource : deps.resolveSource;
@@ -173,30 +200,60 @@ export async function runSessionStart(input, deps = {}) {
   const checkUpdate = deps.checkForUpdate == null ? _checkForUpdate : deps.checkForUpdate;
   const updatePromise = Promise.resolve().then(() => checkUpdate()).catch(() => null);
 
-  let token = null;
-  try { token = await getAccessToken(); } catch { token = null; }
-  if (!token) {
-    return append(
-      '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.',
-      await updatePromise,
-    );
+  // The store upgrade needs a restart to stop a pre-upgrade process renewing the old copies.
+  // Whichever process performed the migration flagged it; this prints it once per machine.
+  const restartNotice = takeUpgradeNotice() ? UPGRADE_RESTART_NOTICE : null;
+  const stop = (line) => append(append(line, restartNotice), null);
+
+  let auth;
+  try {
+    auth = await getAuthentication();
+  } catch {
+    auth = { authState: AUTH_STATES.UNAVAILABLE, reason: AUTH_REASONS.STORAGE_UNAVAILABLE, accessToken: null };
   }
+  if (auth.authState !== AUTH_STATES.READY) {
+    // Each non-ready state says something different: gone, coming back, temporarily out of
+    // reach, or definitively rejected. Reporting all four as "not linked" is what sent users
+    // into a login that then deleted the session they still had (findings 1, 6).
+    return append(stop(authNotice(auth)), await updatePromise);
+  }
+  let token = auth.accessToken;
 
   let probe = await probeToken(token, fetchImpl);
-  if (probe.rejected) {
+  if (probe.outcome === PROBE_OUTCOMES.UNAUTHORIZED) {
     // The 401 is the server's verdict on the token; expires_at was only ours, and a server that
     // omits expires_in leaves it a guess. Take the server's word and refresh once before
     // declaring the link bad — otherwise a token that died earlier than we estimated is never
     // renewed, and every session reports a rejection that a single refresh would have fixed.
-    const refreshed = await getAccessToken({}, { forceRefresh: true }).catch(() => null);
-    probe = refreshed ? await probeToken(refreshed, fetchImpl) : { rejected: true, who: null };
-    if (!refreshed || probe.rejected) {
-      return append(
-        '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.',
-        await updatePromise,
-      );
+    // Only after an actual 401: a 403 or a 503 is never a reason to spend a refresh grant.
+    const retry = await getAuthentication({}, { forceRefresh: true }).catch(() => null);
+    if (retry == null || retry.authState !== AUTH_STATES.READY) {
+      return append(stop(retry == null ? null : authNotice(retry)), await updatePromise);
     }
-    token = refreshed;
+    probe = await probeToken(retry.accessToken, fetchImpl);
+    if (probe.outcome === PROBE_OUTCOMES.UNAUTHORIZED) {
+      return append(stop(
+        '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. '
+        + 'Run /beezi:login to authorize it again.',
+      ), await updatePromise);
+    }
+    token = retry.accessToken;
+  }
+  if (probe.outcome === PROBE_OUTCOMES.FORBIDDEN) {
+    recordAuthResultImpl(
+      { authState: AUTH_STATES.UNAVAILABLE, reason: AUTH_REASONS.FORBIDDEN },
+      { source: DIAGNOSTIC_SOURCES.SESSION_START },
+    );
+    return append(stop(FORBIDDEN_NOTICE), await updatePromise);
+  }
+  // A check we could not run is not a verdict on the credential, so the hook stays silent — but
+  // the reason still has to reach the evidence trail, or a verification outage and an ordinary
+  // 5xx are indistinguishable afterwards.
+  if (probe.outcome === PROBE_OUTCOMES.UNAVAILABLE && probe.reason != null) {
+    recordAuthResultImpl(
+      { authState: AUTH_STATES.UNAVAILABLE, reason: probe.reason },
+      { source: DIAGNOSTIC_SOURCES.SESSION_START },
+    );
   }
 
   // ONE env for the whole hook. Claude Code 2.1.251 deletes CLAUDE_CODE_OAUTH_TOKEN from every
@@ -456,6 +513,9 @@ ${nudge}` : nudge;
 
   const consentAsk = consentPrompt();
   if (consentAsk) message = message ? `${message}\n${consentAsk}` : consentAsk;
+  // Offered once to a machine that already consented; declining changes nothing, so anonymous
+  // reporting is never blocked while the choice is outstanding.
+  message = append(message, correlationPrompt());
 
   // Appended last, after the consent ask, so every existing assertion on the earlier lines is
   // untouched by a nudge that only ever adds a trailing line.

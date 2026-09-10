@@ -10,6 +10,8 @@ function bridgeWith({ responses = [], token = 'tok', timeoutMs = 1000 } = {}) {
   const calls = [];
   const out = [];
   const bridge = createBridge({
+    // Never let a unit test spawn a real detached worker that would POST to the live API.
+    maybeSpawnDiagnostics: () => false,
     url: URL_UNDER_TEST,
     getAccessToken: async () => token,
     fetchImpl: async (url, init) => {
@@ -162,6 +164,8 @@ function lazyBridgeWith({ responses = [], timeoutMs = 1000 } = {}) {
   const ticks = [];
   const state = { token: null, cleared: 0 };
   const bridge = createBridge({
+    // Never let a unit test spawn a real detached worker that would POST to the live API.
+    maybeSpawnDiagnostics: () => false,
     url: URL_UNDER_TEST,
     getAccessToken: async () => state.token,
     fetchImpl: async (url, init) => {
@@ -325,4 +329,29 @@ test("an unreachable portal keeps the server alive instead of failing the handsh
   await ticks[0]();
   assert.equal(calls[1].body.method, "initialize", "real handshake replayed once reachable");
   assert.ok(out.some((m) => m.method === "notifications/tools/list_changed"));
+});
+
+// finding 6: the bridge told a user with a perfectly good saved login to run /beezi:login.
+test('the bridge distinguishes unlinked from temporarily without a token', async () => {
+  const cases = [
+    ['unlinked', /not linked/],
+    ['refreshing', /retry in a moment/],
+    ['unavailable', /retry in a moment/],
+    ['reauth_required', /authorize it again/],
+  ];
+  for (const [authState, expected] of cases) {
+    const written = [];
+    const bridge = createBridge({
+      // Never let a unit test spawn a real detached worker that would POST to the live API.
+      maybeSpawnDiagnostics: () => false,
+      getAuthentication: async () => ({ authState, accessToken: null }),
+      write: (line) => written.push(JSON.parse(line)),
+      fetchImpl: async () => { throw new Error('the bridge must not call the portal'); },
+    });
+    await bridge.handleMessage({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'x' } });
+    assert.match(written[0].error.message, expected, authState);
+    if (authState !== 'unlinked') {
+      assert.doesNotMatch(written[0].error.message, /not linked/, authState);
+    }
+  }
 });

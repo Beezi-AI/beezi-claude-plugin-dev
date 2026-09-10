@@ -270,9 +270,9 @@ test('9. flushQueue is invoked — seeds a queue file, verifies it is POSTed and
   assert.equal(fs.existsSync(queueFile), false, 'queue file must be removed after successful flush');
 });
 
-// ─── test 10: getAccessToken throws → returns login reminder, no throw escapes (FIX 2) ─
+// ─── test 10: the credential layer throwing is temporary, not "not linked" ───────────────
 
-test('10. getAccessToken throws → resolves to login reminder, no error escapes (FIX 2 regression)', async (t) => {
+test('10. the credential layer throwing is a temporary failure, not a missing link (finding 6)', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
@@ -288,8 +288,12 @@ test('10. getAccessToken throws → resolves to login reminder, no error escapes
     });
   });
 
-  assert.equal(result, '⚠ Beezi: this machine is not linked — analytics are NOT being tracked. Run /beezi:login to link it.', 'must return login reminder when getAccessToken throws');
-  assert.equal(fetchCalled, false, 'fetch must not be called when getAccessToken throws');
+  // A store that could not be read is not evidence that nothing is stored, so the copy describes
+  // retrying and never tells the user to run a login that would probe and delete a live session.
+  assert.match(result, /retry on its own/);
+  assert.doesNotMatch(result, /not linked/);
+  assert.doesNotMatch(result, /beezi:login/);
+  assert.equal(fetchCalled, false, 'fetch must not be called when the credentials cannot be read');
 });
 
 // ─── test 11: revoked token — whoami 401 → deletes token, warns ──────────────
@@ -312,7 +316,7 @@ test('11. rejected token — whoami 401 → warns but keeps the credentials', as
     gitImpl: fakeGit('https://host/repo.git'),
   });
 
-  assert.equal(result, '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to re-link.');
+  assert.equal(result, '⚠ Beezi: this machine’s link was rejected — analytics are NOT being tracked. Run /beezi:login to authorize it again.');
   // A 401 here is equally an expired token, a permissions refusal, or a wrong-environment
   // call — too coarse to unlink on. Only the token endpoint naming the grant revoked, or an
   // explicit /beezi:login, may discard credentials.
@@ -1005,4 +1009,119 @@ test('OS-env probe — one probed env reaches the reconcile, the check-in and th
   assert.equal(seen.reconcile, seen.sync);
   // And the hook probed exactly once for all of them.
   assert.equal(probes, 1);
+});
+
+// ─── conversions of docs/oauth-session-investigation/reproduce.mjs, asserting the FIXED copy ──
+
+const baseDeps = () => ({
+  fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  gitImpl: () => { throw new Error('not a repo'); },
+  checkForUpdate: async () => null,
+  statuslineCaptureDetached: () => {},
+  takeUpgradeNotice: () => false,
+});
+
+test('a transient refresh failure describes retrying, never "not linked"', async () => {
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    getAuthentication: async () => ({
+      authState: 'unavailable', reason: 'refresh_network_error', accessToken: null,
+    }),
+  });
+  assert.doesNotMatch(message, /not linked/);
+  assert.match(message, /retry on its own/);
+  assert.doesNotMatch(message, /beezi:login/);
+});
+
+test('a refresh already in flight says so instead of asking for a login', async () => {
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    getAuthentication: async () => ({
+      authState: 'refreshing', reason: 'refresh_in_progress', accessToken: null,
+    }),
+  });
+  assert.doesNotMatch(message, /not linked/);
+  assert.match(message, /renewing/);
+  assert.doesNotMatch(message, /beezi:login/);
+});
+
+test('a rejected grant asks for reauthorization and says the credentials are still there', async () => {
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    getAuthentication: async () => ({
+      authState: 'reauth_required', reason: 'invalid_grant', accessToken: null,
+    }),
+  });
+  assert.match(message, /\/beezi:login/);
+  assert.doesNotMatch(message, /not linked/);
+});
+
+test('only a missing authorization is called "not linked"', async () => {
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    getAuthentication: async () => ({
+      authState: 'unlinked', reason: 'no_credentials', accessToken: null,
+    }),
+  });
+  assert.match(message, /not linked/);
+});
+
+// A 403 is a verdict on the account: refreshing cannot fix it and a login will not either.
+test('a 403 describes missing permission and never spends a refresh', async () => {
+  let refreshes = 0;
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    fetchImpl: async () => ({ ok: false, status: 403 }),
+    getAuthentication: async (_d, options) => {
+      if (options && options.forceRefresh) refreshes += 1;
+      return { authState: 'ready', reason: 'ok', accessToken: 'tok' };
+    },
+  });
+  assert.match(message, /administrator/);
+  assert.doesNotMatch(message, /not linked/);
+  assert.equal(refreshes, 0, 'a permission refusal is never a reason to refresh');
+});
+
+test('a 503 the server could not verify is silent, and never spends a refresh', async () => {
+  let refreshes = 0;
+  const message = await runSessionStart({}, {
+    ...baseDeps(),
+    fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({ code: 'OAUTH_VERIFICATION_UNAVAILABLE' }) }),
+    getAuthentication: async (_d, options) => {
+      if (options && options.forceRefresh) refreshes += 1;
+      return { authState: 'ready', reason: 'ok', accessToken: 'tok' };
+    },
+  });
+  assert.equal(refreshes, 0);
+  assert.ok(message == null || !/not linked|rejected/.test(message));
+});
+
+test('the store upgrade prints its restart notice once, then never again', async () => {
+  let pending = true;
+  const deps = {
+    ...baseDeps(),
+    takeUpgradeNotice: () => { const was = pending; pending = false; return was; },
+    getAuthentication: async () => ({ authState: 'unlinked', reason: 'no_credentials', accessToken: null }),
+  };
+  assert.match(await runSessionStart({}, deps), /Restart Claude Code/);
+  assert.doesNotMatch(await runSessionStart({}, deps), /Restart Claude Code/);
+});
+
+test('session start records a verification outage and a rate limit without changing what it says', async () => {
+  for (const [status, body, reason] of [
+    [503, { code: 'OAUTH_VERIFICATION_UNAVAILABLE' }, 'verification_unavailable'],
+    [429, {}, 'rate_limited'],
+  ]) {
+    const recorded = [];
+    const message = await runSessionStart({}, {
+      ...baseDeps(),
+      fetchImpl: async () => ({ ok: false, status, json: async () => body }),
+      getAuthentication: async () => ({ authState: 'ready', reason: 'ok', accessToken: 'tok' }),
+      recordAuthResult: (result, opts) => { recorded.push({ ...result, ...opts }); return true; },
+    });
+    assert.equal(recorded.length, 1, reason);
+    assert.equal(recorded[0].reason, reason);
+    assert.equal(recorded[0].source, 'session_start');
+    assert.ok(message == null || !/not linked|rejected/.test(message), 'the hook stays quiet');
+  }
 });

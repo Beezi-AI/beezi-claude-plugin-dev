@@ -11,7 +11,7 @@ import { postJson } from './http.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { postSessionError } from './session-error-report.mjs';
 import { recordIssue, rememberClaudeCodeVersion } from './telemetry.mjs';
-import { flushTelemetry } from './telemetry-flush.mjs';
+import { bindInstallationIfNeeded } from './installation-binding.mjs';
 import { DIAGNOSTIC_CODES, DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 import { computeSessionTimeline, postSessionTimeline } from './session-timeline.mjs';
 import { isApiKeyBillingEvidence } from './billing.mjs';
@@ -117,9 +117,10 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try { token = await getAccessToken(); } catch { return { enqueued: 0, flush: null, sessionErrors: collectedErrors }; }
   if (!token) return { enqueued: 0, flush: null, sessionErrors: collectedErrors };
 
-  // Above the tracking gate on purpose: a dark-mode tenant has opted out of analytics about their
-  // work, not out of telling us our own plugin is broken. Consent is the only gate here.
-  try { await flushTelemetry(token, { postJsonImpl: deps.postJsonImpl }); } catch { /* never block the checkpoint */ }
+  // Diagnostics themselves no longer ride this path — they go out over the authorization-free
+  // route from the diagnostics worker. What is left here is the one authenticated half: this is
+  // successful authenticated activity, which is exactly when a correlation ID may be bound.
+  try { await bindInstallationIfNeeded(token, { postJsonImpl: deps.postJsonImpl }); } catch { /* never block the checkpoint */ }
   // A bounded tail-read of the transcript, cached in telemetry.json for the recorder to stamp
   // future events with — must never throw into the checkpoint either.
   try { rememberClaudeCodeVersion(transcript_path); } catch { /* best-effort */ }

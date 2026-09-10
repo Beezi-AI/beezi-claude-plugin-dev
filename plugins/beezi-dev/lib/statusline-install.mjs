@@ -140,7 +140,7 @@ if ((Test-Path $script) -and (Get-Command node -ErrorAction SilentlyContinue)) {
 }
 
 // A bare `powershell.exe` resolves against the child's current directory first (same hijack
-// credentials.mjs pins against), so the settings command names the System32 binary outright.
+// credential-backends.mjs pins against), so the settings command names the System32 binary outright.
 function windowsShimCommand(shim, env) {
   const ps = env.SystemRoot
     ? path.join(env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')

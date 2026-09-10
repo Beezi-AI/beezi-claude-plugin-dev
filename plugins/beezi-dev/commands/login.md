@@ -43,6 +43,11 @@ requests. Tell the user the sign-in could not reach Beezi, that a sandboxed sess
 network-isolated, and to run /beezi:login outside the sandbox. Capturing a plan for a
 machine that never linked is worse than stopping.
 
+A failed sign-in never removes an existing Beezi authorization: the previous one stays on
+the machine until a new one has been stored. If the output says the machine's saved
+authorization needs consent again, or that the previous authorization is untouched, relay
+that verbatim — do not tell the user they have been logged out.
+
 Step 2 — capture the subscription plan for analytics (run this after a
 successful Step 1 link, OR when Step 1 reported the machine was already
 linked). Run EXACTLY this one command, unmodified:

@@ -14,12 +14,45 @@ The skill reaches the server over a `.mcp.json` stdio bridge (`scripts/mcp.mjs` 
 /plugin install beezi@beezi
 ```
 
+**Upgrading to 0.29.0: restart Claude Code once after the upgrade.** This release moves the
+credential store to a generation-based layout and changes how hooks load. The running session
+still holds the old modules in memory, so the first session started after the upgrade is the one
+that picks everything up; the plugin also prints this reminder once per machine. Nothing is lost
+if you do not — the machine stays linked either way — but authentication status and diagnostics
+only read correctly from a fresh session.
+
 ## Commands
 
 - `/beezi:login` — link this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores the credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes with the **history backfill** (see below) — re-running `/beezi:login` on an already-linked machine is the way to refresh the plan or resume an interrupted backfill.
 - `/beezi:me` — show this machine's link status (linked account).
 - `/beezi:logout` — unlink this machine: asks the portal to drop it and revoke its OAuth client, then deletes the stored credentials. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally.
 - `/beezi:track` — manually save analytics for the **current** session. Tracks whatever the session touched, the same way the automatic hooks do: work outside any repo (or in a repo with no `origin`) reports under a `local:<folder>` remote rather than being refused. Runs in a UserPromptSubmit hook the moment the command is submitted and shows its result as a system message — no model round trip, so it works even when the API is down (no credits, outage). Fails only if this machine is not linked, the session transcript cannot be found, or the server rejects the report. On success shows `analytics saved for <task-… | branch | folder>`.
+
+## Plugin diagnostics (`/beezi:telemetry`)
+
+Off until you turn it on, per machine. When on, the plugin records structured facts about **its
+own** failures — plugin and Claude Code versions, OS, which plugin file failed, and the
+authentication state at the time. Never your code, prompts, file paths, or repository names.
+
+Delivery does not require authorization. Reports go to a public ingestion route with no
+`Authorization`, no `Cookie`, no hostname and no OAuth-client header, from a small detached worker
+triggered by hook startup and completion, handled crashes, authentication state changes, MCP
+startup failures and login failures. That is deliberate: an OAuth failure is exactly the failure a
+token cannot report.
+
+Account correlation is a **separate** opt-in. With it, a random installation UUID is minted, bound
+to your account the next time authenticated activity succeeds, and attached to later reports so
+support can find yours. It is stored outside the credential store, survives refresh failures and
+reauthorization, and is discarded on `/beezi:logout`.
+
+- `/beezi:telemetry on` — anonymous diagnostics.
+- `/beezi:telemetry off` — everything off; pending reports and the installation ID are deleted.
+- `/beezi:telemetry correlate` — add the installation ID.
+- `/beezi:telemetry anonymous` — drop the installation ID and the reports carrying it, keeping
+  anonymous diagnostics on.
+
+Pending reports live in `~/.beezi/telemetry/`, are capped at 200 events, and expire locally after
+14 days.
 
 ## History backfill (runs inside `/beezi:login`)
 
