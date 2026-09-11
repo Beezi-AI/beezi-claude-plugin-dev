@@ -66,9 +66,7 @@ async function main() {
   }
 
   if (result.candidates === 0) {
-    const bits = [];
-    if (result.active > 0) bits.push(`${result.active} still active — they sync once they settle`);
-    console.log(`✓ Beezi: everything is already uploaded${bits.length ? ` (${bits.join(', ')})` : ''}.`);
+    console.log('✓ Beezi: everything is already uploaded.');
     return;
   }
 
@@ -108,7 +106,6 @@ async function main() {
   // no reports, so on a healthy repeat run it accounts for nearly every candidate.
   const parts = [`✓ Beezi: uploaded ${plural(result.sessionsImported, 'session')} (${plural(result.reportsStored, 'report')} stored).`];
   if (result.empty > 0) parts.push(`${result.empty} were already up to date.`);
-  if (result.active > 0) parts.push(`${result.active} still active — they sync once they settle.`);
   if (result.itemErrors > 0) {
     parts.push(`${plural(result.itemErrors, 'report')} skipped — their repository is not connected to Beezi.`);
   }
