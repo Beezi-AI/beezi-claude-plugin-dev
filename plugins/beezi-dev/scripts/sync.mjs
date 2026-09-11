@@ -78,10 +78,26 @@ async function main() {
         `${plural(result.candidates, 'session')} in ${plural(result.plannedChunks, 'request')} ` +
         '(dry run — nothing sent).',
     );
+    // Counted apart from `plannedReports`, which a fast-path session contributes nothing to: it
+    // sends one cost record and no reports, so the two numbers above would otherwise show a run
+    // uploading "0 reports across 300 sessions".
+    if (result.costStateSessions > 0) {
+      console.log(
+        `  ${plural(result.costStateSessions, 'session')} of those would go up as Claude's own cost record.`,
+      );
+    }
     return;
   }
 
-  if (result.reportsFailed > 0 && result.sessionsImported === 0) {
+  if ((result.reportsFailed > 0 || result.costStatesFailed > 0) && result.sessionsImported === 0) {
+    // A server that refuses the cost records outright is a version mismatch, not an unreachable
+    // one, and a retry against the same build fails identically. Say which it is.
+    if (result.costStatesUnsupported) {
+      fail(
+        'Beezi: upload stopped — this Beezi server does not accept Claude cost records yet. ' +
+          'Nothing was uploaded and nothing was lost; run /beezi:sync again after the portal update.',
+      );
+    }
     fail(
       `Beezi: upload stopped — could not reach the server (${result.lastError == null ? 'unknown error' : result.lastError}). ` +
         'Run /beezi:sync again to continue where it left off.',
@@ -96,8 +112,25 @@ async function main() {
   if (result.itemErrors > 0) {
     parts.push(`${plural(result.itemErrors, 'report')} skipped — their repository is not connected to Beezi.`);
   }
+  if (result.costStateSessions > 0) {
+    parts.push(
+      `${plural(result.costStateSessions, 'session')} used Claude's own cost record ` +
+        '(no repository or timeline detail added for those).',
+    );
+  }
   if (result.sessionsRejected > 0) {
     parts.push(`${plural(result.sessionsRejected, 'session')} were rejected by the server.`);
+  }
+  // Its own line: reportsFailed stays 0 for these sessions, so nothing else here would mention them.
+  if (result.costStatesUnsupported) {
+    parts.push(
+      `${plural(result.costStatesFailed, 'session')} could not be uploaded — this Beezi server ` +
+        'does not accept Claude cost records yet.',
+    );
+  } else if (result.costStatesFailed > 0) {
+    parts.push(
+      `${plural(result.costStatesFailed, 'session')} could not be delivered — run /beezi:sync again to retry.`,
+    );
   }
   if (result.reportsFailed > 0 || result.unattributed > 0 || result.permanentRejections > 0) {
     const reason = result.lastError ? ` (last error: ${result.lastError})` : '';
