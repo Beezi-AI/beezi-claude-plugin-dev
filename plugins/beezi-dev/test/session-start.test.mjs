@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { markAsked } from '../lib/telemetry-consent.mjs';
-import { runSessionStart as _runSessionStart } from '../lib/session-start.mjs';
+import { runSessionStart as _runSessionStart } from './account-hook-fixtures.mjs';
 
 // Same guard as checkpoint.test.mjs: runSessionStart's env resolution ends in an OS-environment
 // probe that spawns and reads the developer's own machine. Default this suite to a machine with
@@ -237,7 +237,7 @@ test('9. flushQueue is invoked — seeds a queue file, verifies it is POSTed and
   setHome(dir);
 
   // Seed a queue file
-  const queueDirPath = path.join(dir, 'queue');
+  const queueDirPath = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(queueDirPath, { recursive: true });
   const queuePayload = { segmentId: 'sess-flush:1-1', sessionId: 'sess-flush', remote: 'https://host/repo.git', branch: 'feature/task-1', token_total: 50 };
   const queueFile = path.join(queueDirPath, 'sess-flush_1-1.json');
@@ -724,7 +724,7 @@ test('16. whoami tracking fields are persisted to tracking.json before the flush
     gitImpl: fakeGit('https://host/repo.git'),
   });
 
-  const state = readTrackingState();
+  const state = readTrackingState('aaaaaaaa');
   assert.equal(state.trackingMode, 'backfill_only');
   assert.equal(state.tenantTier, 'audit');
   assert.equal(state.backfillCompleted, false);
@@ -908,7 +908,7 @@ test('account sync — a switched account forces the check-in', async (t) => {
   const { seen, syncCalls } = await startWithOutcome(t, 'sess-acct-switched', 'switched');
   assert.equal(seen.calls, 1, 'the reconcile must run exactly once per session start');
   assert.equal(syncCalls.length, 1);
-  assert.equal(syncCalls[0].token, 'tok');
+  assert.equal(syncCalls[0].token.token, 'tok');
   assert.equal(syncCalls[0].options.force, true);
   assert.equal(syncCalls[0].options.via, 'session-start');
 });

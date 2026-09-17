@@ -33,28 +33,28 @@ function makeHome(t) {
 test('1. fail-open: missing file, null mode and a corrupt file all allow tracking', (t) => {
   const home = makeHome(t);
 
-  assert.equal(isLiveTrackingAllowed(), true, 'missing file');
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), true, 'missing file');
 
-  writeTrackingState({ trackingMode: null });
-  assert.equal(isLiveTrackingAllowed(), true, 'null mode (pre-audit server)');
+  writeTrackingState('a1b2c3d4', { trackingMode: null });
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), true, 'null mode (pre-audit server)');
 
-  fs.writeFileSync(trackingStateFile(), '{ torn wri', 'utf-8');
-  assert.equal(readTrackingState(), null, 'corrupt file reads as absent');
-  assert.equal(isLiveTrackingAllowed(), true, 'corrupt file');
+  fs.writeFileSync(trackingStateFile('a1b2c3d4'), '{ torn wri', 'utf-8');
+  assert.equal(readTrackingState('a1b2c3d4'), null, 'corrupt file reads as absent');
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), true, 'corrupt file');
   assert.ok(home);
 });
 
 test('2. both audit modes block live tracking; live allows it', (t) => {
   makeHome(t);
 
-  writeTrackingState({ trackingMode: TrackingMode.BACKFILL_ONLY });
-  assert.equal(isLiveTrackingAllowed(), false);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.BACKFILL_ONLY });
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), false);
 
-  writeTrackingState({ trackingMode: TrackingMode.DISABLED });
-  assert.equal(isLiveTrackingAllowed(), false);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.DISABLED });
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), false);
 
-  writeTrackingState({ trackingMode: TrackingMode.LIVE });
-  assert.equal(isLiveTrackingAllowed(), true);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.LIVE });
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), true);
 });
 
 // The predicate the recurring cost-state sync gates on. Distinct from isLiveTrackingAllowed
@@ -63,24 +63,24 @@ test('2. both audit modes block live tracking; live allows it', (t) => {
 test('2b. only `disabled` counts as disabled — and it fails open', (t) => {
   makeHome(t);
 
-  assert.equal(isTrackingDisabled(), false, 'missing file');
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), false, 'missing file');
 
-  writeTrackingState({ trackingMode: null });
-  assert.equal(isTrackingDisabled(), false, 'null mode (pre-audit server)');
+  writeTrackingState('a1b2c3d4', { trackingMode: null });
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), false, 'null mode (pre-audit server)');
 
-  writeTrackingState({ trackingMode: TrackingMode.LIVE });
-  assert.equal(isTrackingDisabled(), false);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.LIVE });
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), false);
 
   // The case isLiveTrackingAllowed gets wrong for this purpose.
-  writeTrackingState({ trackingMode: TrackingMode.BACKFILL_ONLY });
-  assert.equal(isTrackingDisabled(), false);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.BACKFILL_ONLY });
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), false);
 
   // The case shouldBackfill gets wrong for this purpose.
-  writeTrackingState({ trackingMode: TrackingMode.LIVE, backfillCompleted: true });
-  assert.equal(isTrackingDisabled(), false);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.LIVE, backfillCompleted: true });
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), false);
 
-  writeTrackingState({ trackingMode: TrackingMode.DISABLED });
-  assert.equal(isTrackingDisabled(), true);
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.DISABLED });
+  assert.equal(isTrackingDisabled(readTrackingState('a1b2c3d4')), true);
 });
 
 // Mirrors the server's resolveTrackingMode: everything except disabled is offered the pull until
@@ -109,14 +109,14 @@ test('4. tracking.json lives at the root and survives pruneStale', (t) => {
   fs.mkdirSync(path.join(home, 'state'), { recursive: true });
   fs.mkdirSync(path.join(home, 'queue'), { recursive: true });
 
-  writeTrackingState({ trackingMode: TrackingMode.DISABLED });
+  writeTrackingState('a1b2c3d4', { trackingMode: TrackingMode.DISABLED });
   const fifteenDaysAgo = (Date.now() - 15 * 24 * 60 * 60 * 1000) / 1000;
-  fs.utimesSync(trackingStateFile(), fifteenDaysAgo, fifteenDaysAgo);
+  fs.utimesSync(trackingStateFile('a1b2c3d4'), fifteenDaysAgo, fifteenDaysAgo);
 
   pruneStale();
 
-  assert.ok(fs.existsSync(trackingStateFile()));
-  assert.equal(isLiveTrackingAllowed(), false);
+  assert.ok(fs.existsSync(trackingStateFile('a1b2c3d4')));
+  assert.equal(isLiveTrackingAllowed(readTrackingState('a1b2c3d4')), false);
 });
 
 // The state is machine-global but the server scope is per (tenant, user, tool): a state written
@@ -134,12 +134,12 @@ test('5. identity mismatch discards the state; missing identities stay permissiv
 test('6. recordWhoami persists the policy fields bound to the identity', (t) => {
   makeHome(t);
 
-  recordWhoami(
+  recordWhoami('a1b2c3d4',
     { valid: true, tenantTier: 'audit', trackingMode: TrackingMode.BACKFILL_ONLY, backfillCompleted: false },
     'client-1',
   );
 
-  const state = readTrackingState();
+  const state = readTrackingState('a1b2c3d4');
   assert.equal(state.trackingMode, TrackingMode.BACKFILL_ONLY);
   assert.equal(state.tenantTier, 'audit');
   assert.equal(state.backfillCompleted, false);
@@ -147,31 +147,31 @@ test('6. recordWhoami persists the policy fields bound to the identity', (t) => 
   assert.ok(state.fetchedAt);
 
   // An invalid or absent whoami must never overwrite the recorded state.
-  recordWhoami({ valid: false }, 'client-1');
-  recordWhoami(null, 'client-1');
-  assert.equal(readTrackingState().trackingMode, TrackingMode.BACKFILL_ONLY);
+  recordWhoami('a1b2c3d4', { valid: false }, 'client-1');
+  recordWhoami('a1b2c3d4', null, 'client-1');
+  assert.equal(readTrackingState('a1b2c3d4').trackingMode, TrackingMode.BACKFILL_ONLY);
 });
 
 test('7. markTrackingDisabled flips the mode and keeps the rest; markBackfillCompleted seals', (t) => {
   makeHome(t);
 
-  recordWhoami(
+  recordWhoami('a1b2c3d4',
     { valid: true, tenantTier: 'audit', trackingMode: TrackingMode.BACKFILL_ONLY, backfillCompleted: false },
     'client-1',
   );
-  markTrackingDisabled('server said so');
+  markTrackingDisabled('a1b2c3d4', 'server said so');
 
-  let state = readTrackingState();
+  let state = readTrackingState('a1b2c3d4');
   assert.equal(state.trackingMode, TrackingMode.DISABLED);
   assert.equal(state.tenantTier, 'audit');
   assert.equal(state.reason, 'server said so');
 
-  markBackfillCompleted();
-  state = readTrackingState();
+  markBackfillCompleted('a1b2c3d4');
+  state = readTrackingState('a1b2c3d4');
   assert.equal(state.backfillCompleted, true);
 
-  clearTrackingState();
-  assert.equal(readTrackingState(), null);
+  clearTrackingState('a1b2c3d4');
+  assert.equal(readTrackingState('a1b2c3d4'), null);
 });
 
 // The audit's "already tracked live" cutoff reads this stamp. It used to read the credentials
@@ -180,22 +180,22 @@ test('7. markTrackingDisabled flips the mode and keeps the rest; markBackfillCom
 test('8. markLinked stamps the link instant and survives later whoami refreshes', (t) => {
   makeHome(t);
 
-  assert.equal(linkedAtMs(readTrackingState()), null, 'no stamp before login');
+  assert.equal(linkedAtMs(readTrackingState('a1b2c3d4')), null, 'no stamp before login');
 
   const before = Date.now();
-  markLinked();
-  const stamped = linkedAtMs(readTrackingState());
+  markLinked('a1b2c3d4');
+  const stamped = linkedAtMs(readTrackingState('a1b2c3d4'));
   assert.ok(stamped >= before, 'stamp is the link instant');
 
-  recordWhoami(
+  recordWhoami('a1b2c3d4',
     { valid: true, tenantTier: 'pro', trackingMode: TrackingMode.LIVE, backfillCompleted: false },
     'client-1',
   );
-  assert.equal(linkedAtMs(readTrackingState()), stamped, 'whoami refresh keeps the stamp');
-  assert.equal(readTrackingState().trackingMode, TrackingMode.LIVE, 'verdict still wins');
+  assert.equal(linkedAtMs(readTrackingState('a1b2c3d4')), stamped, 'whoami refresh keeps the stamp');
+  assert.equal(readTrackingState('a1b2c3d4').trackingMode, TrackingMode.LIVE, 'verdict still wins');
 
-  markTrackingDisabled('server said so');
-  assert.equal(linkedAtMs(readTrackingState()), stamped, 'dark-mode flip keeps the stamp');
+  markTrackingDisabled('a1b2c3d4', 'server said so');
+  assert.equal(linkedAtMs(readTrackingState('a1b2c3d4')), stamped, 'dark-mode flip keeps the stamp');
 });
 
 test('9. linkedAtMs ignores a missing or unparseable stamp', () => {

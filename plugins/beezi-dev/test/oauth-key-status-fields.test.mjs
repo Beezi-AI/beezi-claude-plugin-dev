@@ -43,7 +43,7 @@ const FULL = Object.freeze({
 
 test('the whole answer is returned and cached, fingerprint included', async () => {
   await withTempHome(async () => {
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond(FULL),
     });
@@ -60,7 +60,7 @@ test('the whole answer is returned and cached, fingerprint included', async () =
     // was resolved for, instead of re-deriving it from a second env read.
     assert.deepEqual(status.fingerprint, { prefix: 'sk-ant-oat01', last4: 'yyyy', length: TOKEN.length });
 
-    const cached = readOauthKeyStatus();
+    const cached = readOauthKeyStatus('a1b2c3d4');
     assert.equal(cached.version, 3);
     assert.equal(cached.subscriptionType, 'max');
     assert.equal(cached.accountAnchored, true);
@@ -70,10 +70,10 @@ test('the whole answer is returned and cached, fingerprint included', async () =
 
 test('a cache hit replays every field, not just the plan', async () => {
   await withTempHome(async () => {
-    await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl: respond(FULL) });
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl: respond(FULL) });
 
     let calls = 0;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
     });
@@ -88,7 +88,7 @@ test('a cache hit replays every field, not just the plan', async () => {
 
 test('an older server that sends only the plan yields nulls, never undefined', async () => {
   await withTempHome(async () => {
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond({ known: true, subscriptionPlan: 'pro', needsAttention: false }),
     });
@@ -105,7 +105,7 @@ test('an older server that sends only the plan yields nulls, never undefined', a
 
 test('refresh: true bypasses a fresh cache', async () => {
   await withTempHome(async () => {
-    await fetchOauthKeyStatus('tok', {
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond({ known: false, needsAttention: false, subscriptionPlan: null }),
     });
@@ -113,14 +113,14 @@ test('refresh: true bypasses a fresh cache', async () => {
     // The check-in that registers this key has just landed, so the cached "unknown" is already
     // wrong. Believing it would report the key as unknown for another six hours.
     let calls = 0;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       refresh: true,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
     });
     assert.equal(calls, 1);
     assert.equal(status.known, true);
-    assert.equal(readOauthKeyStatus().known, true, 'the forced read replaces the cache too');
+    assert.equal(readOauthKeyStatus('a1b2c3d4').known, true, 'the forced read replaces the cache too');
   });
 });
 
@@ -139,7 +139,7 @@ test('a v1 cache file is discarded rather than half-read', async () => {
     );
 
     let calls = 0;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
     });
@@ -169,7 +169,7 @@ test('a v2 cache file is discarded too, so the planSource fix lands at once', as
     );
 
     let calls = 0;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
     });
@@ -180,14 +180,14 @@ test('a v2 cache file is discarded too, so the planSource fix lands at once', as
 
 test('clearOauthKeyStatus drops the answer so the next call asks again', async () => {
   await withTempHome(async () => {
-    await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl: respond(FULL) });
-    assert.notEqual(readOauthKeyStatus(), null);
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl: respond(FULL) });
+    assert.notEqual(readOauthKeyStatus('a1b2c3d4'), null);
 
-    assert.equal(clearOauthKeyStatus(), true);
-    assert.equal(readOauthKeyStatus(), null);
+    assert.equal(clearOauthKeyStatus('a1b2c3d4'), true);
+    assert.equal(readOauthKeyStatus('a1b2c3d4'), null);
 
     let calls = 0;
-    await fetchOauthKeyStatus('tok', {
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => FULL }; },
     });
@@ -197,7 +197,7 @@ test('clearOauthKeyStatus drops the answer so the next call asks again', async (
 
 test('clearing an absent cache is not an error — it is a cache', async () => {
   await withTempHome(async () => {
-    assert.equal(clearOauthKeyStatus(), false);
+    assert.equal(clearOauthKeyStatus('a1b2c3d4'), false);
   });
 });
 
@@ -213,7 +213,7 @@ test('clearing an absent cache is not an error — it is a cache', async () => {
 // the shape; this cannot.
 test('the returned answer carries every field session-start reads', async () => {
   await withTempHome(async () => {
-    const live = await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl: respond(FULL) });
+    const live = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl: respond(FULL) });
     // Read straight out of lib/session-start.mjs's key block.
     const consumed = [
       'known', 'needsAttention', 'subscriptionPlan', 'subscriptionType', 'rateLimitTier',
@@ -224,7 +224,7 @@ test('the returned answer carries every field session-start reads', async () => 
 
     // And again off the cache, which is a separately hand-written object literal — the exact
     // shape of duplication that let the two drift apart in the first place.
-    const cachedAnswer = await fetchOauthKeyStatus('tok', {
+    const cachedAnswer = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: () => { throw new Error('must be served from cache'); },
     });

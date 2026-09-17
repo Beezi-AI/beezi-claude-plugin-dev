@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runCheckpoint } from '../lib/checkpoint.mjs';
-import { runSessionStart } from '../lib/session-start.mjs';
+import { runCheckpoint } from './account-hook-fixtures.mjs';
+import { runSessionStart } from './account-hook-fixtures.mjs';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ function readState(homeDir, sessionId) {
 
 function queueFiles(homeDir) {
   try {
-    return fs.readdirSync(path.join(homeDir, 'queue'));
+    return fs.readdirSync(path.join(homeDir, 'accounts', 'aaaaaaaa', 'queue'));
   } catch {
     return [];
   }

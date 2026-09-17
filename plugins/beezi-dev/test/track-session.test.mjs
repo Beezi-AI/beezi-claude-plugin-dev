@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { trackSession } from '../lib/track-session.mjs';
+import { trackSession } from './account-hook-fixtures.mjs';
 
 const args = { sessionId: 's1', transcriptPath: '/t.jsonl', cwd: '/repo/task-42' };
 

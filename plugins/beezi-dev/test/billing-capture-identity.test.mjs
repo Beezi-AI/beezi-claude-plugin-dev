@@ -498,6 +498,8 @@ test('after a rotation the session start re-prices the machine from the portal',
   const message = await _runSessionStart({ session_id: 'sess-rotate', cwd: '/x' }, {
     env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_B },
     checkForUpdate: async () => null,
+    getDefaultKey: async () => 'a1b2c3d4',
+    listAccounts: async () => [{ key: 'a1b2c3d4', clientId: 'client-a', status: 'linked' }],
     getAccessToken: async () => 'tok',
     gitImpl: () => { throw new Error('not a git repo'); },
     fetchImpl: async (url) => {
@@ -540,6 +542,8 @@ test('a session start after logging into another account announces the switch', 
   const message = await _runSessionStart({ session_id: 'sess-switch', cwd: '/x' }, {
     env: {},
     checkForUpdate: async () => null,
+    getDefaultKey: async () => 'a1b2c3d4',
+    listAccounts: async () => [{ key: 'a1b2c3d4', clientId: 'client-a', status: 'linked' }],
     getAccessToken: async () => 'tok',
     gitImpl: () => { throw new Error('not a git repo'); },
     fetchImpl: async (url) => {

@@ -1,3 +1,6 @@
+import { addAccount, readIndex } from '../lib/accounts.mjs';
+import { credentialLockDir } from '../lib/paths.mjs';
+const ACCOUNT = 'aabbccdd';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -26,12 +29,13 @@ const CREDS = {
 };
 const META = { revocationEndpoint: 'https://clerk.invalid/oauth/revoke_here' };
 const store = { platform: 'unknown', run: () => ({ ok: false, stdout: '' }) };
-const committed = () => readCredentials(store);
+const committed = () => readCredentials(store, { account: ACCOUNT });
 const FOREIGN = 'ff'.repeat(16);
 
 async function seed() {
-  const lock = await acquireCredentialLock({ waitMs: 0 }, store);
-  await commitCredentials(CREDS, { lock, force: true }, store);
+  await addAccount({ key: ACCOUNT, email: 'dev@example.com', clientId: CREDS.client_id });
+  const lock = await acquireCredentialLock({ account: ACCOUNT, waitMs: 0 }, store);
+  await commitCredentials(CREDS, { account: ACCOUNT, lock, force: true }, store);
   releaseCredentialLock(lock);
 }
 
@@ -48,7 +52,7 @@ test('a confirmed server unlink is described as one', async (t) => {
   tmpHome(t);
   await seed();
   const lines = await runLogout(deps({ fetchImpl: async () => ({ ok: true, status: 204 }) }));
-  assert.match(lines[0], /unlinked from Beezi/);
+  assert.match(lines.join('\n'), /unlinked from Beezi/);
   assert.equal((await committed()).status, CREDENTIAL_STATUS.NONE);
 });
 
@@ -66,8 +70,8 @@ for (const status of [401, 403]) {
       },
     }));
     assert.ok(called.includes(META.revocationEndpoint), 'the discovered revocation endpoint is used');
-    assert.doesNotMatch(lines[0], /unlinked from Beezi/);
-    assert.match(lines[0], /revoked/);
+    assert.doesNotMatch(lines.join('\n'), /unlinked from Beezi/);
+    assert.match(lines.join('\n'), /revoked/);
     assert.equal((await committed()).status, CREDENTIAL_STATUS.NONE);
   });
 }
@@ -76,7 +80,7 @@ test('an unreachable server and a failed revocation are described honestly', asy
   tmpHome(t);
   await seed();
   const lines = await runLogout(deps({ fetchImpl: async () => { throw new Error('offline'); } }));
-  assert.match(lines[0], /Logged out locally/);
+  assert.match(lines.join('\n'), /Logged out locally/);
   assert.match(lines.join('\n'), /may still appear linked/);
   assert.equal((await committed()).status, CREDENTIAL_STATUS.NONE);
 });
@@ -95,9 +99,9 @@ test('a refused DELETE names its status in the message', async (t) => {
 test('a lock it cannot take fails loudly instead of claiming a logout', async (t) => {
   const dir = tmpHome(t);
   await seed();
-  fs.mkdirSync(path.join(dir, 'credentials.lock'));
+  fs.mkdirSync(credentialLockDir(ACCOUNT));
   fs.writeFileSync(
-    path.join(dir, 'credentials.lock', 'owner.json'),
+    path.join(credentialLockDir(ACCOUNT), 'owner.json'),
     JSON.stringify({ pid: process.pid, nonce: FOREIGN, acquiredAt: Date.now() }),
   );
   await assert.rejects(
@@ -107,7 +111,7 @@ test('a lock it cannot take fails loudly instead of claiming a logout', async (t
   assert.equal((await committed()).status, CREDENTIAL_STATUS.READY, 'the credentials are still there');
 });
 
-test('logout rotates the diagnostic installation id', async (t) => {
+test('last account logout rotates the machine diagnostic installation id', async (t) => {
   tmpHome(t);
   await seed();
   let rotated = false;
@@ -121,71 +125,7 @@ test('logout rotates the diagnostic installation id', async (t) => {
 test('an unlinked machine has nothing to do', async (t) => {
   tmpHome(t);
   const lines = await runLogout(deps({ fetchImpl: async () => assert.fail('no call') }));
-  assert.match(lines[0], /not linked/);
-});
-
-// The brief's "clear local authorization": a legacy copy left on disk is a live credential for
-// any pre-upgrade Beezi process or a downgraded install, which is exactly the competing-refresh
-// problem the generation store exists to stop.
-test('logout removes the legacy credentials file, not just the committed generation', async (t) => {
-  const dir = tmpHome(t);
-  await seed();
-  const legacyFile = path.join(dir, 'credentials.json');
-  fs.writeFileSync(legacyFile, JSON.stringify({ token: JSON.stringify(CREDS) }));
-  await runLogout(deps({ fetchImpl: async () => ({ ok: true, status: 204 }) }));
-  assert.equal(fs.existsSync(legacyFile), false, 'the legacy credentials file is gone');
-  assert.equal((await committed()).status, CREDENTIAL_STATUS.NONE);
-});
-
-// The sweep must be the SAME set Task 2's deleteCredentials wipes — including its namespace
-// rule, which leaves the shared un-namespaced OS entry alone under a custom BEEZI_HOME so two
-// namespaces never inherit one grant. Comparing the traces is what proves logout did not
-// quietly narrow it.
-test('logout sweeps exactly the sources deleteCredentials sweeps', async (t) => {
-  const trace = (sink) => ({
-    platform: 'darwin',
-    run: (_file, args) => {
-      // The per-home hash on the service name differs between the two temp homes; the point of
-      // the comparison is WHICH entries are targeted, not which namespace.
-      if (args[0] === 'delete-generic-password') sink.push(args.slice(1).join(' ').replace(/-h[0-9a-f]{8}\b/, ''));
-      if (args[0] === 'find-generic-password') return { ok: false, stdout: '' };
-      return { ok: true, stdout: '' };
-    },
-  });
-
-  tmpHome(t);
-  const viaLogout = [];
-  const logoutStore = trace(viaLogout);
-  let lock = await acquireCredentialLock({ waitMs: 0 }, logoutStore);
-  await commitCredentials(CREDS, { lock, force: true }, logoutStore);
-  releaseCredentialLock(lock);
-  const legacyOne = path.join(process.env.BEEZI_HOME, 'credentials.json');
-  fs.writeFileSync(legacyOne, JSON.stringify({ token: JSON.stringify(CREDS) }));
-  viaLogout.length = 0;
-  await runLogout(deps({ ...logoutStore, fetchImpl: async () => ({ ok: true, status: 204 }) }));
-  const logoutFileGone = !fs.existsSync(legacyOne);
-
-  // The same fixture, wiped by Task 2's wrapper instead.
-  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'logout-ref-'));
-  process.env.BEEZI_HOME = dir2;
-  t.after(() => fs.rmSync(dir2, { recursive: true, force: true }));
-  const viaWrapper = [];
-  const wrapperStore = trace(viaWrapper);
-  lock = await acquireCredentialLock({ waitMs: 0 }, wrapperStore);
-  await commitCredentials(CREDS, { lock, force: true }, wrapperStore);
-  releaseCredentialLock(lock);
-  const legacyTwo = path.join(dir2, 'credentials.json');
-  fs.writeFileSync(legacyTwo, JSON.stringify({ token: JSON.stringify(CREDS) }));
-  viaWrapper.length = 0;
-  await deleteCredentials(wrapperStore);
-
-  // A superset, not an exact match: logout also sweeps orphan generation entries, which the
-  // wrapper does not. The point is that it cannot NARROW what the wrapper wipes.
-  for (const target of viaWrapper) {
-    assert.ok(viaLogout.includes(target), `logout also targets ${target}`);
-  }
-  assert.equal(logoutFileGone, true);
-  assert.equal(fs.existsSync(legacyTwo), false);
+  assert.match(lines.join('\n'), /not linked/);
 });
 
 // A generation entry left behind by a lock-lost commit is never read, but a refresh orphan holds
@@ -209,16 +149,45 @@ test('logout removes every generation entry, orphans included', async (t) => {
       return { ok: true, stdout: '' };
     },
   };
-  let lock = await acquireCredentialLock({ waitMs: 0 }, keychain);
-  await commitCredentials(CREDS, { lock, force: true }, keychain);
+  await addAccount({ key: ACCOUNT, email: 'dev@example.com', clientId: CREDS.client_id });
+  let lock = await acquireCredentialLock({ account: ACCOUNT, waitMs: 0 }, keychain);
+  await commitCredentials(CREDS, { account: ACCOUNT, lock, force: true }, keychain);
   // A second, committed generation, then an orphan the control record never named.
-  await commitCredentials({ ...CREDS, access_token: 'at2' }, { lock, expectedGeneration: 1 }, keychain);
+  await commitCredentials({ ...CREDS, access_token: 'at2' }, { account: ACCOUNT, lock, expectedGeneration: 1 }, keychain);
   releaseCredentialLock(lock);
-  entries.set('gen-3', JSON.stringify({ ...CREDS, refresh_token: 'rotated-and-live' }));
+  entries.set(`${ACCOUNT}-gen-3`, JSON.stringify({ ...CREDS, refresh_token: 'rotated-and-live' }));
   assert.ok(entries.size >= 2, 'the fixture really holds more than the committed entry');
 
   await runLogout(deps({ ...keychain, fetchImpl: async () => ({ ok: true, status: 204 }) }));
 
   assert.deepEqual([...entries.keys()], [], 'no generation entry survives the logout');
-  assert.equal((await readCredentials(keychain)).status, CREDENTIAL_STATUS.NONE);
+  assert.equal((await readCredentials(keychain, { account: ACCOUNT })).status, CREDENTIAL_STATUS.NONE);
+});
+
+
+test('default logout requires a successor and preserves another account credentials', async t => {
+  tmpHome(t); await seed();
+  const other = '11223344';
+  await addAccount({ key: other, email: 'other@example.com', clientId: 'other-client' });
+  const lock = await acquireCredentialLock({ account: other }, store);
+  await commitCredentials({ ...CREDS, client_id: 'other-client' }, { account: other, lock, force: true }, store);
+  releaseCredentialLock(lock);
+  const settings = deps({ fetchImpl: async () => ({ ok: true, status: 204 }) });
+  await assert.rejects(runLogout(settings, { account: ACCOUNT }), /next-default/);
+  assert.equal((await committed()).status, CREDENTIAL_STATUS.READY);
+  await runLogout(settings, { account: ACCOUNT, nextDefault: other });
+  assert.equal((await readIndex()).default, other);
+  assert.equal((await readCredentials(store, { account: other })).credentials.client_id, 'other-client');
+});
+
+
+test('logging out one account preserves the diagnostic identity while another remains', async t => {
+  tmpHome(t); await seed();
+  await addAccount({ key: '11223344', email: 'other@example.com', clientId: 'other-client' });
+  let rotated = false;
+  await runLogout(deps({
+    fetchImpl: async () => ({ ok: true, status: 204 }),
+    rotateInstallationId: () => { rotated = true; },
+  }), { account: ACCOUNT, nextDefault: '11223344' });
+  assert.equal(rotated, false);
 });

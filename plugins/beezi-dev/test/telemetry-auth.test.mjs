@@ -49,7 +49,7 @@ test('repeated missing-credential notices fold into one event', async (t) => {
   const home = withHome(t);
   const { auth, states } = await load();
   const unlinked = { authState: states.AUTH_STATES.UNLINKED, reason: states.AUTH_REASONS.NO_CREDENTIALS };
-  for (let i = 0; i < 6; i++) auth.recordAuthResult(unlinked);
+  for (let i = 0; i < 6; i++) auth.recordAuthResult(unlinked, { account: 'a1b2c3d4' });
   const recorded = events(home);
   assert.equal(recorded.length, 1, 'every prompt must not produce another event');
   assert.equal(recorded[0].count, 6);
@@ -64,10 +64,10 @@ test('a state that has not actually changed is not recorded again after the queu
   const { recordLastAuthState } = await import('../lib/auth-markers.mjs?gate');
   const unlinked = { authState: states.AUTH_STATES.UNLINKED, reason: states.AUTH_REASONS.NO_CREDENTIALS };
 
-  auth.recordAuthResult(unlinked);
-  recordLastAuthState(unlinked.authState, unlinked.reason);   // what settle() does next
+  auth.recordAuthResult(unlinked, { account: 'a1b2c3d4' });
+  recordLastAuthState('a1b2c3d4', unlinked.authState, unlinked.reason);   // what settle() does next
   fs.rmSync(path.join(home, 'telemetry'), { recursive: true, force: true }); // the drain
-  auth.recordAuthResult(unlinked);
+  auth.recordAuthResult(unlinked, { account: 'a1b2c3d4' });
 
   assert.deepEqual(events(home), [], 'nothing changed, so there is nothing to report');
 

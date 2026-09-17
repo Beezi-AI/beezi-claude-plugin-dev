@@ -44,9 +44,9 @@ test('no setup token means no question — nothing is sent', async () => {
   await withTempHome(async () => {
     let called = false;
     const fetchImpl = async () => { called = true; return { status: 200, json: async () => PAYLOAD }; };
-    assert.equal(await fetchKeyResolution('tok', { env: {}, fetchImpl }), null);
-    assert.equal((await submitKeyPlan('tok', 'max_20x', { env: {}, fetchImpl })).ok, false);
-    assert.equal((await submitKeyLink('tok', 'a@b.com', { env: {}, fetchImpl })).ok, false);
+    assert.equal(await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: {}, fetchImpl }), null);
+    assert.equal((await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', { env: {}, fetchImpl })).ok, false);
+    assert.equal((await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', { env: {}, fetchImpl })).ok, false);
     assert.equal(called, false);
   });
 });
@@ -58,8 +58,8 @@ test('a setup token too short to fingerprint is not asked about', async () => {
       env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01' },
       fetchImpl: async () => { called = true; return { status: 200, json: async () => PAYLOAD }; },
     };
-    assert.equal(await fetchKeyResolution('tok', deps), null);
-    assert.equal((await submitKeyPlan('tok', 'max_20x', deps)).ok, false);
+    assert.equal(await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps), null);
+    assert.equal((await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', deps)).ok, false);
     assert.equal(called, false);
   });
 });
@@ -82,9 +82,9 @@ test('only the fingerprint travels — nested under key, and never the token its
       calls.push({ url, body: JSON.parse(opts.body), headers: opts.headers });
       return { status: 200, json: async () => PAYLOAD };
     };
-    await fetchKeyResolution('beezi-access-token', { env: envWithToken, fetchImpl });
-    await submitKeyPlan('beezi-access-token', 'max_20x', { env: envWithToken, fetchImpl });
-    await submitKeyLink('beezi-access-token', 'a@b.com', { env: envWithToken, fetchImpl });
+    await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'beezi-access-token' }, { env: envWithToken, fetchImpl });
+    await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'beezi-access-token' }, 'max_20x', { env: envWithToken, fetchImpl });
+    await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'beezi-access-token' }, 'a@b.com', { env: envWithToken, fetchImpl });
 
     assert.deepEqual(calls[0].body, { key: FINGERPRINT });
     assert.deepEqual(calls[1].body, { key: FINGERPRINT, plan: 'max_20x' });
@@ -99,7 +99,7 @@ test('only the fingerprint travels — nested under key, and never the token its
 
 test('the payload is normalized and junk entries are dropped', async () => {
   await withTempHome(async () => {
-    const payload = await fetchKeyResolution('tok', {
+    const payload = await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond({
         status: 'unlinked',
@@ -118,14 +118,14 @@ test('the payload is normalized and junk entries are dropped', async () => {
 
 test('an unrecognized status becomes null rather than being echoed as fact', async () => {
   await withTempHome(async () => {
-    const payload = await fetchKeyResolution('tok', { env: envWithToken, fetchImpl: respond({ status: 'whatever' }) });
+    const payload = await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl: respond({ status: 'whatever' }) });
     assert.equal(payload.status, null);
   });
 });
 
 test('an unreachable portal answers null, not "unresolved"', async () => {
   await withTempHome(async () => {
-    const payload = await fetchKeyResolution('tok', {
+    const payload = await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { throw new Error('offline'); },
     });
@@ -135,19 +135,19 @@ test('an unreachable portal answers null, not "unresolved"', async () => {
 
 test('an older server with no such route answers null', async () => {
   await withTempHome(async () => {
-    assert.equal(await fetchKeyResolution('tok', { env: envWithToken, fetchImpl: respond({}, 404) }), null);
+    assert.equal(await fetchKeyResolution({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl: respond({}, 404) }), null);
   });
 });
 
 test('a non-2xx surfaces the server’s own message, since the user acts on it', async () => {
   await withTempHome(async () => {
-    const plan = await submitKeyPlan('tok', 'max_20x', {
+    const plan = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', {
       env: envWithToken,
       fetchImpl: respond({ message: 'That plan is not available on your subscription.' }, 400),
     });
     assert.deepEqual(plan, { ok: false, message: 'That plan is not available on your subscription.' });
 
-    const link = await submitKeyLink('tok', 'a@b.com', {
+    const link = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', {
       env: envWithToken,
       fetchImpl: respond({ error: 'No such subscription.' }, 409),
     });
@@ -157,7 +157,7 @@ test('a non-2xx surfaces the server’s own message, since the user acts on it',
 
 test('a bad gateway with an unreadable body still reports the status, not a mystery', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyPlan('tok', 'max_20x', {
+    const result = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', {
       env: envWithToken,
       fetchImpl: async () => ({ status: 502, json: async () => { throw new SyntaxError('Unexpected token <'); } }),
     });
@@ -169,8 +169,8 @@ test('a bad gateway with an unreadable body still reports the status, not a myst
 test('a network throw is a clean failure, never an exception', async () => {
   await withTempHome(async () => {
     const fetchImpl = async () => { throw new Error('ECONNREFUSED'); };
-    const plan = await submitKeyPlan('tok', 'max_20x', { env: envWithToken, fetchImpl });
-    const link = await submitKeyLink('tok', 'a@b.com', { env: envWithToken, fetchImpl });
+    const plan = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', { env: envWithToken, fetchImpl });
+    const link = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', { env: envWithToken, fetchImpl });
     assert.equal(plan.ok, false);
     assert.match(plan.message, /Could not reach the Beezi server/);
     assert.equal(link.ok, false);
@@ -179,7 +179,7 @@ test('a network throw is a clean failure, never an exception', async () => {
 
 test('a plan write reports what the server stored', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyPlan('tok', 'max_20x', {
+    const result = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', {
       env: envWithToken,
       fetchImpl: respond({ status: 'resolved', subscriptionPlan: 'max_20x', planSource: 'manual' }),
     });
@@ -189,18 +189,18 @@ test('a plan write reports what the server stored', async () => {
 
 test('a plan write that echoes nothing back still reports the plan it wrote', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyPlan('tok', 'max_5x', { env: envWithToken, fetchImpl: respond({}) });
+    const result = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_5x', { env: envWithToken, fetchImpl: respond({}) });
     assert.deepEqual(result, { ok: true, subscriptionPlan: 'max_5x' });
   });
 });
 
 test('linked and claimed are different outcomes and must read differently', async () => {
   await withTempHome(async () => {
-    const linked = await submitKeyLink('tok', 'a@b.com', {
+    const linked = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', {
       env: envWithToken,
       fetchImpl: respond({ outcome: 'linked', targetAccountId: 'acc_1' }),
     });
-    const claimed = await submitKeyLink('tok', 'nobody@b.com', {
+    const claimed = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'nobody@b.com', {
       env: envWithToken,
       fetchImpl: respond({ outcome: 'claimed', targetAccountId: 'acc_2' }),
     });
@@ -221,7 +221,7 @@ test('linked and claimed are different outcomes and must read differently', asyn
 // 'claimed': it is the stronger claim, asserting a merge that may never have happened.
 test('an outcome the server did not name is reported as neither', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyLink('tok', 'a@b.com', { env: envWithToken, fetchImpl: respond({}) });
+    const result = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', { env: envWithToken, fetchImpl: respond({}) });
     assert.equal(result.ok, true);
     assert.equal(result.outcome, null);
     assert.equal(result.targetAccountId, null);
@@ -236,7 +236,7 @@ test('an outcome the server did not name is reported as neither', async () => {
 
 test('a silent 401 on a write points at /beezi:login instead of the status code', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyPlan('tok', 'max_20x', { env: envWithToken, fetchImpl: respond({}, 401) });
+    const result = await submitKeyPlan({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'max_20x', { env: envWithToken, fetchImpl: respond({}, 401) });
     assert.equal(result.ok, false);
     assert.match(result.message, /\/beezi:login/);
     assert.equal(/401/.test(result.message), false);
@@ -247,7 +247,7 @@ test('a silent 401 on a write points at /beezi:login instead of the status code'
 // rejection it made, and a re-link line would send the user to fix something that is not broken.
 test('a 401 that carries a message surfaces the message, not the re-link line', async () => {
   await withTempHome(async () => {
-    const result = await submitKeyLink('tok', 'a@b.com', {
+    const result = await submitKeyLink({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, 'a@b.com', {
       env: envWithToken,
       fetchImpl: respond({ message: 'That key belongs to another account.' }, 401),
     });

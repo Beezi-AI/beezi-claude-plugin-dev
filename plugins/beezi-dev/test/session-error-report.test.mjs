@@ -8,7 +8,7 @@ test('POSTs the payload to /sessions/errors with bearer auth', async () => {
   const res = await postSessionError(
     { sessionId: 's1', error: 'rate_limit', errorDetails: null,
       lastAssistantMessage: 'resets 4:30pm (Europe/Kiev)', occurredAt: '2026-07-08T10:00:00.000Z' },
-    'my-token',
+    { key: 'a1b2c3d4', clientId: 'client-a', token: 'my-token' },
     { fetchImpl },
   );
   assert.equal(res.reported, true);

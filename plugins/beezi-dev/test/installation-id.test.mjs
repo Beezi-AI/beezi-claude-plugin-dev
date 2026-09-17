@@ -54,7 +54,7 @@ test('an unbound installation stays anonymous until authentication succeeds', as
   id.ensureInstallationId();
   assert.equal(id.currentInstallationId(), null, 'never bound — events carry nothing');
 
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 200 }),
     recordIssue: () => true,
   });
@@ -65,7 +65,7 @@ test('the binding request carries exactly the two keys the route accepts', async
   withHome(t);
   const { binding } = await load('correlate');
   const calls = [];
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async (url, token, body) => { calls.push({ url, token, body }); return { status: 200 }; },
     recordIssue: () => true,
   });
@@ -77,14 +77,14 @@ test('the binding request carries exactly the two keys the route accepts', async
 test('a failed binding is retried later rather than abandoned', async (t) => {
   withHome(t);
   const { id, binding } = await load('correlate');
-  const first = await binding.bindInstallationIfNeeded('tok', {
+  const first = await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 503 }), recordIssue: () => true,
   });
   assert.equal(first.status, 'failed');
   const minted = id.readInstallationRecord().id;
   assert.equal(id.needsBinding(), true, 'still unbound, so the next authenticated activity tries again');
 
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 200 }), recordIssue: () => true,
   });
   assert.equal(id.readInstallationRecord().id, minted, 'a transport failure never rotates the id');
@@ -96,7 +96,7 @@ test('a 409 conflict generates a NEW id and never reassigns the old one', async 
   const { id, binding } = await load('correlate');
   const original = id.ensureInstallationId();
   const recorded = [];
-  const result = await binding.bindInstallationIfNeeded('tok', {
+  const result = await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 409 }),
     recordIssue: (event) => { recorded.push(event); return true; },
   });
@@ -111,7 +111,7 @@ test('a 409 conflict generates a NEW id and never reassigns the old one', async 
 test('a bound installation is re-asserted once the server binding goes stale', async (t) => {
   withHome(t);
   const { id, binding } = await load('correlate');
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 200 }), recordIssue: () => true, now: () => 0,
   });
   const week = 7 * 24 * 60 * 60 * 1000;
@@ -129,7 +129,7 @@ test('a queued event keeps the installation id it was queued under', async (t) =
   const { recordIssue } = await import(`../lib/telemetry.mjs${suffix}`);
   const { DIAGNOSTIC_CODES, DIAGNOSTIC_SOURCES } = await import(`../lib/telemetry-codes.mjs${suffix}`);
 
-  await binding.bindInstallationIfNeeded('tok', { postJsonImpl: async () => ({ status: 200 }), recordIssue: () => true });
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { postJsonImpl: async () => ({ status: 200 }), recordIssue: () => true });
   const bound = id.readInstallationRecord().id;
   recordIssue({ code: DIAGNOSTIC_CODES.HOOK_CRASH, source: DIAGNOSTIC_SOURCES.STOP, error: new Error('x') });
 
@@ -154,13 +154,13 @@ test('binding failures do not claim to come from the diagnostics worker', async 
   const events = [];
   const record = (event) => { events.push(event); return true; };
 
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => { throw new Error('offline'); }, recordIssue: record,
   });
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 409 }), recordIssue: record,
   });
-  await binding.bindInstallationIfNeeded('tok', {
+  await binding.bindInstallationIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
     postJsonImpl: async () => ({ status: 500 }), recordIssue: record,
   });
 

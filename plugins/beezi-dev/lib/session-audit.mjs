@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { sessionFor as _sessionFor } from './sessions.mjs';
 import { getAuthentication as _getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from './token.mjs';
 import { AUTH_STATES } from './auth-state.mjs';
 import { runCheckpoint as _runCheckpoint, flushQueue as _flushQueue } from './checkpoint.mjs';
@@ -31,17 +32,15 @@ import { fetchCoverage as _fetchCoverage } from './session-coverage.mjs';
 import { computeSessionTimeline as _computeSessionTimeline } from './session-timeline.mjs';
 import { postSessionError as _postSessionError } from './session-error-report.mjs';
 import { resolveSessionTranscript } from './transcript.mjs';
-import { getMachineClientId } from './machine-identity.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { whoami as _whoami } from './whoami.mjs';
-import { credentialsFile } from './paths.mjs';
 import {
   readTrackingState,
   matchesIdentity,
   isLiveTrackingAllowed,
   markBackfillCompleted,
   recordWhoami,
-  linkedAtMs as _linkedAtMs,
+  linkedAtMs,
   TrackingMode,
 } from './tracking.mjs';
 import { UserError } from './friendly-error.mjs';
@@ -101,27 +100,6 @@ function liveSessionId(env, deps) {
     const resolved = resolveImpl(process.cwd(), { env });
     if (resolved == null || resolved.sessionId == null) return null;
     return resolved.sessionId;
-  } catch {
-    return null;
-  }
-}
-
-// When live tracking is on, everything after the machine link was (or will be) tracked live —
-// re-sending it through the audit would re-segment the same transcript lines on different
-// boundaries once the per-session cursor has been pruned, and double-count the spend.
-//
-// The link instant comes from tracking.json, stamped by login. It used to be read as the
-// credentials file's mtime, which is written only by the DPAPI/plaintext fallbacks: on any machine
-// with a real credential store (CredMan, Keychain, secret-tool) the file does not exist, so this
-// returned null and the guard below never fired. The mtime stays as the fallback for links made
-// before the stamp existed — and it is the weaker signal, since token refresh rewrites it.
-function linkedAtMs(tracking, deps) {
-  const stamped = _linkedAtMs(tracking);
-  if (stamped != null) return stamped;
-  const statImpl = deps.statImpl == null ? ((p) => fs.statSync(p)) : deps.statImpl;
-  try {
-    const stats = statImpl(credentialsFile());
-    return stats.mtimeMs == null ? null : stats.mtimeMs;
   } catch {
     return null;
   }
@@ -268,35 +246,24 @@ export async function runAudit(deps = {}, options = {}) {
     lastError: null,
   };
 
-  // The typed accessor, not the collapsing wrapper. Backfill runs as the last step of
-  // /beezi:login, so it has a human in front of it and can wait the interactive budget for a
-  // refresh already in flight. More importantly it must tell "this machine has no saved login"
-  // apart from "the credential store did not answer in time" — reporting the second as the first
-  // is what sent a correctly linked user through three logins, a logout and a reinstall.
-  let token = null;
-  let auth = null;
-  if (deps.getAccessToken != null) {
-    token = await deps.getAccessToken().catch(() => null); // historical seam, honoured as-is
-  } else {
-    auth = await getAuthentication({}, { waitMs: INTERACTIVE_REFRESH_WAIT_MS }).catch(() => null);
-    token = auth != null && auth.authState === AUTH_STATES.READY ? auth.accessToken : null;
-  }
-  if (!token) {
-    const unlinked = auth == null || auth.authState === AUTH_STATES.UNLINKED;
-    result.reason = unlinked ? 'no-token' : 'auth-unavailable';
+  if (options.account == null) { result.reason = 'no-account'; return result; }
+  const key = options.account;
+  const auth = await getAuthentication(deps, { account: key, waitMs: INTERACTIVE_REFRESH_WAIT_MS }).catch(() => null);
+  if (auth == null || auth.authState !== AUTH_STATES.READY) {
+    result.reason = auth != null && auth.authState === AUTH_STATES.UNLINKED ? 'no-account' : 'auth-unavailable';
     result.authState = auth == null ? null : auth.authState;
     result.authReason = auth == null ? null : auth.reason;
     return result;
   }
-
-  // getAccessToken primed the machine client id — the binding key for the machine-global
-  // ledger and tracking cache (a new login mints a new id, so a workspace switch invalidates
-  // both instead of sealing the new tenant's pull empty).
-  const identity = getMachineClientId();
+  const sessionFor = deps.sessionFor == null ? _sessionFor : deps.sessionFor;
+  const resolved = await sessionFor(key, { ...deps, getAccessToken: async () => auth.accessToken }).catch(() => null);
+  if (resolved == null) { result.reason = 'no-account'; return result; }
+  const session = { ...resolved, token: auth.accessToken };
+  const identity = session.clientId;
   // Sync drops every gate that encodes one-timeness and every skip keyed on the session id alone;
   // the server's per-session line coverage decides what is already uploaded.
   const syncMode = options.mode === SYNC_MODE;
-  const tracking = readTracking();
+  const tracking = readTracking(key);
   const trackingValid = matchesIdentity(tracking, identity);
 
   // Fast path: the local cache already knows the pull is sealed. --force skips the LOCAL
@@ -312,11 +279,11 @@ export async function runAudit(deps = {}, options = {}) {
   // a reinstall never had them), and without this check a re-run would re-parse every
   // transcript only to be 403'd on its first chunk. Offline/old servers answer null — proceed;
   // the chunk-level ALREADY_COMPLETED guard still stands behind us.
-  const who = await whoamiImpl(token, { fetchImpl }).catch(() => null);
+  const who = await whoamiImpl(session, { fetchImpl }).catch(() => null);
   if (who != null && who.valid) {
-    try { recordWhoamiImpl(who, identity); } catch { /* best-effort */ }
+    try { recordWhoamiImpl(key, who, identity); } catch { /* best-effort */ }
     if (!syncMode && who.backfillCompleted === true) {
-      try { markCompleted(); } catch { /* best-effort */ }
+      try { markCompleted(key); } catch { /* best-effort */ }
       result.ok = true;
       result.reason = 'already-completed';
       result.upgradeAdvised = who.trackingMode != null && who.trackingMode !== TrackingMode.LIVE;
@@ -324,7 +291,7 @@ export async function runAudit(deps = {}, options = {}) {
     }
   }
 
-  const ledger = loadLedger(identity);
+  const ledger = loadLedger(key, identity);
   if (!syncMode && !options.force && isComplete(ledger)) {
     result.ok = true;
     result.reason = 'already-completed';
@@ -336,7 +303,7 @@ export async function runAudit(deps = {}, options = {}) {
   // narrow row inside a wider one — the one direction its containment supersede cannot dedupe, so
   // both would count in every SUM. Draining first also makes the coverage answer below current.
   if (syncMode) {
-    try { await flushQueue(token, { fetchImpl }); } catch { /* best-effort; coverage still bounds us */ }
+    try { await flushQueue(session, { fetchImpl }); } catch { /* best-effort; coverage still bounds us */ }
   }
 
   const live = liveSessionId(env, deps);
@@ -349,7 +316,7 @@ export async function runAudit(deps = {}, options = {}) {
   const liveMode = trackingValid && tracking != null && tracking.trackingMode === TrackingMode.LIVE;
   // Sync keeps post-link sessions in scope on purpose: a session whose hooks died after 200 of 900
   // lines is exactly what it exists to repair, and coverage stops it re-sending what already landed.
-  const linkCutoffMs = liveMode && !syncMode ? linkedAtMs(tracking, deps) : null;
+  const linkCutoffMs = liveMode && !syncMode ? linkedAtMs(tracking) : null;
   const activeCutoffMs = now() - ACTIVE_SESSION_WINDOW_MS;
 
   const candidates = [];
@@ -375,12 +342,12 @@ export async function runAudit(deps = {}, options = {}) {
 
   const finalize = async () => {
     if (!shouldFinalize(result, options)) return;
-    const sealed = await completeBackfill(token, { fetchImpl }, { timeoutMs: AUDIT_TIMEOUT_MS });
+    const sealed = await completeBackfill(session, { fetchImpl }, { timeoutMs: AUDIT_TIMEOUT_MS });
     if (sealed.completed || sealed.code === 'BACKFILL_ALREADY_COMPLETED') {
       result.finalized = true;
       markComplete(ledger);
-      try { saveLedger(ledger); } catch { /* best-effort */ }
-      try { markCompleted(); } catch { /* best-effort */ }
+      try { saveLedger(key, ledger); } catch { /* best-effort */ }
+      try { markCompleted(key); } catch { /* best-effort */ }
     } else {
       result.lastError = sealed.reason == null ? result.lastError : sealed.reason;
     }
@@ -420,7 +387,7 @@ export async function runAudit(deps = {}, options = {}) {
 
     const flushed = await flushBackfillChunks(
       batch,
-      token,
+      session,
       { fetchImpl },
       { timeoutMs: AUDIT_TIMEOUT_MS, endpoint: syncMode ? ENDPOINTS.sessionsSync : ENDPOINTS.sessionsBackfill },
     );
@@ -470,15 +437,15 @@ export async function runAudit(deps = {}, options = {}) {
       }
     }
     // Written per dispatch, not once at the end, so Ctrl-C keeps the progress made so far.
-    try { saveLedger(ledger); } catch { /* best-effort */ }
+    try { saveLedger(key, ledger); } catch { /* best-effort */ }
 
     if (flushed.halt) {
       result.halt = flushed.halt;
       halted = true;
       if (flushed.halt === BackfillHalt.ALREADY_COMPLETED) {
         markComplete(ledger);
-        try { saveLedger(ledger); } catch { /* best-effort */ }
-        try { markCompleted(); } catch { /* best-effort */ }
+        try { saveLedger(key, ledger); } catch { /* best-effort */ }
+        try { markCompleted(key); } catch { /* best-effort */ }
       }
       return;
     }
@@ -489,7 +456,7 @@ export async function runAudit(deps = {}, options = {}) {
         followups.delete(sessionId);
         if (!followup) return;
         for (const errorPayload of followup.sessionErrors) {
-          const { reported } = await postSessionError(errorPayload, token, { fetchImpl, timeoutMs: AUDIT_TIMEOUT_MS });
+          const { reported } = await postSessionError(errorPayload, session, { fetchImpl, timeoutMs: AUDIT_TIMEOUT_MS });
           if (reported) result.sessionErrors += 1;
         }
       });
@@ -615,7 +582,7 @@ export async function runAudit(deps = {}, options = {}) {
       .filter((entry) => !costStateBySession.has(entry.sessionId))
       .map((entry) => entry.sessionId);
     if (needsCursor.length > 0) {
-      coverage = await fetchCoverage(needsCursor, token, { fetchImpl });
+      coverage = await fetchCoverage(needsCursor, session, { fetchImpl });
       result.coverageKnown = coverage != null;
     } else {
       // Nothing needed a cursor, so the resume basis is trivially sound. Reporting this as
@@ -650,8 +617,9 @@ export async function runAudit(deps = {}, options = {}) {
           transcript_path: entry.transcriptPath,
           cwd: recordedCwd(entry.transcriptPath),
         },
-        { getAccessToken: async () => token, fetchImpl },
+        { fetchImpl },
         {
+          sessions: [session],
           sink: (payload) => reports.push(payload),
           skipFlush: true,
           collectSessionErrors: true,
@@ -709,7 +677,7 @@ export async function runAudit(deps = {}, options = {}) {
   // A run can hit unreadable transcripts and dispatch nothing at all, so this cannot ride on the
   // per-dispatch save — without it the retry marker is lost and the next run blocks again.
   if (unreadableDirty) {
-    try { saveLedger(ledger); } catch { /* best-effort */ }
+    try { saveLedger(key, ledger); } catch { /* best-effort */ }
   }
 
   result.ok = true;

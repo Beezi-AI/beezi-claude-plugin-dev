@@ -5,11 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   readCredentials, commitCredentials, CREDENTIAL_STATUS, UNAVAILABLE_REASONS,
-} from '../lib/credentials.mjs';
-import { acquireCredentialLock, releaseCredentialLock } from '../lib/credential-lock.mjs';
+} from './account-auth-fixture.mjs';
+import { acquireCredentialLock, releaseCredentialLock } from './account-auth-fixture.mjs';
 import { backendByName } from '../lib/credential-backends.mjs';
 import { credentialService } from '../lib/paths.mjs';
-import { getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from '../lib/token.mjs';
+import { getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from './account-auth-fixture.mjs';
 import { AUTH_STATES, AUTH_REASONS } from '../lib/auth-state.mjs';
 
 // A Windows read costs a PowerShell spawn (~1.1s of startup before it runs anything), and two
@@ -207,7 +207,7 @@ test('the derived get() reaches the same entry read() does — the legacy path u
   const entry = {
     service: credentialService(),
     account: 'gen-1',
-    target: `${credentialService()}/gen-1`,
+    target: `${credentialService()}/aabbccdd-gen-1`,
     file: 'unused',
   };
   const raw = b.get(entry);

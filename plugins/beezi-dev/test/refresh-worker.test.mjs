@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runRefreshWorker } from '../lib/refresh-worker.mjs';
+import { runRefreshWorker } from './account-auth-fixture.mjs';
 import { AUTH_REASONS } from '../lib/auth-state.mjs';
-import { readCredentials, commitCredentials, setCredentials } from '../lib/credentials.mjs';
-import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from '../lib/credential-lock.mjs';
-import { readInflight, readReauthMarker, readBackoff, recordInflight } from '../lib/auth-markers.mjs';
+import { readCredentials, commitCredentials, setCredentials } from './account-auth-fixture.mjs';
+import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from './account-auth-fixture.mjs';
+import { readInflight, readReauthMarker, readBackoff, recordInflight } from './account-auth-fixture.mjs';
 
 function tmpHome(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'refresh-worker-'));
@@ -42,7 +42,7 @@ async function seed(creds) {
 const committed = () => readCredentials(store);
 // The handle of whoever holds the lock now, rebuilt from the on-disk record — how a test stands
 // in for "another process moved the generation underneath the worker".
-const currentHolder = () => ({ ...readCredentialLockOwner() });
+const currentHolder = () => ({ account: 'aabbccdd', ...readCredentialLockOwner() });
 
 test('a successful refresh commits a new generation and releases the lock', async (t) => {
   tmpHome(t);
@@ -124,9 +124,9 @@ test('a worker whose generation has been superseded submits nothing', async (t) 
 test('a worker that cannot take the lock gets out of the way', async (t) => {
   const dir = tmpHome(t);
   await seed(FRESH);
-  fs.mkdirSync(path.join(dir, 'credentials.lock'));
+  fs.mkdirSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock'));
   fs.writeFileSync(
-    path.join(dir, 'credentials.lock', 'owner.json'),
+    path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock', 'owner.json'),
     JSON.stringify({ pid: process.pid, nonce: FOREIGN, acquiredAt: Date.now() }),
   );
   const r = await runRefreshWorker({ generation: 1 }, {

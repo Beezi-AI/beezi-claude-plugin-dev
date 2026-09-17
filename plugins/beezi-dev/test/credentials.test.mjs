@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getCredentials, setCredentials, deleteCredentials } from '../lib/credentials.mjs';
+import { getCredentials, setCredentials, deleteCredentials } from './account-auth-fixture.mjs';
 
 // Point BEEZI_HOME at a temp dir and restore it afterward.
 function tmpHome(t) {
@@ -20,7 +20,7 @@ function tmpHome(t) {
 
 // The pre-generation file (seeded by the legacy-read tests) and a generation entry of the store.
 const credsPath = (dir) => path.join(dir, 'credentials.json');
-const genPath = (dir, n) => path.join(dir, 'credentials', `gen-${n}.json`);
+const genPath = (dir, n) => path.join(dir, 'accounts', 'aabbccdd', 'credentials', `gen-${n}.json`);
 
 // Minimal valid credentials object; access_token varies per test for traceability.
 const creds = (accessToken) => ({
@@ -232,5 +232,5 @@ test('file store uses restricted 0600 permissions (posix only)', { skip: process
   await setCredentials(creds('x'), { platform: 'linux', run: secretToolRun(new Map(), false) });
   const mode = fs.statSync(genPath(dir, 1)).mode & 0o777;
   assert.equal(mode, 0o600);
-  assert.equal(fs.statSync(path.join(dir, 'credentials', 'control.json')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials', 'control.json')).mode & 0o777, 0o600);
 });

@@ -10,7 +10,7 @@ import {
   readCredentialLockOwner,
   OWNERLESS_GRACE_MS,
   START_TIME_TOLERANCE_S,
-} from '../lib/credential-lock.mjs';
+} from './account-auth-fixture.mjs';
 
 function tmpHome(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cred-lock-'));
@@ -24,7 +24,7 @@ function tmpHome(t) {
   return dir;
 }
 
-const lockDir = (dir) => path.join(dir, 'credentials.lock');
+const lockDir = (dir) => path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock');
 const ownerFile = (dir) => path.join(lockDir(dir), 'owner.json');
 
 // Owner nonces are 32 hex chars: a record with anything else is not a valid owner record.
@@ -33,7 +33,7 @@ const OTHER = 'ee'.repeat(16);
 
 // A lock left behind by some other holder: `pid` + `startedAt` decide liveness, `nonce` ownership.
 function plantLock(dir, { pid, nonce = FOREIGN, startedAt, ageMs = 0 } = {}) {
-  fs.mkdirSync(lockDir(dir));
+  fs.mkdirSync(lockDir(dir), { recursive: true });
   if (pid != null) {
     fs.writeFileSync(ownerFile(dir), JSON.stringify({ pid, nonce, startedAt, acquiredAt: Date.now() - ageMs }));
   }
@@ -199,7 +199,7 @@ test('two waiters reclaiming one dead owner: only one wins and the loser never s
 test('a tombstone holding a live record is not swept by the ownerless grace', async (t) => {
   const dir = tmpHome(t);
   const startedAt = 1_700_000_000;
-  fs.mkdirSync(lockDir(dir));
+  fs.mkdirSync(lockDir(dir), { recursive: true });
   // A reclaimer renamed a live owner away and stalled before renaming it back.
   fs.writeFileSync(
     path.join(lockDir(dir), `owner.${OTHER}.dead`),
@@ -209,7 +209,7 @@ test('a tombstone holding a live record is not swept by the ownerless grace', as
   fs.utimesSync(lockDir(dir), stamp, stamp);
   const deps = { processStartTime: () => startedAt };
   assert.equal(await acquireCredentialLock({ waitMs: 0 }, deps), null);
-  assert.equal(holdsCredentialLock({ pid: process.pid, nonce: OTHER }), true, 'the stalled holder keeps it');
+  assert.equal(holdsCredentialLock({ account: 'aabbccdd', pid: process.pid, nonce: OTHER }), true, 'the stalled holder keeps it');
 });
 
 test('readCredentialLockOwner is null when nothing holds the lock', (t) => {

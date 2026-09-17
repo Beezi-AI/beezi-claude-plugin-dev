@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, runAudit, shouldFinalize } from '../lib/session-audit.mjs';
+import { runAudit } from './account-hook-fixtures.mjs';
+import { parseArgs, shouldFinalize } from '../lib/session-audit.mjs';
 import { BackfillSessionStatus, BackfillHalt } from '../lib/audit-flush.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -140,7 +141,7 @@ test('5. bails without a token and never scans', async () => {
 
   const result = await runAudit(deps, {});
 
-  assert.equal(result.reason, 'no-token');
+  assert.equal(result.reason, 'no-account');
   assert.equal(result.ok, false);
 });
 
@@ -210,8 +211,7 @@ test('10. skips recently-active transcripts', async () => {
 // through the audit would re-segment on different boundaries and double-count.
 test('11. live-mode tenants only upload transcripts predating the machine link', async () => {
   const { deps } = makeDeps({
-    readTrackingStateImpl: () => ({ trackingMode: 'live', backfillCompleted: false }),
-    statImpl: () => ({ mtimeMs: 5_000 }),
+    readTrackingStateImpl: () => ({ trackingMode: 'live', backfillCompleted: false, linkedAt: new Date(5_000).toISOString() }),
     listTranscripts: () => [transcript('before-link', 1_000), transcript('after-link', 9_000)],
   });
 
@@ -912,7 +912,7 @@ const COST_BLOCK = {
   },
 };
 
-const SHELL = { startedAt: '2026-03-01T09:00:00.000Z', endedAt: '2026-03-01T11:00:00.000Z', cwd: 'C:/work/app' };
+const SHELL = { startedAt: '2026-03-01T09:00:00.000Z', endedAt: '2026-03-01T11:00:00.000Z', cwd: '/nonexistent-beezi-test/work/app' };
 
 // The default deps run the real readers, which find nothing for a fixture path. These stub them.
 function fastPathDeps(overrides = {}) {
@@ -992,7 +992,7 @@ test('39. a transcript with no cost-state block falls back to the segment path',
 // recover a span from its own timing anchors, is the better answer.
 test('40. a block whose transcript has no usable start falls back to the segment path', async () => {
   const { deps } = fastPathDeps({
-    readSessionShellImpl: () => ({ startedAt: null, endedAt: null, cwd: 'C:/work/app' }),
+    readSessionShellImpl: () => ({ startedAt: null, endedAt: null, cwd: '/nonexistent-beezi-test/work/app' }),
     runCheckpointImpl: async (input, _d, options) => {
       options.sink({ segmentId: `${input.session_id}:0-1`, sessionId: input.session_id, remote: 'r', branch: 'main' });
       return { enqueued: 1, flush: null, sessionErrors: [] };
@@ -1137,7 +1137,7 @@ test('47. a server that cannot take cost states holds the pull open', () => {
 test('48. an over-long remote is dropped rather than sent or truncated', async () => {
   const groupsSeen = [];
   const { deps } = fastPathDeps({
-    readSessionShellImpl: () => ({ ...SHELL, cwd: `C:/work/${'x'.repeat(600)}` }),
+    readSessionShellImpl: () => ({ ...SHELL, cwd: `/nonexistent-beezi-test/work/${'x'.repeat(600)}` }),
     flushBackfillChunksImpl: async (groups) => {
       groupsSeen.push(...groups);
       return flushResult({

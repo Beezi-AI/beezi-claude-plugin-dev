@@ -350,9 +350,9 @@ test('sync — first call POSTs, second identical call does not', async () => {
   await withTempHome(async () => {
     const calls = [];
     const deps = { fetchImpl: okFetch(calls), readBillingConfig: () => config(), env: {} };
-    const first = await syncAccountIfNeeded('tok', {}, deps);
+    const first = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, deps);
     assert.equal(first.synced, true);
-    const second = await syncAccountIfNeeded('tok', {}, deps);
+    const second = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, deps);
     assert.equal(second.synced, false);
     assert.equal(second.reason, 'unchanged');
     assert.equal(calls.length, 1);
@@ -365,7 +365,7 @@ test('sync — first call POSTs, second identical call does not', async () => {
 test('sync — `via` is provenance only and never reaches the wire body', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await syncAccountIfNeeded('tok', { via: 'session-start' }, {
+    await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { via: 'session-start' }, {
       fetchImpl: okFetch(calls),
       readBillingConfig: () => config(),
       env: {},
@@ -379,8 +379,8 @@ test('sync — force re-POSTs an unchanged payload', async () => {
   await withTempHome(async () => {
     const calls = [];
     const deps = { fetchImpl: okFetch(calls), readBillingConfig: () => config(), env: {} };
-    await syncAccountIfNeeded('tok', {}, deps);
-    const forced = await syncAccountIfNeeded('tok', { force: true }, deps);
+    await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, deps);
+    const forced = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { force: true }, deps);
     assert.equal(forced.synced, true);
     assert.equal(calls.length, 2);
   });
@@ -390,8 +390,8 @@ test('sync — a changed account POSTs without force (the switch path)', async (
   await withTempHome(async () => {
     const calls = [];
     const fetchImpl = okFetch(calls);
-    await syncAccountIfNeeded('tok', {}, { fetchImpl, readBillingConfig: () => config(), env: {} });
-    const res = await syncAccountIfNeeded('tok', {}, {
+    await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, { fetchImpl, readBillingConfig: () => config(), env: {} });
+    const res = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, {
       fetchImpl,
       readBillingConfig: () => config({ accountAnchor: { value: 'acc-uuid-2', source: 'account_uuid' } }),
       env: {},
@@ -407,11 +407,11 @@ test('sync — an unchanged payload re-POSTs once the 7-day TTL lapses', async (
     const calls = [];
     const base = { fetchImpl: okFetch(calls), readBillingConfig: () => config(), env: {} };
     const t0 = new Date('2026-08-01T00:00:00.000Z');
-    await syncAccountIfNeeded('tok', {}, { ...base, now: t0 });
+    await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, { ...base, now: t0 });
     const sixDays = new Date(t0.getTime() + 6 * 24 * 60 * 60 * 1000);
-    assert.equal((await syncAccountIfNeeded('tok', {}, { ...base, now: sixDays })).synced, false);
+    assert.equal((await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, { ...base, now: sixDays })).synced, false);
     const eightDays = new Date(t0.getTime() + 8 * 24 * 60 * 60 * 1000);
-    assert.equal((await syncAccountIfNeeded('tok', {}, { ...base, now: eightDays })).synced, true);
+    assert.equal((await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, { ...base, now: eightDays })).synced, true);
     assert.equal(calls.length, 2);
   });
 });
@@ -419,7 +419,7 @@ test('sync — an unchanged payload re-POSTs once the 7-day TTL lapses', async (
 test('sync — nothing known → no request at all', async () => {
   await withTempHome(async () => {
     const calls = [];
-    const res = await syncAccountIfNeeded('tok', { force: true }, {
+    const res = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { force: true }, {
       fetchImpl: okFetch(calls),
       readBillingConfig: () => null,
       env: {},
@@ -440,15 +440,15 @@ test('sync — no token → no request, no state written', async () => {
     });
     assert.equal(res.reason, 'no-token');
     assert.equal(calls.length, 0);
-    assert.equal(fs.existsSync(path.join(dir, 'account-sync.json')), false);
+    assert.equal(fs.existsSync(path.join(dir, 'accounts', 'a1b2c3d4', 'account-sync.json')), false);
   });
 });
 
-test('sync — the marker lives at the beeziHome ROOT, outside the pruned state/ dir', async () => {
+test('sync — the marker lives at the account directory root, outside the pruned state/ dir', async () => {
   await withTempHome(async (dir) => {
-    await syncAccountIfNeeded('tok', {}, { fetchImpl: okFetch([]), readBillingConfig: () => config(), env: {} });
-    const marker = path.join(dir, 'account-sync.json');
-    assert.ok(fs.existsSync(marker), 'account-sync.json must sit beside billing.json');
+    await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, { fetchImpl: okFetch([]), readBillingConfig: () => config(), env: {} });
+    const marker = path.join(dir, 'accounts', 'a1b2c3d4', 'account-sync.json');
+    assert.ok(fs.existsSync(marker), 'account-sync.json must sit outside the pruned directories');
     const state = JSON.parse(fs.readFileSync(marker, 'utf-8'));
     assert.equal(state.version, 1);
     assert.equal(typeof state.lastSyncedHash, 'string');
@@ -467,12 +467,12 @@ test('sync — a non-2xx leaves the marker untouched so the next trigger retries
       readBillingConfig: () => config(),
       env: {},
     };
-    const first = await syncAccountIfNeeded('tok', {}, deps);
+    const first = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, deps);
     assert.equal(first.synced, false);
     assert.equal(first.status, 404);
-    assert.equal(fs.existsSync(path.join(dir, 'account-sync.json')), false, 'a 404 must not seal the marker');
+    assert.equal(fs.existsSync(path.join(dir, 'accounts', 'a1b2c3d4', 'account-sync.json')), false, 'a 404 must not seal the marker');
     status = 200;
-    assert.equal((await syncAccountIfNeeded('tok', {}, deps)).synced, true);
+    assert.equal((await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, deps)).synced, true);
     assert.equal(calls.length, 2);
   });
 });
@@ -480,7 +480,7 @@ test('sync — a non-2xx leaves the marker untouched so the next trigger retries
 test('sync — a network failure never throws', async () => {
   await withTempHome(async () => {
     await assert.doesNotReject(async () => {
-      const res = await syncAccountIfNeeded('tok', { force: true }, {
+      const res = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { force: true }, {
         fetchImpl: async () => { throw new Error('ECONNREFUSED'); },
         readBillingConfig: () => config(),
         env: {},
@@ -494,7 +494,7 @@ test('sync — a network failure never throws', async () => {
 test('sync — a throwing billing reader degrades to the env-only payload', async () => {
   await withTempHome(async () => {
     const calls = [];
-    const res = await syncAccountIfNeeded('tok', {}, {
+    const res = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, {
       fetchImpl: okFetch(calls),
       readBillingConfig: () => { throw new Error('unreadable billing.json'); },
       env: { ANTHROPIC_API_KEY: SECRET },
@@ -507,7 +507,7 @@ test('sync — a throwing billing reader degrades to the env-only payload', asyn
 test('sync — an unwritable marker still reports the successful POST', async () => {
   await withTempHome(async () => {
     const calls = [];
-    const res = await syncAccountIfNeeded('tok', {}, {
+    const res = await syncAccountIfNeeded({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {}, {
       fetchImpl: okFetch(calls),
       readBillingConfig: () => config(),
       env: {},

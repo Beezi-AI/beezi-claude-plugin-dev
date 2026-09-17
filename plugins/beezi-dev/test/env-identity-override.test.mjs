@@ -13,9 +13,9 @@ test('BEEZI_ENV env var overrides the baked identity and namespaces every path',
   assert.equal(paths.envSuffix(), '-qa');
   assert.ok(paths.beeziHome().endsWith('.beezi-qa'));
   assert.ok(paths.credentialsFile().includes('.beezi-qa'));
-  assert.ok(paths.queueDir().includes('.beezi-qa'));
-  assert.ok(paths.credentialStoreDir().includes('.beezi-qa'));
-  assert.ok(paths.credentialLockDir().includes('.beezi-qa'));
+  assert.ok(paths.queueDir('a1b2c3d4').includes('.beezi-qa'));
+  assert.ok(paths.credentialStoreDir('a1b2c3d4').includes('.beezi-qa'));
+  assert.ok(paths.credentialLockDir('a1b2c3d4').includes('.beezi-qa'));
   assert.equal(paths.homeSuffix(), '', 'the default home carries no hash');
   assert.equal(paths.credentialService(), 'beezi-credentials-qa');
   assert.equal(paths.legacyCredentialService(), 'beezi-analytics-qa');

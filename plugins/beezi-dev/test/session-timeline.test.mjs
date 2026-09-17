@@ -601,7 +601,7 @@ test('empty transcript yields null (nothing to place on the axis)', (t) => {
 });
 
 test('postSessionTimeline guards missing fields and reports 2xx as success', async () => {
-  const missing = await postSessionTimeline({ periods: [] }, 'tok');
+  const missing = await postSessionTimeline({ periods: [] }, { key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' });
   assert.deepEqual(missing, { reported: false, reason: 'missing-fields' });
 
   const noToken = await postSessionTimeline({ sessionId: 's', periods: [] }, null);
@@ -609,7 +609,7 @@ test('postSessionTimeline guards missing fields and reports 2xx as success', asy
 
   let capturedUrl = null;
   const fetchImpl = async (url) => { capturedUrl = url; return { status: 200 }; };
-  const ok = await postSessionTimeline({ sessionId: 's', periods: [] }, 'tok', { fetchImpl });
+  const ok = await postSessionTimeline({ sessionId: 's', periods: [] }, { key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { fetchImpl });
   assert.equal(ok.reported, true);
   assert.equal(ok.status, 200);
   assert.ok(capturedUrl.endsWith('/sessions/timeline'));

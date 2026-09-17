@@ -22,7 +22,7 @@ function stateDir(homeDir) {
 }
 
 function queueDir(homeDir) {
-  return path.join(homeDir, 'queue');
+  return path.join(homeDir, 'accounts', 'a1b2c3d4', 'queue');
 }
 
 function writeFile(dir, name, content = '{}') {
@@ -50,7 +50,7 @@ test('1. prunes old state file (mtime 15 days ago)', (t) => {
   const p = writeFile(stateDir(homeDir), 'old.json');
   ageFile(p, fifteenDaysMs, now);
 
-  pruneStale(now);
+  pruneStale({ now, accountKeys: ['a1b2c3d4'] });
 
   assert.equal(fs.existsSync(p), false, 'old state file must be pruned');
 });
@@ -66,7 +66,7 @@ test('2. keeps recent state file (mtime now)', (t) => {
   const p = writeFile(stateDir(homeDir), 'fresh.json');
   ageFile(p, 0, now); // mtime = now
 
-  pruneStale(now);
+  pruneStale({ now, accountKeys: ['a1b2c3d4'] });
 
   assert.equal(fs.existsSync(p), true, 'recent state file must be kept');
 });
@@ -87,7 +87,7 @@ test('3. prunes old queue file, keeps recent queue file', (t) => {
   ageFile(oldFile, fifteenDaysMs, now);
   ageFile(recentFile, 0, now);
 
-  pruneStale(now);
+  pruneStale({ now, accountKeys: ['a1b2c3d4'] });
 
   assert.equal(fs.existsSync(oldFile), false, 'old queue file must be pruned');
   assert.equal(fs.existsSync(recentFile), true, 'recent queue file must be kept');
@@ -100,7 +100,7 @@ test('4. missing dirs → no throw', (t) => {
   setHome(homeDir);
   // Neither state/ nor queue/ exist in homeDir
 
-  assert.doesNotThrow(() => pruneStale(Date.now()));
+  assert.doesNotThrow(() => pruneStale({ now: Date.now() }));
 });
 
 // ─── test 5b: prunes old telemetry file ──────────────────────────────────────
@@ -123,7 +123,7 @@ test('5b. prunes old telemetry file, keeps recent one', (t) => {
   ageFile(oldFile, fifteenDaysMs, now);
   ageFile(recentFile, 0, now);
 
-  pruneStale(now);
+  pruneStale({ now, accountKeys: ['a1b2c3d4'] });
 
   assert.equal(fs.existsSync(oldFile), false, 'old telemetry file must be pruned');
   assert.equal(fs.existsSync(recentFile), true, 'recent telemetry file must be kept');
@@ -144,7 +144,7 @@ test('5. custom maxAgeMs boundary — 2-day-old file pruned at 1d, kept at 3d', 
   const pA = writeFile(stateDir(homeDirA), 'file-a.json');
   ageFile(pA, twoDaysMs, now);
 
-  pruneStale(now, oneDayMs);
+  pruneStale({ now, maxAgeMs: oneDayMs });
   assert.equal(fs.existsSync(pA), false, '2-day-old file pruned with maxAgeMs=1day');
 
   // ── scenario B: maxAgeMs = 3 days → file aged 2 days should be kept ──
@@ -154,6 +154,6 @@ test('5. custom maxAgeMs boundary — 2-day-old file pruned at 1d, kept at 3d', 
   const pB = writeFile(stateDir(homeDirB), 'file-b.json');
   ageFile(pB, twoDaysMs, now);
 
-  pruneStale(now, threeDaysMs);
+  pruneStale({ now, maxAgeMs: threeDaysMs });
   assert.equal(fs.existsSync(pB), true, '2-day-old file kept with maxAgeMs=3days');
 });
