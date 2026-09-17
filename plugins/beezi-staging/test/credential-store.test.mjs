@@ -10,8 +10,8 @@ import {
   readCredentials, commitCredentials, deleteCredentialGeneration,
   getCredentials, setCredentials, deleteCredentials,
   CREDENTIAL_STATUS, UNAVAILABLE_REASONS, COMMIT_STATUS, DELETE_STATUS,
-} from '../lib/credentials.mjs';
-import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from '../lib/credential-lock.mjs';
+} from './account-auth-fixture.mjs';
+import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from './account-auth-fixture.mjs';
 import { credentialService, legacyCredentialService, homeSuffix, envSuffix } from '../lib/paths.mjs';
 
 const OLD = {
@@ -53,8 +53,8 @@ function defaultHome(t) {
   return path.join(root, '.beezi');
 }
 
-const controlPath = (dir) => path.join(dir, 'credentials', 'control.json');
-const genPath = (dir, n) => path.join(dir, 'credentials', `gen-${n}.json`);
+const controlPath = (dir) => path.join(dir, 'accounts', 'aabbccdd', 'credentials', 'control.json');
+const genPath = (dir, n) => path.join(dir, 'accounts', 'aabbccdd', 'credentials', `gen-${n}.json`);
 const legacyPath = (dir) => path.join(dir, 'credentials.json');
 const readControl = (dir) => JSON.parse(fs.readFileSync(controlPath(dir), 'utf8'));
 
@@ -100,7 +100,7 @@ test('commit writes an immutable generation entry and publishes an atomic contro
   const r = await commitUnderLock(OLD, { expectedGeneration: null }, deps);
   assert.deepEqual(r, { status: COMMIT_STATUS.COMMITTED, generation: 1, backend: 'keychain', where: 'the macOS keychain' });
   assert.deepEqual(readControl(dir), { version: 1, generation: 1, backend: 'keychain', highestGeneration: 1, committedAt: readControl(dir).committedAt });
-  assert.equal(keychain.has(credentialService(), 'gen-1'), true);
+  assert.equal(keychain.has(credentialService(), 'aabbccdd-gen-1'), true);
   assert.equal(keychain.has(legacyCredentialService(), 'token'), false, 'legacy location untouched');
   assert.equal(fs.existsSync(legacyPath(dir)), false, 'legacy file untouched');
   const read = await readCredentials(deps);
@@ -189,7 +189,7 @@ test('a malformed committed OS value → unavailable (entry_malformed), never a 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(legacyPath(dir), JSON.stringify({ token: JSON.stringify(OLD) }));
   await setCredentials(NEW, deps);
-  keychain.set(credentialService(), 'gen-1', '{not json');
+  keychain.set(credentialService(), 'aabbccdd-gen-1', '{not json');
   const read = await readCredentials(deps);
   assert.deepEqual(read, { status: CREDENTIAL_STATUS.UNAVAILABLE, reason: UNAVAILABLE_REASONS.ENTRY_MALFORMED, generation: 1, backend: 'keychain' });
 });
@@ -249,7 +249,7 @@ test('a commit that loses the lock mid-write leaves its entry in place and publi
     return out;
   };
   assert.deepEqual(await commitCredentials(NEW, { lock, expectedGeneration: 1 }, deps), { status: COMMIT_STATUS.LOCK_LOST });
-  assert.equal(keychain.has(credentialService(), 'gen-2'), true, 'the orphan entry stays: a by-name delete could remove a new holder entry');
+  assert.equal(keychain.has(credentialService(), 'aabbccdd-gen-2'), true, 'the orphan entry stays: a by-name delete could remove a new holder entry');
   assert.equal(readControl(dir).generation, 1, 'nothing published');
   assert.equal((await readCredentials(deps)).credentials.access_token, OLD.access_token);
 });
@@ -278,7 +278,7 @@ test('force commit replaces whatever is committed (the login path)', async (t) =
 
 // ── legacy migration ─────────────────────────────────────────────────────────────────────────
 
-test('a single legacy keychain entry migrates into generation 1 and is left in place', async (t) => {
+test('a single legacy keychain entry migrates into generation 1 and retires the legacy entry', async (t) => {
   const dir = defaultHome(t);
   const keychain = fakeKeychain();
   const deps = { platform: 'darwin', run: keychain.run };
@@ -288,8 +288,8 @@ test('a single legacy keychain entry migrates into generation 1 and is left in p
   // legacy process may still be refreshing the old grant until Claude Code restarts.
   assert.deepEqual(read, { status: CREDENTIAL_STATUS.READY, generation: 1, backend: 'keychain', credentials: OLD, migrated: true });
   assert.equal(readControl(dir).generation, 1);
-  assert.equal(keychain.has(credentialService(), 'gen-1'), true);
-  assert.equal(keychain.has(legacyCredentialService(), 'token'), true, 'an older plugin may still be running');
+  assert.equal(keychain.has(credentialService(), 'aabbccdd-gen-1'), true);
+  assert.equal(keychain.has(legacyCredentialService(), 'token'), false, 'retired legacy grant cannot rotate twice');
   assert.equal(readCredentialLockOwner(), null, 'migration released the lock');
 });
 
@@ -308,7 +308,7 @@ test('the migrated flag is set only on the read that performed the migration', a
   assert.equal('migrated' in (await readCredentials(deps)), false);
 });
 
-test('a single legacy file migrates into generation 1 and is left in place', async (t) => {
+test('a single legacy file migrates into generation 1 and retires the legacy entry', async (t) => {
   const dir = defaultHome(t);
   const keychain = fakeKeychain();
   const deps = { platform: 'darwin', run: keychain.run };
@@ -318,7 +318,7 @@ test('a single legacy file migrates into generation 1 and is left in place', asy
   assert.equal(read.status, CREDENTIAL_STATUS.READY);
   assert.equal(read.backend, 'keychain', 'migrated into the preferred backend');
   assert.deepEqual(read.credentials, OLD);
-  assert.equal(fs.existsSync(legacyPath(dir)), true);
+  assert.equal(fs.existsSync(legacyPath(dir)), false);
 });
 
 test('identical legacy copies migrate; differing copies → storage_conflict, both preserved', async (t) => {
@@ -329,7 +329,9 @@ test('identical legacy copies migrate; differing copies → storage_conflict, bo
   keychain.set(legacyCredentialService(), 'token', OLD);
   fs.writeFileSync(legacyPath(dir), JSON.stringify({ token: JSON.stringify(OLD) }));
   assert.equal((await readCredentials(deps)).status, CREDENTIAL_STATUS.READY);
-  fs.unlinkSync(controlPath(dir)); // pretend the migration never happened, with copies that now differ
+  fs.unlinkSync(controlPath(dir)); // reset the fixture to a separate legacy installation
+  fs.unlinkSync(path.join(dir, 'credentials', 'control.json'));
+  keychain.set(legacyCredentialService(), 'token', OLD);
   fs.writeFileSync(legacyPath(dir), JSON.stringify({ token: JSON.stringify(NEW) }));
   const read = await readCredentials(deps);
   assert.deepEqual(read, { status: CREDENTIAL_STATUS.STORAGE_CONFLICT, sources: ['keychain', 'file'] });
@@ -380,8 +382,8 @@ test('migration waits for the namespace lock and reports unavailable (locked) wh
   const keychain = fakeKeychain();
   const deps = { platform: 'darwin', run: keychain.run, lockWaitMs: 30 };
   keychain.set(legacyCredentialService(), 'token', OLD);
-  fs.mkdirSync(path.join(dir, 'credentials.lock'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'credentials.lock', 'owner.json'), JSON.stringify({ pid: process.pid, nonce: 'ff'.repeat(16), acquiredAt: Date.now() }));
+  fs.mkdirSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock', 'owner.json'), JSON.stringify({ pid: process.pid, nonce: 'ff'.repeat(16), acquiredAt: Date.now() }));
   assert.deepEqual(await readCredentials(deps), { status: CREDENTIAL_STATUS.UNAVAILABLE, reason: UNAVAILABLE_REASONS.LOCKED });
   assert.equal(fs.existsSync(controlPath(dir)), false);
 });
@@ -400,13 +402,13 @@ test('setCredentials takes the namespace lock and throws instead of overwriting 
   const lock = await acquireCredentialLock({ waitMs: 0 }, fileOnly);
   try {
     await assert.rejects(() => setCredentials(OLD, { ...fileOnly, lockWaitMs: 30 }), /another Beezi process/);
-    assert.deepEqual(await readCredentials(fileOnly), { status: CREDENTIAL_STATUS.NONE });
+    assert.deepEqual(await readCredentials(fileOnly, { lock }), { status: CREDENTIAL_STATUS.NONE });
   } finally {
     releaseCredentialLock(lock);
   }
 });
 
-test('deleteCredentials clears the committed generation and the legacy copies (logout)', async (t) => {
+test('deleteCredentials clears only its account, leaving unrelated legacy copies untouched', async (t) => {
   const dir = defaultHome(t);
   const keychain = fakeKeychain();
   const deps = { platform: 'darwin', run: keychain.run };
@@ -416,8 +418,8 @@ test('deleteCredentials clears the committed generation and the legacy copies (l
   await setCredentials(NEW, deps);
   await deleteCredentials(deps);
   assert.deepEqual(await readCredentials(deps), { status: CREDENTIAL_STATUS.NONE });
-  assert.equal(keychain.has(credentialService(), 'gen-1'), false);
-  assert.equal(keychain.has(legacyCredentialService(), 'token'), false);
-  assert.equal(fs.existsSync(legacyPath(dir)), false);
+  assert.equal(keychain.has(credentialService(), 'aabbccdd-gen-1'), false);
+  assert.equal(keychain.has(legacyCredentialService(), 'token'), true);
+  assert.equal(fs.existsSync(legacyPath(dir)), true);
   assert.equal(readControl(dir).highestGeneration, 1);
 });

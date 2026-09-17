@@ -29,7 +29,7 @@ const RESOLVED = { known: true, accountLinked: true, subscriptionPlan: 'max_20x'
 test('no token means no question — the probe never fires', async () => {
   await withTempHome(async () => {
     let called = false;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: {},
       fetchImpl: async () => { called = true; return { status: 200, json: async () => NEEDS }; },
     });
@@ -41,7 +41,7 @@ test('no token means no question — the probe never fires', async () => {
 test('a token too short to fingerprint is not asked about', async () => {
   await withTempHome(async () => {
     let called = false;
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01' },
       fetchImpl: async () => { called = true; return { status: 200, json: async () => NEEDS }; },
     });
@@ -53,7 +53,7 @@ test('a token too short to fingerprint is not asked about', async () => {
 test('an unresolved key reports needsAttention and only the fingerprint travels', async () => {
   await withTempHome(async () => {
     const calls = [];
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async (url, opts) => {
         calls.push({ url, body: JSON.parse(opts.body) });
@@ -77,11 +77,11 @@ test('the answer is cached, so a second start asks nothing', async () => {
       env: envWithToken,
       fetchImpl: async () => { calls += 1; return { status: 200, json: async () => NEEDS }; },
     };
-    await fetchOauthKeyStatus('tok', deps);
-    const second = await fetchOauthKeyStatus('tok', deps);
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps);
+    const second = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps);
     assert.equal(calls, 1);
     assert.equal(second.needsAttention, true);
-    assert.equal(readOauthKeyStatus().fingerprint.last4, 'yyyy');
+    assert.equal(readOauthKeyStatus('a1b2c3d4').fingerprint.last4, 'yyyy');
   });
 });
 
@@ -90,10 +90,10 @@ test('rotating the token discards the previous key’s verdict rather than agein
     let calls = 0;
     const bodies = [NEEDS, RESOLVED];
     const fetchImpl = async () => ({ status: 200, json: async () => bodies[calls++] });
-    await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl });
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl });
     // A different token: same prefix, different last4 — which is the only thing that discriminates.
     const rotated = { CLAUDE_CODE_OAUTH_TOKEN: `sk-ant-oat01-${'z'.repeat(40)}` };
-    const after = await fetchOauthKeyStatus('tok', { env: rotated, fetchImpl });
+    const after = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: rotated, fetchImpl });
     assert.equal(calls, 2, 'the new key must be asked about, not answered from the old one');
     assert.equal(after.needsAttention, false);
   });
@@ -104,9 +104,9 @@ test('a stale cache is re-asked', async () => {
     let calls = 0;
     const fetchImpl = async () => { calls += 1; return { status: 200, json: async () => NEEDS }; };
     const then = new Date('2026-08-01T00:00:00.000Z');
-    await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl, now: then });
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl, now: then });
     const later = new Date(then.getTime() + 7 * 60 * 60 * 1000);
-    await fetchOauthKeyStatus('tok', { env: envWithToken, fetchImpl, now: later });
+    await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { env: envWithToken, fetchImpl, now: later });
     assert.equal(calls, 2);
   });
 });
@@ -115,7 +115,7 @@ test('a stale cache is re-asked', async () => {
 // cannot reach the portal must never be told its billing is unresolved.
 test('an unreachable portal answers null, not needsAttention', async () => {
   await withTempHome(async () => {
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: async () => { throw new Error('offline'); },
     });
@@ -125,18 +125,18 @@ test('an unreachable portal answers null, not needsAttention', async () => {
 
 test('an older server with no such route answers null and caches nothing', async () => {
   await withTempHome(async () => {
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond({}, 404),
     });
     assert.equal(status, null);
-    assert.equal(readOauthKeyStatus(), null);
+    assert.equal(readOauthKeyStatus('a1b2c3d4'), null);
   });
 });
 
 test('a resolved key reports no attention needed', async () => {
   await withTempHome(async () => {
-    const status = await fetchOauthKeyStatus('tok', {
+    const status = await fetchOauthKeyStatus({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       env: envWithToken,
       fetchImpl: respond(RESOLVED),
     });

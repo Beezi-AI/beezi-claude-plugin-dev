@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { markAsked } from '../lib/telemetry-consent.mjs';
-import { runSessionStart } from '../lib/session-start.mjs';
+import { runSessionStart } from './account-hook-fixtures.mjs';
 
 // The update nudge is appended at all three of runSessionStart's return points. These tests drive
 // that wiring through `deps.checkForUpdate` only — lib/update-check.mjs itself is covered by

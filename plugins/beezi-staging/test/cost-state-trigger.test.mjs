@@ -8,6 +8,7 @@ function makeDeps(overrides) {
   return {
     spawned, attempts,
     deps: {
+      readAccountsImpl: () => ({ accounts: [{ key: 'a1b2c3d4', status: 'linked' }] }),
       readState: () => null,
       markAttemptImpl: (ms) => attempts.push(ms),
       spawnImpl: (script) => { spawned.push(script); return true; },
@@ -48,7 +49,7 @@ test('never throws when the state file is unreadable', () => {
 // Also the post-logout state: logout deletes the credentials AND clears tracking.json, so both
 // signals disappear together.
 test('does not spawn for a machine that was never linked', () => {
-  const { spawned, deps } = makeDeps({ existsSyncImpl: () => false, readTrackingImpl: () => null });
+  const { spawned, deps } = makeDeps({ readAccountsImpl: () => ({ accounts: [] }), existsSyncImpl: () => false, readTrackingImpl: () => null });
   assert.strictEqual(maybeSpawnCostStateSync(deps), false);
   assert.strictEqual(spawned.length, 0);
 });

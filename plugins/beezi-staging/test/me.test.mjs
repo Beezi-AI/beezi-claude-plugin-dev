@@ -1,4 +1,11 @@
-import { test } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { addAccount } from '../lib/accounts.mjs';
+let previous, home;
+beforeEach(async () => { previous = process.env.BEEZI_HOME; home = fs.mkdtempSync(path.join(os.tmpdir(), 'me-test-')); process.env.BEEZI_HOME = home; await addAccount({ key: 'aabbccdd', email: 'dev@acme.com', clientId: 'cid' }); });
+afterEach(() => { if (previous === undefined) delete process.env.BEEZI_HOME; else process.env.BEEZI_HOME = previous; fs.rmSync(home, { recursive: true, force: true }); });
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { runMe } from '../lib/me.mjs';
 import { PROBE_OUTCOMES } from '../lib/whoami.mjs';
@@ -13,7 +20,7 @@ test('me — a linked machine prints its account', async () => {
       identity: { name: 'Dev', email: 'dev@acme.com', tenantTier: 'pro', trackingMode: 'live', backfillCompleted: true },
     }),
   });
-  assert.match(lines[0], /this machine is linked/);
+  assert.match(lines.join('\n'), /this machine is linked/);
   assert.match(lines.join('\n'), /dev@acme\.com/);
 });
 
@@ -37,7 +44,7 @@ test('me — a refresh in flight says to try again in a moment', async () => {
 
 test('me — only a missing authorization is not linked', async () => {
   const lines = await runMe({ getAuthentication: auth('unlinked', 'no_credentials') });
-  assert.match(lines[0], /not linked/);
+  assert.match(lines.join('\n'), /not linked/);
 });
 
 test('me — a rejected grant asks for reauthorization and says nothing was removed', async () => {
@@ -90,7 +97,7 @@ test('me — a 401 is retried exactly once behind a forced refresh', async () =>
     }),
   });
   assert.equal(refreshes, 1);
-  assert.match(lines[0], /this machine is linked/);
+  assert.match(lines.join('\n'), /this machine is linked/);
 });
 
 // The three reasons that existed in the vocabulary but never travelled.

@@ -69,7 +69,7 @@ test('MAX_COST_STATE_ITEMS is 30', () => {
 
 test('uploads every transcript that has a block', async () => {
   const { posted, deps } = makeDeps();
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.withBlock, 2);
   assert.strictEqual(result.stored, 2);
   assert.strictEqual(posted.length, 1);
@@ -81,13 +81,13 @@ test('skips transcripts older than the scan floor', async () => {
     readState: () => ({ version: 1, lastScanAt: new Date(RECENT - 1000).toISOString() }),
     listTranscripts: () => [transcript('old', OLD), transcript('new', RECENT)],
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.candidates, 1);
 });
 
 test('skips a transcript that is still being written', async () => {
   const { deps } = makeDeps({ listTranscripts: () => [transcript('live', NOW - 60_000)] });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.candidates, 0);
 });
 
@@ -102,7 +102,7 @@ test('a transcript deferred as still-being-written is picked up by the next scan
     listTranscripts: () => [transcript('live', DEFERRED)],
     markSuccessImpl: (ms) => { stamped = ms; },
   });
-  const firstResult = await runCostStateScan(first.deps);
+  const firstResult = await runCostStateScan(first.deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(firstResult.candidates, 0, 'deferred inside the active window');
   assert.ok(stamped != null, 'a pass with nothing to send still records progress');
 
@@ -112,14 +112,14 @@ test('a transcript deferred as still-being-written is picked up by the next scan
     readState: () => ({ version: 1, lastScanAt: new Date(stamped).toISOString() }),
     now: () => NOW + 60 * 60 * 1000,
   });
-  const secondResult = await runCostStateScan(second.deps);
+  const secondResult = await runCostStateScan(second.deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(secondResult.candidates, 1, 'the deferred transcript must survive the floor');
   assert.strictEqual(secondResult.stored, 1);
 });
 
 test('skips a transcript with no block without failing the run', async () => {
   const { deps } = makeDeps({ readBlock: (p) => (p.indexOf('/a.') >= 0 ? null : block('b', 1)) });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.withBlock, 1);
   assert.strictEqual(result.stored, 1);
 });
@@ -128,14 +128,14 @@ test('skips a block whose modelUsage is empty', async () => {
   const { deps } = makeDeps({
     readBlock: () => ({ type: 'cost-state', sessionId: 'a', totalCostUSD: 0, modelUsage: {}, hasUnknownModelCost: false }),
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.sent, 0);
 });
 
 test('marks progress on a fully clean run', async () => {
   let marked = 0;
   const { deps } = makeDeps({ markSuccessImpl: () => { marked += 1; } });
-  await runCostStateScan(deps);
+  await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(marked, 1);
 });
 
@@ -147,7 +147,7 @@ test('a 404 halts, stamps the ATTEMPT and never marks progress', async () => {
     markAttemptImpl: () => { attempts += 1; },
     postJsonImpl: async () => response(404, {}),
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.halted, 'unsupported-server');
   // Backs off for the hour, but the mtime floor must NOT advance — the API may exist next hour and
   // these transcripts' mtimes will never change again.
@@ -164,7 +164,7 @@ test('an unknown-session rejection blocks the progress stamp', async () => {
       errors: [{ sessionId: 'a', reason: 'unknown session' }],
     }),
   });
-  await runCostStateScan(deps);
+  await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   // /beezi:sync may create that session later, and its transcript mtime will not move — so the
   // floor must not skip past it.
   assert.strictEqual(progress, 0);
@@ -180,9 +180,9 @@ test('retries once on 401 with a forced token refresh', async () => {
       return call === 1 ? response(401, {}) : response(200, { stored: 2, skipped: 0, errors: [] });
     },
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.stored, 2);
-  assert.deepStrictEqual(refreshes[1], { forceRefresh: true });
+  assert.deepStrictEqual(refreshes[0], { account: 'a1b2c3d4', forceRefresh: true });
 });
 
 test('a 401 whose refresh fails halts the whole run instead of posting untokened', async () => {
@@ -196,7 +196,7 @@ test('a 401 whose refresh fails halts the whole run instead of posting untokened
     getAccessToken: async (d, options) => (options != null && options.forceRefresh ? null : 'token'),
     postJsonImpl: async () => { calls += 1; return response(401, {}); },
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.halted, 'not-linked');
   // One chunk attempted, then stopped: the second chunk is never posted with a null token.
   assert.strictEqual(calls, 1);
@@ -206,7 +206,7 @@ test('a 401 whose refresh fails halts the whole run instead of posting untokened
 
 test('does nothing at all without a token', async () => {
   const { posted, deps } = makeDeps({ getAccessToken: async () => null });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: null } });
   assert.strictEqual(result.halted, 'not-linked');
   assert.strictEqual(posted.length, 0);
 });
@@ -225,7 +225,7 @@ test('a failing chunk does not stop the remaining chunks, but does block progres
       return response(200, { stored: body.sessions.length, skipped: 0, errors: [] });
     },
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.chunks, 2);
   assert.strictEqual(result.stored, 10);
   assert.strictEqual(progress, 0);
@@ -233,7 +233,7 @@ test('a failing chunk does not stop the remaining chunks, but does block progres
 
 test('a non-2xx is never counted as stored', async () => {
   const { deps } = makeDeps({ postJsonImpl: async () => response(500, {}) });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.stored, 0);
 });
 
@@ -244,7 +244,7 @@ test('a 2xx with an unreadable body is not progress', async () => {
     // What Express answers with when it rejects a body before the Nest router sees it.
     postJsonImpl: async () => ({ status: 200, ok: true, text: async () => '<html>413</html>' }),
   });
-  const result = await runCostStateScan(deps);
+  const result = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.strictEqual(result.stored, 0);
   assert.strictEqual(progress, 0);
 });
@@ -254,7 +254,7 @@ test('the wire item carries the API field names, not the block camelCase', async
     listTranscripts: () => [transcript('a', RECENT)],
     readBlock: () => block('a', 0.25),
   });
-  await runCostStateScan(deps);
+  await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   const item = posted[0].sessions[0];
   assert.deepStrictEqual(Object.keys(item).sort(), [
     'captured_at', 'has_unknown_model_cost', 'models', 'sessionId', 'total_cost_usd',
@@ -274,13 +274,13 @@ test('a 403 TRACKING_DISABLED halts the run, records the verdict and stops posti
   const { deps } = makeDeps({
     listTranscripts: manyTranscripts,
     readBlock: () => block('x', 1),
-    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    markTrackingDisabledImpl: (key, reason) => disabled.push(reason),
     postJsonImpl: async () => {
       posts += 1;
       return response(403, { code: 'TRACKING_DISABLED', message: 'workspace is in audit mode' });
     },
   });
-  const res = await runCostStateScan(deps);
+  const res = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.equal(res.halted, 'tracking-disabled');
   assert.equal(res.clean, false);
   assert.equal(res.stored, 0);
@@ -298,7 +298,7 @@ test('a 403 TRACKING_DISABLED stamps the attempt, never progress', async () => {
     markAttemptImpl: () => { attempts += 1; },
     postJsonImpl: async () => response(403, { code: 'TRACKING_DISABLED', message: null }),
   });
-  await runCostStateScan(deps);
+  await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.equal(success, 0);
   assert.equal(attempts, 1);
 });
@@ -311,10 +311,10 @@ test('a code-less 403 halts without recording a tracking opt-out', async () => {
   const { deps } = makeDeps({
     listTranscripts: manyTranscripts,
     readBlock: () => block('x', 1),
-    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    markTrackingDisabledImpl: (key, reason) => disabled.push(reason),
     postJsonImpl: async () => { posts += 1; return response(403, { message: 'seat revoked' }); },
   });
-  const res = await runCostStateScan(deps);
+  const res = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.equal(res.halted, 'forbidden');
   assert.equal(res.clean, false);
   assert.equal(res.chunks, 1);
@@ -329,7 +329,7 @@ test('a 403 on the 401 retry is handled as a 403', async () => {
   let calls = 0;
   const { deps } = makeDeps({
     getAccessToken: async () => 'token',
-    markTrackingDisabledImpl: (reason) => disabled.push(reason),
+    markTrackingDisabledImpl: (key, reason) => disabled.push(reason),
     postJsonImpl: async () => {
       calls += 1;
       return calls === 1
@@ -337,7 +337,7 @@ test('a 403 on the 401 retry is handled as a 403', async () => {
         : response(403, { code: 'TRACKING_DISABLED', message: 'audit mode' });
     },
   });
-  const res = await runCostStateScan(deps);
+  const res = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.equal(res.halted, 'tracking-disabled');
   assert.equal(res.clean, false);
   assert.deepEqual(disabled, ['audit mode']);
@@ -349,7 +349,7 @@ test('a failing tracking write still halts cleanly', async () => {
     markTrackingDisabledImpl: () => { throw new Error('EACCES'); },
     postJsonImpl: async () => response(403, { code: 'TRACKING_DISABLED', message: null }),
   });
-  const res = await runCostStateScan(deps);
+  const res = await runCostStateScan(deps, { session: { key: 'a1b2c3d4', clientId: 'client-a', token: 'token' } });
   assert.equal(res.halted, 'tracking-disabled');
   assert.equal(res.clean, false);
 });

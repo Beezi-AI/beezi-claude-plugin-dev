@@ -70,6 +70,7 @@ const noAnchor = () => null;
 
 test('resolveClaudeSubscription — CLI-only (VS Code extension shape): plan type without multiplier', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'ext@b.co' }),
     readClaudeAccount: noAccount,
     readClaudeAccountAnchor: noAnchor,
@@ -83,6 +84,7 @@ test('resolveClaudeSubscription — CLI-only (VS Code extension shape): plan typ
 
 test('resolveClaudeSubscription — oauthAccount-only (CLI missing): pre-existing behavior, tagged', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: noCli,
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -95,6 +97,7 @@ test('resolveClaudeSubscription — oauthAccount-only (CLI missing): pre-existin
 
 test('resolveClaudeSubscription — same account: CLI type + oauthAccount multiplier merge', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'cli@b.co' }),
     readClaudeAccount: account({ email: 'CLI@B.co' }),
     readClaudeAccountAnchor: noAnchor,
@@ -109,6 +112,7 @@ test('resolveClaudeSubscription — a differing profile email is a different acc
   // The switch case the old product-type check was standing in for, now tested directly: the
   // types still agree (both max), so only identity can tell these two accounts apart.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'cli@b.co' }),
     readClaudeAccount: account({ email: 'previous@b.co' }),
     readClaudeAccountAnchor: noAnchor,
@@ -121,6 +125,7 @@ test('resolveClaudeSubscription — a differing profile email is a different acc
 
 test('resolveClaudeSubscription — a null CLI email falls back to the oauthAccount email', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus(), // email: null — the observed CC 2.1.238 shape
     readClaudeAccount: account({ email: 'file@b.co' }),
     readClaudeAccountAnchor: noAnchor,
@@ -131,6 +136,7 @@ test('resolveClaudeSubscription — a null CLI email falls back to the oauthAcco
 test('resolveClaudeSubscription — disagreement: the stale profile must NOT donate its multiplier', () => {
   // Account switch: oauthAccount still describes the previous (max) account, the CLI says pro.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ subscriptionType: 'pro' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -146,6 +152,7 @@ test('resolveClaudeSubscription — partial oauthAccount (setup-token shape, no 
   // seatTier is null by construction — as plain `max`. Identity is the gate; when neither side
   // offers an email, an underivable type is no reason to discard a tier that is present.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus(),
     readClaudeAccount: account({ subscriptionType: null }),
     readClaudeAccountAnchor: noAnchor,
@@ -160,6 +167,7 @@ test('resolveClaudeSubscription — personal Max: organizationType claude_max, s
   // here is real: personal Max is written as an "organization" of type claude_max with a null
   // seatTier and the multiplier parked in organizationRateLimitTier.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'b@icloud.com' }),
     readClaudeAccount: () => ({
       accountUuid: '164073bf-3bef-4127-93d5-b0bb5d8ec7e5',
@@ -180,6 +188,7 @@ test('resolveClaudeSubscription — personal Max: organizationType claude_max, s
 test('resolveClaudeSubscription — loggedIn false yields no CLI evidence', () => {
   assert.equal(
     resolveClaudeSubscription({
+    env: {},
       runClaudeAuthStatus: cliStatus({ loggedIn: false }),
       readClaudeAccount: noAccount,
       readClaudeAccountAnchor: noAnchor,
@@ -190,7 +199,7 @@ test('resolveClaudeSubscription — loggedIn false yields no CLI evidence', () =
 
 test('resolveClaudeSubscription — nothing anywhere yields null', () => {
   assert.equal(
-    resolveClaudeSubscription({ runClaudeAuthStatus: noCli, readClaudeAccount: noAccount, readClaudeAccountAnchor: noAnchor }),
+    resolveClaudeSubscription({ env: {}, runClaudeAuthStatus: noCli, readClaudeAccount: noAccount, readClaudeAccountAnchor: noAnchor }),
     null,
   );
 });
@@ -199,6 +208,7 @@ test('resolveClaudeSubscription — nothing anywhere yields null', () => {
 // CLAUDE_CODE_OAUTH_TOKEN exported would otherwise outrank the fixtures under test.
 test('resolveClaudeSubscription — anchor prefers the CLI email over the file anchor', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: () => ({ value: 'acc-1', source: 'account_uuid' }),
@@ -209,6 +219,7 @@ test('resolveClaudeSubscription — anchor prefers the CLI email over the file a
 
 test('resolveClaudeSubscription — falls back to the file anchor when the CLI has no email', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus(),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: () => ({ value: 'uid-9', source: 'user_id' }),
@@ -220,6 +231,7 @@ test('resolveClaudeSubscription — falls back to the file anchor when the CLI h
 test('resolveClaudeSubscription — a CLAUDE_CODE_OAUTH_TOKEN outranks BOTH the CLI email and the file anchor', () => {
   const token = `sk-ant-oat01-${'y'.repeat(40)}`;
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'stale@b.co' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: () => ({ value: 'acc-1', source: 'account_uuid' }),
@@ -251,6 +263,7 @@ test('resolveClaudeSubscription — a CLAUDE_CODE_OAUTH_TOKEN outranks BOTH the 
 
 test('resolveClaudeSubscription — a token too short to fingerprint yields no anchor of its own', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -261,6 +274,7 @@ test('resolveClaudeSubscription — a token too short to fingerprint yields no a
 
 test('resolveClaudeSubscription — a throwing reader degrades to the other layers, never throws', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: () => { throw new Error('boom'); },
     readClaudeAccount: account(),
     readClaudeAccountAnchor: () => { throw new Error('boom'); },
@@ -325,6 +339,7 @@ test('runClaudeAuthStatus — the Windows shell fallback carries the env, never 
 test('resolveClaudeSubscription — hands the recovered token down to the spawn', () => {
   const seen = [];
   resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: (d) => { seen.push(d); return { ...TOKEN_JSON }; },
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -336,6 +351,7 @@ test('resolveClaudeSubscription — hands the recovered token down to the spawn'
 
 test('resolveClaudeSubscription — authMethod oauth_token clears the plan the stale profile names', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: () => ({ ...TOKEN_JSON }),
     // The leftovers of a previous interactive /login: a full, confident, wrong profile.
     readClaudeAccount: account({ email: 'previous@b.co' }),
@@ -360,6 +376,7 @@ test('resolveClaudeSubscription — an oauth_token answer never falls into the o
   // The second route to the same bug: a token answer carries NO subscriptionType, so the
   // `cliType == null` arm would otherwise return the whole stale profile verbatim.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: () => ({ ...TOKEN_JSON, subscriptionType: null }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -373,6 +390,7 @@ test('resolveClaudeSubscription — an oauth_token answer never falls into the o
 test('resolveClaudeSubscription — a loggedIn:false token answer still clears, never leaks the profile', () => {
   // An expired or revoked token is not a reason to start trusting the previous login's leftovers.
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: () => ({ loggedIn: false, authMethod: 'oauth_token' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -384,6 +402,7 @@ test('resolveClaudeSubscription — a loggedIn:false token answer still clears, 
 
 test('resolveClaudeSubscription — authMethod claude.ai is completely unchanged', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'cli@b.co' }),
     readClaudeAccount: account({ email: 'cli@b.co' }),
     readClaudeAccountAnchor: noAnchor,
@@ -399,6 +418,7 @@ test('resolveClaudeSubscription — an UNKNOWN authMethod is not evidence and cl
   // Open vocabulary: third_party / api_key_helper / api_key / none today, whatever ships next.
   for (const method of ['api_key_helper', 'third_party', 'api_key', 'none', 'something_new']) {
     const r = resolveClaudeSubscription({
+    env: {},
       runClaudeAuthStatus: cliStatus({ authMethod: method, email: 'cli@b.co' }),
       readClaudeAccount: account({ email: 'cli@b.co' }),
       readClaudeAccountAnchor: noAnchor,
@@ -413,6 +433,7 @@ test('resolveClaudeSubscription — an unavailable or unparseable CLI clears not
   // runClaudeAuthStatus already normalizes "missing / timed out / garbage stdout" to null.
   for (const readStatus of [noCli, () => { throw new Error('boom'); }, () => ({}), () => ({ authMethod: null })]) {
     const r = resolveClaudeSubscription({
+    env: {},
       runClaudeAuthStatus: readStatus,
       readClaudeAccount: account(),
       readClaudeAccountAnchor: noAnchor,
@@ -435,6 +456,7 @@ test('resolveClaudeSubscription — an unavailable or unparseable CLI clears not
 test('resolveClaudeSubscription — an env token clears the plan even when the CLI says claude.ai', () => {
   const token = `sk-ant-oat01-${'y'.repeat(40)}`;
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }), // authMethod: claude.ai
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -449,6 +471,7 @@ test('resolveClaudeSubscription — an env token clears the plan even when the C
 test('resolveClaudeSubscription — an env token clears the plan when the CLI cannot answer', () => {
   const token = `sk-ant-oat01-${'y'.repeat(40)}`;
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: () => null,
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -464,6 +487,7 @@ test('resolveClaudeSubscription — an env token clears the plan when the CLI ca
 // none at all.
 test('resolveClaudeSubscription — a token too short to fingerprint clears nothing', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,
@@ -476,6 +500,7 @@ test('resolveClaudeSubscription — a token too short to fingerprint clears noth
 // No token anywhere: the ordinary login path is untouched by any of this.
 test('resolveClaudeSubscription — no token leaves the login merge exactly as it was', () => {
   const r = resolveClaudeSubscription({
+    env: {},
     runClaudeAuthStatus: cliStatus({ email: 'a@b.co' }),
     readClaudeAccount: account(),
     readClaudeAccountAnchor: noAnchor,

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { reportSessionError, readErrorContext } from '../lib/stop-failure.mjs';
+import { reportSessionError } from './account-hook-fixtures.mjs';
+import { readErrorContext } from '../lib/stop-failure.mjs';
 
 // Isolate from the developer's real ~/.beezi — a machine linked to an audit-mode workspace
 // carries a tracking.json that would trip the live-tracking gate inside reportSessionError.

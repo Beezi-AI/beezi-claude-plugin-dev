@@ -4,7 +4,7 @@ A Claude Code plugin that hooks into session lifecycle events (SessionStart, Pos
 
 It also ships a personal analytics summary: the `analytics` skill (`skills/analytics/SKILL.md`) answers "how much did I spend this week?" in the terminal, covering your own last 7 or 30 days with an alert status and up to three recommendations. It is a thin launcher — the workflow, response format, and insight rules are served by `get_analytics_instructions`, so wording and rules change server-side without a plugin release. Data always covers the invoking user only, whatever their role or plan.
 
-The skill reaches the server over a `.mcp.json` stdio bridge (`scripts/mcp.mjs` → `lib/mcp-bridge.mjs`) that forwards MCP traffic authenticated with the stored `/beezi:login` credentials — no separate MCP OAuth prompt. The bridge defaults to the production Beezi API; set `BEEZI_MCP_URL` to override.
+The skill reaches the server over a `.mcp.json` stdio bridge (`scripts/mcp.mjs` → `lib/mcp-bridge.mjs`) that forwards MCP traffic authenticated with the default account's stored `/beezi:login` credentials — no separate MCP OAuth prompt. The bridge defaults to the production Beezi API; set `BEEZI_MCP_URL` to override.
 
 ## Install
 
@@ -23,10 +23,27 @@ only read correctly from a fresh session.
 
 ## Commands
 
-- `/beezi:login` — link this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores the credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes with the **history backfill** (see below) — re-running `/beezi:login` on an already-linked machine is the way to refresh the plan or resume an interrupted backfill.
-- `/beezi:me` — show this machine's link status (linked account).
-- `/beezi:logout` — unlink this machine: asks the portal to drop it and revoke its OAuth client, then deletes the stored credentials. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally.
+- `/beezi:login` — link a Beezi account to this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores that account's credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). Run it again to add another account: the browser signs in as whichever Beezi account it is already signed in as, so sign out there (or use a private window) first. After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes with that account's own **history backfill** (see below) — re-running `/beezi:login` for an already-linked account is the way to refresh the plan or resume an interrupted backfill.
+- `/beezi:me` — list the accounts linked on this machine, their plan tier and tracking mode, and which one is the default.
+- `/beezi:accounts` — list the linked accounts and pick which one is the default. Only `/beezi:analytics` and `/beezi:refresh` read from the default; session tracking goes to **every** linked account. To remove an account, use `/beezi:logout`.
+- `/beezi:logout` — log one account (or all of them) out of this machine: asks the portal to drop that machine row and revoke that account's OAuth client, then deletes its credentials and its local state. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally. If the account that was the default goes and others remain, it asks which one becomes the default.
 - `/beezi:track` — manually save analytics for the **current** session. Tracks whatever the session touched, the same way the automatic hooks do: work outside any repo (or in a repo with no `origin`) reports under a `local:<folder>` remote rather than being refused. Runs in a UserPromptSubmit hook the moment the command is submitted and shows its result as a system message — no model round trip, so it works even when the API is down (no credits, outage). Fails only if this machine is not linked, the session transcript cannot be found, or the server rejects the report. On success shows `analytics saved for <task-… | branch | folder>`.
+
+## Multiple accounts
+
+After upgrading to 0.31.0, restart Claude Code once so every hook uses the new account layout.
+
+Every write — session reports, timelines, error reports, usage snapshots, the account check-in,
+the history backfill and `/beezi:sync` — goes to **each** linked account, gated by that account's
+own tracking policy. Reads go to one: the **default** account alone serves `/beezi:analytics`,
+`/beezi:refresh`. Plugin diagnostics remain machine-level and use the authorization-free delivery route.
+
+Per-account state lives under `~/.beezi/accounts/<key>/` — the credential store, the tracking
+policy, the audit ledger, the retry queue and the auth markers — with `~/.beezi/accounts.json` as
+the non-secret index naming the linked accounts and the default. Two users of the same workspace
+cannot both be linked on one machine: that would count the machine's usage twice. Nothing has to
+be done to upgrade — the existing single-account credential store and its root-level state migrate
+into the first account slot automatically on first run.
 
 ## Plugin diagnostics (`/beezi:telemetry`)
 
@@ -43,7 +60,7 @@ token cannot report.
 Account correlation is a **separate** opt-in. With it, a random installation UUID is minted, bound
 to your account the next time authenticated activity succeeds, and attached to later reports so
 support can find yours. It is stored outside the credential store, survives refresh failures and
-reauthorization, and is discarded on `/beezi:logout`.
+reauthorization, and is discarded when the last account is logged out.
 
 - `/beezi:telemetry correlate` — **recommended**: diagnostics on, with the installation ID
   attached so support can find your report.
@@ -60,7 +77,7 @@ Pending reports live in `~/.beezi/telemetry/`, are capped at 200 events, and exp
 
 ## History backfill (runs inside `/beezi:login`)
 
-The **one-time** upload of past sessions — not a command of its own; it runs automatically as the last step of `/beezi:login` (after the link and the plan capture). It scans every transcript under `~/.claude/projects/`, re-parses each one with the same code path the live hooks use (main transcript + subagents), and ships them to the backfill endpoint in chunks of up to 50 reports; the server absorbs duplicates through its own upsert keys. After a fully clean run the pull is **finalized** (sealed) server-side — per account and tool, so log in on every machine that holds history *before* it finalizes; a finalized pull cannot be re-opened. Once used, the import is closed for good: the plugin verifies against the server before scanning anything, and a machine that re-runs it (including manual script runs and `--force`) is refused with a clear message — on audit workspaces it suggests upgrading the plan instead. Safe on every login: a durable ledger at `~/.beezi/audit-ledger.json` means only sessions the server never judged are retried, and the ledger is bound to the login that wrote it — an interrupted upload resumes on the next `/beezi:login`.
+The **one-time** upload of past sessions — not a command of its own; it runs automatically as the last step of `/beezi:login` (after the link and the plan capture). It scans every transcript under `~/.claude/projects/`, re-parses each one with the same code path the live hooks use (main transcript + subagents), and ships them to the backfill endpoint in chunks of up to 50 reports; the server absorbs duplicates through its own upsert keys. After a fully clean run the pull is **finalized** (sealed) server-side — per account and tool, so log in on every machine that holds history *before* it finalizes; a finalized pull cannot be re-opened. Once used, the import is closed for good: the plugin verifies against the server before scanning anything, and a machine that re-runs it (including manual script runs and `--force`) is refused with a clear message — on audit workspaces it suggests upgrading the plan instead. Safe on every login: a durable ledger at `~/.beezi/accounts/<key>/audit-ledger.json` means only sessions the server never judged are retried, and the ledger is bound to the login that wrote it — an interrupted upload resumes on the next `/beezi:login`.
 
 - **Cost-state fast path (0.30.0+).** Claude Code writes its own whole-session cost accounting into the last records of a transcript. When a past session has one of those blocks, the backfill uploads **that block instead of the session's segments** — it is Claude's authoritative number (higher than anything the transcript can be tallied to: advisor iterations and retried API attempts never reach it) and a 256KB tail read gets it without parsing the file. The trade is deliberate and, because the pull seals, permanent for those sessions: a cost-state block carries **no operations, no timeline, no per-branch split and no line coverage**. Only cost and token counts survive, plus a shell read off the transcript's head and tail — the session's span, its name, and the repository its first working directory resolves to (resolved without shelling out to git). A transcript with no block, no priced model usage, or no usable start falls back to the full segment path. **`/beezi:sync` takes the same path** — for a session Beezi already holds segments for (live-tracked, or uploaded by an earlier run) this is pure gain, since the block supersedes only the cost and the stored segments keep everything else; for a session Beezi has never seen, cost is all either command will give it. Sync asks `/sessions/coverage` about the segment-path sessions alone: a cost-state block carries no line window, so there is nothing to resume for the rest.
 - On workspaces with live tracking, only transcripts from **before this machine was linked** are uploaded (later work was already tracked live), and transcripts touched in the last 30 minutes are skipped as probably-open sessions.
@@ -69,7 +86,7 @@ The **one-time** upload of past sessions — not a command of its own; it runs a
 - Session timelines travel inside the backfill chunks themselves, so backfilled sessions carry their activity timeline everywhere. Rate-limit events remain live-tracking-only — audit-mode datasets do not include them.
 - For manual runs, `node scripts/backfill.mjs` accepts `--dry-run` (report what would be sent, send nothing), `--since <YYYY-MM-DD>` (only transcripts modified on or after that date — a scoped run never finalizes) and `--force` (ignore the local ledger; only meaningful before the pull finalizes — re-sending a partly-tracked session can re-segment on different boundaries once its per-session cursor has aged out, which can duplicate tokens/cost; use it only when a repository has since been connected).
 
-Analytics are otherwise tracked automatically via the session lifecycle hooks — `/beezi:track` is only needed to force a save mid-session, and the history backfill only ever uploads sessions the hooks never saw. On audit-mode workspaces (no live tracking) the hooks stay silent by design: the server refuses live reports there, and the plugin caches that verdict in `~/.beezi/tracking.json` from the session-start `whoami`.
+Analytics are otherwise tracked automatically via the session lifecycle hooks — `/beezi:track` is only needed to force a save mid-session, and the history backfill only ever uploads sessions the hooks never saw. On audit-mode workspaces (no live tracking) the hooks stay silent by design: the server refuses live reports there, and the plugin caches that verdict in `~/.beezi/accounts/<key>/tracking.json` from the session-start `whoami`.
 
 ## Plan resolution (which subscription this machine bills)
 
@@ -97,7 +114,7 @@ Once reset, the record carries `keyFingerprint` and nothing else that belonged t
 
 **Moving back off a setup token (0.30.0+).** That guard has two escapes, and they exist because without them a key-scoped record was unreachable by every local action there is. `authModeReverted` opens the first on an automatic pass, once `claude auth status` positively answers for an interactive login; it excuses a plan the user *declared* (their testimony may still describe the token's account) but **not** a `key_resolution` plan, which is the portal's answer for a fingerprint rather than anything the user said — `plan-writeback.mjs` merges that answer onto whatever is on disk, so such a record keeps `selfReported: true` while its plan is the server's. The second escape is `force`: `/beezi:refresh` is the user asking for this record to be re-read, so it stands the guard down outright and a CLI that names a plan wins, declared records included. The cost is the honest limit stated in the code — on a machine whose token lives in a shell profile (invisible to all three env tiers) a forced refresh writes the previous login's plan — and the recovery is `/beezi:login`, which asks. The state it replaces had no recovery at all.
 
-**A key that inherited a subscription.** When the server reports `accountAnchored: true` alongside `planSource: 'reported'`, this key is bound to an account that some interactive sign-in established and nobody ever confirmed a plan for the key itself. The plan is still adopted — unpriced usage is worse — but the machine says so once per fingerprint (`~/.beezi/key-notice.json`), and `/beezi:refresh` repeats it every time it is run. It is a notice rather than a nudge because there is nothing the terminal can offer: `/link` refuses an account that carries its own identity, so re-pointing it is an admin's job.
+**A key that inherited a subscription.** When the server reports `accountAnchored: true` alongside `planSource: 'reported'`, this key is bound to an account that some interactive sign-in established and nobody ever confirmed a plan for the key itself. The plan is still adopted — unpriced usage is worse — but the machine says so once per fingerprint (`~/.beezi/accounts/<key>/key-notice.json`), and `/beezi:refresh` repeats it every time it is run. It is a notice rather than a nudge because there is nothing the terminal can offer: `/link` refuses an account that carries its own identity, so re-pointing it is an admin's job.
 
 ## Dependencies
 
@@ -107,13 +124,13 @@ every platform.
 
 ## Credential storage
 
-The `/beezi:login` token is stored in the OS secret store via its built-in CLI — no native
-module, no `npm install`:
+Each linked account's `/beezi:login` token is stored in the OS secret store via its built-in
+CLI — no native module, no `npm install`:
 
 - **macOS** — the login keychain (`security add/find/delete-generic-password`).
 - **Linux** — the Secret Service / libsecret (`secret-tool`) when installed; otherwise the file fallback.
 - **Windows** — DPAPI (user-bound encryption via PowerShell); the ciphertext is kept in the file. (Credential Manager can store but not return a secret from the CLI, so DPAPI is used instead.)
-- **Fallback** — a `0600` file at `BEEZI_HOME/credentials.json` (default `~/.beezi/`) whenever no store is available.
+- **Fallback** — a `0600` file under `BEEZI_HOME/accounts/<key>/credentials/` (default `~/.beezi/`) whenever no store is available.
 
 ## Development
 

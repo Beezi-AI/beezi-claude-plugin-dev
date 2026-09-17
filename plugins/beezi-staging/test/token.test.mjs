@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getAccessToken, getAuthentication } from '../lib/token.mjs';
-import { runRefreshWorker } from '../lib/refresh-worker.mjs';
+import { getAccessToken, getAuthentication } from './account-auth-fixture.mjs';
+import { runRefreshWorker } from './account-auth-fixture.mjs';
 import { AUTH_STATES, AUTH_REASONS } from '../lib/auth-state.mjs';
-import { readCredentials, commitCredentials, CREDENTIAL_STATUS } from '../lib/credentials.mjs';
-import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from '../lib/credential-lock.mjs';
-import { recordInflight, recordBackoff, recordReauthRequired, readInflight } from '../lib/auth-markers.mjs';
+import { readCredentials, commitCredentials, CREDENTIAL_STATUS } from './account-auth-fixture.mjs';
+import { acquireCredentialLock, releaseCredentialLock, readCredentialLockOwner } from './account-auth-fixture.mjs';
+import { recordInflight, recordBackoff, recordReauthRequired, readInflight } from './account-auth-fixture.mjs';
 
 function tmpHome(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'token-'));
@@ -249,9 +249,9 @@ test('getAccessToken hands back a token only for ready', async (t) => {
 test('a lock held by someone else reads as refreshing, not as a missing link', async (t) => {
   const dir = tmpHome(t);
   await seed(FRESH);
-  fs.mkdirSync(path.join(dir, 'credentials.lock'));
+  fs.mkdirSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock'));
   fs.writeFileSync(
-    path.join(dir, 'credentials.lock', 'owner.json'),
+    path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock', 'owner.json'),
     JSON.stringify({ pid: process.pid, nonce: FOREIGN, acquiredAt: Date.now() }),
   );
   const c = clock();
@@ -273,9 +273,9 @@ test('a machine that has never failed does not report its first ready as a recov
 test('a live lock owner is reported as refreshing without spawning another worker', async (t) => {
   const dir = tmpHome(t);
   await seed(FRESH);
-  fs.mkdirSync(path.join(dir, 'credentials.lock'));
+  fs.mkdirSync(path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock'));
   fs.writeFileSync(
-    path.join(dir, 'credentials.lock', 'owner.json'),
+    path.join(dir, 'accounts', 'aabbccdd', 'credentials.lock', 'owner.json'),
     JSON.stringify({ pid: process.pid, nonce: FOREIGN, acquiredAt: Date.now() }),
   );
   const auth = await getAuthentication({

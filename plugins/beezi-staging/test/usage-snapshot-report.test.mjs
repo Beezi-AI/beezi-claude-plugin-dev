@@ -79,9 +79,9 @@ test('maybePostUsageSnapshot — posts once, then dedupes on (account, fetchedAt
       readUsageUtilization: () => UTILIZATION,
       readClaudeAccount: () => ACCOUNT,
     };
-    const first = await maybePostUsageSnapshot('tok', deps);
+    const first = await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps);
     assert.equal(first.reported, true);
-    const second = await maybePostUsageSnapshot('tok', deps);
+    const second = await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps);
     assert.equal(second.reported, false);
     assert.equal(second.reason, 'already-sent');
     assert.equal(calls.length, 1);
@@ -93,9 +93,9 @@ test('maybePostUsageSnapshot — a NEW account posts even with an older fetchedA
   await withTempHome(async () => {
     const calls = [];
     const base = { fetchImpl: okFetch(calls), readClaudeAccount: () => ACCOUNT };
-    await maybePostUsageSnapshot('tok', { ...base, readUsageUtilization: () => UTILIZATION });
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { ...base, readUsageUtilization: () => UTILIZATION });
     const older = { ...UTILIZATION, accountUuid: 'acc-2', fetchedAtMs: 1000 };
-    const res = await maybePostUsageSnapshot('tok', { ...base, readUsageUtilization: () => older });
+    const res = await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, { ...base, readUsageUtilization: () => older });
     assert.equal(res.reported, true);
     assert.equal(calls.length, 2);
   });
@@ -110,9 +110,9 @@ test('maybePostUsageSnapshot — failed POST leaves the marker, next call retrie
       readUsageUtilization: () => UTILIZATION,
       readClaudeAccount: () => ACCOUNT,
     };
-    assert.equal((await maybePostUsageSnapshot('tok', deps)).reported, false);
+    assert.equal((await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps)).reported, false);
     status = 200;
-    assert.equal((await maybePostUsageSnapshot('tok', deps)).reported, true);
+    assert.equal((await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, deps)).reported, true);
     assert.equal(calls.length, 2);
   });
 });
@@ -121,7 +121,7 @@ test('maybePostUsageSnapshot — no token / no utilization → skipped, nothing 
   await withTempHome(async () => {
     const calls = [];
     assert.equal((await maybePostUsageSnapshot(null, { fetchImpl: okFetch(calls) })).reported, false);
-    const res = await maybePostUsageSnapshot('tok', {
+    const res = await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       readUsageUtilization: () => null,
     });
@@ -144,7 +144,7 @@ const PENDING_ROW = {
 test('drain — a fresh CLI-observed billing.json supplies the plan when oauthAccount is unreadable', async () => {
   const calls = [];
   let cleared = 0;
-  const res = await drainStatuslineSnapshots('tok', {
+  const res = await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     readPendingStatuslineUsage: () => [PENDING_ROW],
     clearPendingStatuslineUsage: (n) => { cleared = n; },
@@ -172,7 +172,7 @@ test('drain — a fresh CLI-observed billing.json supplies the plan when oauthAc
 // widening what reaches the server.
 test('drain — a self-reported billing.json donates its plan too', async () => {
   const calls = [];
-  const res = await drainStatuslineSnapshots('tok', {
+  const res = await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     readPendingStatuslineUsage: () => [PENDING_ROW],
     clearPendingStatuslineUsage: () => {},
@@ -196,7 +196,7 @@ test('drain — a self-reported billing.json donates its plan too', async () => 
 // interactive login. The old order took the file's coarse tier and threw the key's answer away.
 test('drain — a key-resolved plan is not displaced by a stale oauthAccount', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -220,7 +220,7 @@ test('drain — a key-resolved plan is not displaced by a stale oauthAccount', a
 // ~/.claude.json is what the whole precedence exists to stop.
 test('drain — a billing.json with no plan does not fall back to oauthAccount', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -247,7 +247,7 @@ const BILLING_WITH_EMAIL = {
 
 test('drain — carries the email so the server can reach an account', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -263,7 +263,7 @@ test('drain — carries the email so the server can reach an account', async () 
 // fingerprint rode along, these rows reached the server with no identity at all.
 test('drain — a setup-token machine reports its fingerprint', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: KEY_ENV,
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -282,7 +282,7 @@ test('drain — a setup-token machine reports its fingerprint', async () => {
 // attribute this machine's limits to someone else's account.
 test('drain — a live fingerprint suppresses the stale login identity', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: KEY_ENV,
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -301,7 +301,7 @@ test('drain — a live fingerprint suppresses the stale login identity', async (
 // Everything outside that one case is byte-identical to before.
 test('drain — account_uuid is unchanged when no fingerprintable token is in force', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -320,7 +320,7 @@ test('drain — account_uuid is unchanged when no fingerprintable token is in fo
 test('cache path — a setup token suppresses the cache\'s stale uuid', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: KEY_ENV,
       readUsageUtilization: () => UTILIZATION,
@@ -337,7 +337,7 @@ test('cache path — a setup token suppresses the cache\'s stale uuid', async ()
 test('cache path — the cache keeps the uuid while billing.json supplies the plan', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: {},
       readUsageUtilization: () => UTILIZATION,
@@ -354,7 +354,7 @@ test('cache path — the cache keeps the uuid while billing.json supplies the pl
 test('cache path — a positive uuid mismatch still drops the plan', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: {},
       readUsageUtilization: () => UTILIZATION,
@@ -373,7 +373,7 @@ test('cache path — a positive uuid mismatch still drops the plan', async () =>
 test('cache path — an uncomparable pair is not a mismatch', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: {},
       readUsageUtilization: () => UTILIZATION,
@@ -387,7 +387,7 @@ test('cache path — an uncomparable pair is not a mismatch', async () => {
 test('cache path — carries the email when no token is in force', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: {},
       readUsageUtilization: () => UTILIZATION,
@@ -410,13 +410,13 @@ test('both paths report the same identity for the same machine', async () => {
       readClaudeAccount: () => ACCOUNT,
       readBillingConfig: () => BILLING_WITH_EMAIL,
     };
-    await drainStatuslineSnapshots('tok', {
+    await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
       ...shared,
       fetchImpl: okFetch(drainCalls),
       readPendingStatuslineUsage: () => [PENDING_ROW],
       clearPendingStatuslineUsage: () => {},
     });
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       ...shared,
       fetchImpl: okFetch(cacheCalls),
       readUsageUtilization: () => UTILIZATION,
@@ -434,7 +434,7 @@ test('both paths report the same identity for the same machine', async () => {
 test('neither path lets the middle of the token reach the wire', async () => {
   await withTempHome(async () => {
     const calls = [];
-    await maybePostUsageSnapshot('tok', {
+    await maybePostUsageSnapshot({ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }, {
       fetchImpl: okFetch(calls),
       env: KEY_ENV,
       readUsageUtilization: () => UTILIZATION,
@@ -452,7 +452,7 @@ test('neither path lets the middle of the token reach the wire', async () => {
 // machine that has one, and on the machines where it is not, the honest answer is no uuid at all.
 test('drain — billing.json supplies account_uuid alongside the email', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
@@ -468,7 +468,7 @@ test('drain — billing.json supplies account_uuid alongside the email', async (
 // wants it on the wire either way.
 test('drain — an unstated uuid is an explicit null, not an omission', async () => {
   const calls = [];
-  await drainStatuslineSnapshots('tok', {
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
     fetchImpl: okFetch(calls),
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],

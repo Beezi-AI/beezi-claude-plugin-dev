@@ -355,3 +355,45 @@ test('the bridge distinguishes unlinked from temporarily without a token', async
     }
   }
 });
+
+
+test('switching default rebuilds the upstream session with the new account headers', async () => {
+  let account = 'aabbccdd';
+  const calls = [];
+  const bridge = createBridge({
+    getDefaultKey: async () => account,
+    getAccount: async key => ({ clientId: `client-${key}` }),
+    getAuthentication: async (_deps, options) => ({ authState: 'ready', accessToken: `token-${options.account}` }),
+    write: () => {}, maybeSpawnDiagnostics: () => {},
+    fetchImpl: async (_url, init) => {
+      const msg = JSON.parse(init.body);
+      calls.push({ msg, headers: init.headers });
+      return jsonRes(msg.method === 'initialize' ? INIT_RESULT : CALL_RESULT, { headers: { 'mcp-session-id': `session-${account}` } });
+    },
+  });
+  await bridge.handleMessage(INIT);
+  account = '11223344';
+  await bridge.handleMessage(CALL);
+  assert.equal(calls[1].msg.method, 'initialize');
+  assert.equal(calls[1].headers['mcp-session-id'], undefined);
+  assert.equal(calls[1].headers.Authorization, 'Bearer token-11223344');
+  assert.equal(calls[1].headers['X-Beezi-Client'], 'client-11223344');
+  assert.equal(calls.at(-1).headers['mcp-session-id'], 'session-11223344');
+});
+
+
+test('unavailable account migration keeps MCP initialize alive and requests retryable', async () => {
+  const out = [];
+  const bridge = createBridge({
+    getDefaultKey: async () => { throw new Error('migration unavailable'); },
+    getAuthentication: async () => assert.fail('no readable account'),
+    write: line => out.push(JSON.parse(line)),
+    setIntervalImpl: () => ({ unref() {} }),
+  });
+  await bridge.handleMessage(INIT);
+  assert.equal(out[0].result.serverInfo.name, 'beezi');
+  assert.match(out[0].result.instructions, /retry in a moment/);
+  assert.doesNotMatch(out[0].result.instructions, /beezi:login/);
+  await bridge.handleMessage(CALL);
+  assert.match(out[1].error.message, /retry in a moment/);
+});

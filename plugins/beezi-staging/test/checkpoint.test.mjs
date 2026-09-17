@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runCheckpoint as _runCheckpoint, flushQueue } from '../lib/checkpoint.mjs';
+import { runCheckpoint as _runCheckpoint, flushQueue } from './account-hook-fixtures.mjs';
 
 // runCheckpoint resolves its env through oauthTokenEnvWithOsProbe, whose last tier reads the OS
 // persistent environment and SPAWNS to do it. A test that fell through to the real probe would
@@ -107,7 +107,7 @@ function fakeFetch(status) {
 }
 
 function readQueue(homeDir) {
-  const qdir = path.join(homeDir, 'queue');
+  const qdir = path.join(homeDir, 'accounts', 'aaaaaaaa', 'queue');
   try {
     return fs.readdirSync(qdir).map(f => ({
       name: f,
@@ -552,7 +552,7 @@ test('9. flushQueue delivers and unlinks on 2xx', async (t) => {
   setHome(dir);
 
   // Seed a queue file directly
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
   const payload = { segmentId: 'sess-9:1-1', sessionId: 'sess-9', remote: 'https://host/repo.git', branch: 'feature/task-1', token_total: 100 };
   const filePath = path.join(qdir, 'sess-9_1-1.json');
@@ -579,7 +579,7 @@ test('10. flushQueue keeps file on 5xx and on throw', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
 
   // File 1: 5xx response
@@ -611,7 +611,7 @@ test('11. flushQueue drops on 4xx (terminal reject)', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
 
   const p = path.join(qdir, 'seg-422.json');
@@ -1650,6 +1650,7 @@ test('32. the default path is unchanged — queue written, state persisted, flus
 });
 
 import { writeTrackingState, readTrackingState, TrackingMode } from '../lib/tracking.mjs';
+
 import { QUEUE_HOLD_MS } from '../lib/checkpoint.mjs';
 
 function fakeJsonFetch(replies) {
@@ -1669,7 +1670,7 @@ function fakeJsonFetch(replies) {
 test('33. tracking disabled → runCheckpoint does zero work and reports gated', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  writeTrackingState({ trackingMode: TrackingMode.DISABLED });
+  writeTrackingState('aaaaaaaa', { trackingMode: TrackingMode.DISABLED });
 
   const transcript = writeTranscript(dir, [
     assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5 }, '2026-07-13T10:00:00.000Z', dir),
@@ -1691,7 +1692,7 @@ test('33. tracking disabled → runCheckpoint does zero work and reports gated',
 test('34. backfill_only blocks live hooks exactly like disabled', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  writeTrackingState({ trackingMode: TrackingMode.BACKFILL_ONLY });
+  writeTrackingState('aaaaaaaa', { trackingMode: TrackingMode.BACKFILL_ONLY });
 
   const transcript = writeTranscript(dir, [
     assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5 }, '2026-07-13T10:00:00.000Z', dir),
@@ -1709,7 +1710,7 @@ test('34. backfill_only blocks live hooks exactly like disabled', async (t) => {
 test('35. skipLiveTrackingGate runs the full checkpoint even when disabled (the audit path)', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  writeTrackingState({ trackingMode: TrackingMode.BACKFILL_ONLY });
+  writeTrackingState('aaaaaaaa', { trackingMode: TrackingMode.BACKFILL_ONLY });
 
   const transcript = writeTranscript(dir, [
     assistantLine('main', 'model-a', { input_tokens: 10, output_tokens: 5 }, '2026-07-13T10:00:00.000Z', dir),
@@ -1729,7 +1730,7 @@ test('35. skipLiveTrackingGate runs the full checkpoint even when disabled (the 
 test('36. flushQueue 403 TRACKING_DISABLED: holds the files, stops the loop, records the state', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
   fs.writeFileSync(path.join(qdir, 'a.json'), JSON.stringify({ segmentId: 'a' }), 'utf-8');
   fs.writeFileSync(path.join(qdir, 'b.json'), JSON.stringify({ segmentId: 'b' }), 'utf-8');
@@ -1744,14 +1745,14 @@ test('36. flushQueue 403 TRACKING_DISABLED: holds the files, stops the loop, rec
   assert.equal(result.trackingDisabled, true);
   assert.equal(fetch.calls.length, 1, 'the storm stops after the first 403');
   assert.equal(readQueue(dir).length, 3, 'files are HELD for the 3-day window, not deleted');
-  assert.equal(readTrackingState().trackingMode, TrackingMode.DISABLED);
+  assert.equal(readTrackingState('aaaaaaaa').trackingMode, TrackingMode.DISABLED);
 });
 
 test('37. the 3-day hold sweep expires only old files while tracking is off', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  writeTrackingState({ trackingMode: TrackingMode.DISABLED });
-  const qdir = path.join(dir, 'queue');
+  writeTrackingState('aaaaaaaa', { trackingMode: TrackingMode.DISABLED });
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
   fs.writeFileSync(path.join(qdir, 'fresh.json'), JSON.stringify({ segmentId: 'fresh' }), 'utf-8');
   fs.writeFileSync(path.join(qdir, 'old.json'), JSON.stringify({ segmentId: 'old' }), 'utf-8');
@@ -1770,7 +1771,7 @@ test('37. the 3-day hold sweep expires only old files while tracking is off', as
 test('38. a code-less 403 (seat revoked) keeps the file and counts as failed', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
   fs.writeFileSync(path.join(qdir, 'a.json'), JSON.stringify({ segmentId: 'a' }), 'utf-8');
 
@@ -1783,7 +1784,7 @@ test('38. a code-less 403 (seat revoked) keeps the file and counts as failed', a
   assert.equal(result.failed, 1);
   assert.equal(result.trackingDisabled, false);
   assert.equal(readQueue(dir).length, 1, 'a reversible refusal must not destroy the report');
-  assert.equal(readTrackingState(), null, 'no tracking flip on a code-less 403');
+  assert.equal(readTrackingState('aaaaaaaa'), null, 'no tracking flip on a code-less 403');
 });
 
 test('39. over-long branch, agent_name and agent_type are clamped to the server caps', async (t) => {
@@ -2274,7 +2275,7 @@ test('OS-env probe — a recovered setup token stamps the fingerprint and suppre
 test('flushQueue salvages a payload buried under trailing wreckage and posts it', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
 
   const p = path.join(qdir, 'seg-salvage.json');
@@ -2295,7 +2296,7 @@ test('flushQueue salvages a payload buried under trailing wreckage and posts it'
 test('flushQueue quarantines an unreadable file instead of retrying it forever', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
 
   const p = path.join(qdir, 'seg-garbage.json');
@@ -2313,7 +2314,7 @@ test('flushQueue quarantines an unreadable file instead of retrying it forever',
 test('flushQueue ignores stray .tmp and .corrupt entries', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
-  const qdir = path.join(dir, 'queue');
+  const qdir = path.join(dir, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
 
   fs.writeFileSync(path.join(qdir, 'seg.json.1234.abcd.tmp'), '{"segmentId":"x:1-1"}', 'utf-8');

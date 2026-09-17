@@ -15,12 +15,12 @@ test('quarantining a corrupt queue file records a diagnostic', async (t) => {
 
   const { grantConsent } = await import('../lib/telemetry-consent.mjs?q');
   grantConsent();
-  const qdir = path.join(home, 'queue');
+  const qdir = path.join(home, 'accounts', 'aaaaaaaa', 'queue');
   fs.mkdirSync(qdir, { recursive: true });
   fs.writeFileSync(path.join(qdir, 'seg.json'), 'not json at all');
 
   const { flushQueue } = await import('../lib/checkpoint.mjs?q');
-  const result = await flushQueue('tok', { fetchImpl: async () => ({ status: 200 }) });
+  const result = await flushQueue({ key: 'aaaaaaaa', token: 'tok', clientId: 'client-a' }, { fetchImpl: async () => ({ status: 200 }) });
 
   assert.equal(result.quarantined, 1);
   const events = fs.readdirSync(path.join(home, 'telemetry'))

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { markAsked } from '../lib/telemetry-consent.mjs';
-import { runSessionStart as _runSessionStart } from '../lib/session-start.mjs';
+import { runSessionStart as _runSessionStart } from './account-hook-fixtures.mjs';
 
 // The setup-token arm of SessionStart: registering a key the portal has never seen, adopting the
 // answer once it has one, and the one notice that is said rather than nudged.

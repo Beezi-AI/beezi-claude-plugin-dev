@@ -1,14 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  flushBackfillChunks,
-  completeBackfill,
+  flushBackfillChunks as flushChunks,
+  completeBackfill as complete,
   planChunks,
   BackfillSessionStatus,
   BackfillHalt,
   MAX_BODY_BYTES,
   MAX_CHUNK_ITEMS,
 } from '../lib/audit-flush.mjs';
+
+const session = (token) => ({ key: 'aaaaaaaa', clientId: 'client-a', token });
+const flushBackfillChunks = (groups, token, deps, options) => flushChunks(groups, session(token), deps, options);
+const completeBackfill = (token, deps, options) => complete(session(token), deps, options);
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -44,7 +48,7 @@ function fakePost(replies) {
   const calls = [];
   let i = 0;
   const impl = async (url, token, body, deps) => {
-    calls.push({ url, token, body, deps });
+    calls.push({ url, token: token.token, body, deps });
     const reply = typeof replies === 'function' ? replies(body, calls.length) : replies[Math.min(i, replies.length - 1)];
     i += 1;
     return {
