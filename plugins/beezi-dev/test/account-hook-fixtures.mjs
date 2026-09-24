@@ -21,6 +21,8 @@ export const runSessionStart = (input, deps = {}) => start.runSessionStart(input
 export const reportSessionError = (input, deps = {}) => failure.reportSessionError(input, scoped(deps));
 export const trackSession = (input, deps = {}) => track.trackSession(input, scoped({ ...deps, runCheckpoint: async (...args) => ({ flushes: [], ...await deps.runCheckpoint(...args) }) }));
 export const runAudit = (deps = {}, options = {}) => audit.runAudit({
+  acquireAuditLock: () => true,
+  releaseAuditLock: () => {},
   ...deps,
   getAuthentication: deps.getAuthentication || (async () => {
     const token = await deps.getAccessToken();

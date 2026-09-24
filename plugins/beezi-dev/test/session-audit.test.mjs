@@ -1151,3 +1151,63 @@ test('48. an over-long remote is dropped rather than sent or truncated', async (
   assert.equal(result.costStateSessions, 1);
   assert.equal('repo_urls' in groupsSeen[0].costState, false);
 });
+
+test('Cowork sync uses cumulative cost snapshot without transcript, repository or checkpoint', async () => {
+  const entry = { sessionId: 'cowork-runtime', source: 'claude-cowork', mtimeMs: 1000, size: 10,
+    sessionName: 'Cowork', shell: { startedAt: '2026-09-01T10:00:00Z', endedAt: '2026-09-01T10:01:00Z', cwd: null },
+    costState: { totalCostUSD: 2.5, modelUsage: { model: { inputTokens: 42, outputTokens: 7, costUSD: 2.5 } } } };
+  const { deps } = makeDeps({ listTranscripts: () => [entry],
+    readLastCostStateImpl: () => { throw new Error('must not read JSONL'); },
+    readSessionShellImpl: () => { throw new Error('must not read JSONL'); },
+    runCheckpointImpl: () => { throw new Error('must not checkpoint Cowork'); },
+    computeSessionTimelineImpl: () => { throw new Error('must not parse Cowork timeline'); },
+    flushQueueImpl: async () => {}, fetchCoverageImpl: async () => { throw new Error('no line coverage'); },
+  });
+  const groups = [];
+  deps.flushBackfillChunksImpl = async (g) => { groups.push(...g); return flushResult({ costStatesStored: g.length,
+    bySession: new Map(g.map(x => [x.sessionId, { status: BackfillSessionStatus.ACCEPTED }])) }); };
+  const result = await runAudit(deps, { mode: 'sync' });
+  assert.equal(result.costStateSessions, 1);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].costState.session_name, 'Cowork');
+  assert.equal(groups[0].costState.started_at, entry.shell.startedAt);
+  assert.equal(groups[0].costState.models[0].token_input, 42);
+  assert.equal('repo_urls' in groups[0].costState, false);
+  assert.equal('source' in groups[0].costState, false, 'do not invent unsupported wire enum');
+  assert.deepEqual(groups[0].reports, []);
+  entry.costState.totalCostUSD = 1;
+  entry.costState.modelUsage.model.inputTokens = 1;
+  await runAudit(deps, { mode: 'sync' });
+  assert.equal(groups[1].costState.total_cost_usd, 2.5, 'stale cache cannot lower an accepted cumulative snapshot');
+  assert.equal(groups[1].costState.models[0].token_input, 42);
+});
+
+test('live Cowork sends active finalized snapshots once, retries failure and preserves Code activity gate', async () => {
+  const { flushBackfillChunks } = await import('../lib/audit-flush.mjs');
+  const now = Date.parse('2026-09-24T12:00:00Z');
+  const entry = { sessionId: 'live-cowork', source: 'claude-cowork', mtimeMs: now, size: 10, sessionName: 'Cowork',
+    shell: { startedAt: '2026-09-24T11:59:00Z', endedAt: '2026-09-24T12:00:00Z' },
+    costState: { totalCostUSD: 1, modelUsage: { model: { inputTokens: 10, outputTokens: 20, costUSD: 1 } } } };
+  const bodies = []; let fail = false;
+  const { deps, saved } = makeDeps({ now: () => now, env: { CLAUDE_CODE_SESSION_ID: entry.sessionId },
+    listTranscripts: () => [entry, transcript('active-code', now)], flushBackfillChunksImpl: flushBackfillChunks,
+    fetchImpl: async (url, init) => { assert.ok(url.endsWith('/sessions/sync')); const body = JSON.parse(init.body); bodies.push(body);
+      return { status: fail ? 403 : 200, ok: !fail, text: async () => JSON.stringify(fail ? {} : { stored: 0, skipped: 0, errors: [], costStates: { stored: 1, skipped: 0, errors: [] } }) }; },
+    runCheckpointImpl: () => { throw Error('no active Code checkpoint'); }, flushQueueImpl: () => { throw Error('no Code queue in Cowork pass'); },
+  });
+  const options = { mode: 'sync', coworkLive: true };
+  const first = await runAudit(deps, options);
+  assert.equal(first.costStatesStored, 1); assert.equal(first.active, 1); assert.equal(first.live, 0);
+  entry.mtimeMs += 1000; entry.shell.endedAt = '2026-09-24T12:00:01Z';
+  const intermediate = await runAudit(deps, options);
+  assert.equal(intermediate.empty, 1); assert.equal(bodies.length, 1, 'partial active events cannot resend identical cumulative usage');
+  entry.costState.totalCostUSD = 2; entry.costState.modelUsage.model.costUSD = 2; entry.costState.modelUsage.model.outputTokens = 40;
+  fail = true; await runAudit(deps, options); const writes = saved.length;
+  fail = false; const retry = await runAudit(deps, options);
+  assert.equal(retry.costStatesStored, 1); assert.equal(bodies.length, 3);
+  assert.equal(bodies[2].costStates[0].models[0].token_output, 40);
+  assert.equal(bodies[2].costStates[0].total_cost_usd, 2);
+  assert.ok(saved.length > writes);
+  deps.shouldContinue = () => false; entry.costState.totalCostUSD = 3;
+  const stopped = await runAudit(deps, options); assert.equal(stopped.halt, 'tracking-stopped'); assert.equal(bodies.length, 3);
+});

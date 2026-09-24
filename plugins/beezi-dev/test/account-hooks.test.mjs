@@ -89,7 +89,7 @@ test('session start keeps forbidden accounts isolated and preserves the update n
 test('audit requires explicit account and retains temporary-auth failure status', async () => {
   assert.equal((await runAudit({}, {})).reason, 'no-account');
   let requested;
-  const result = await runAudit({ getAuthentication: async (_deps, options) => {
+  const result = await runAudit({ acquireAuditLock: () => true, releaseAuditLock: () => {}, getAuthentication: async (_deps, options) => {
     requested = options.account;
     return { authState: 'unavailable', reason: 'storage_unavailable' };
   } }, { account: b.key });

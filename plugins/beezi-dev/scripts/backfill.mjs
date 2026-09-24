@@ -34,6 +34,13 @@ async function main() {
     options,
   );
 
+  if (result.reason === 'busy') {
+    console.log('Beezi: another session sync is running. Run /beezi:sync after it finishes.');
+    return;
+  }
+  if (result.coworkWarnings > 0) {
+    console.log('Beezi: some Cowork cache data could not be read; run /beezi:sync again to retry.');
+  }
   if (result.reason === 'no-account') {
     fail('Beezi: this machine is not linked. Run /beezi:login first.');
   }
