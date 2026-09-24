@@ -2,6 +2,7 @@ import { parseArgs, runAudit, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, listAccounts, describeAccount, AccountStatus } from '../lib/accounts.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
+import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 
 // /beezi:sync — uploads every past session this machine still has on disk, skipping whatever Beezi
 // already holds. Unlike the one-time import at the end of /beezi:login, this is repeatable: it asks
@@ -33,6 +34,13 @@ async function syncOne(account, options, label) {
     options,
   );
 
+  if (result.coworkWarnings > 0) {
+    console.log('Beezi: some Cowork cache data could not be read; this sync may be incomplete.');
+  }
+  if (result.reason === 'busy') {
+    console.log('Beezi: another session sync is running. Try again after it finishes.');
+    return;
+  }
   if (result.reason === 'auth-unavailable') {
     console.error('✗ Beezi: authentication is temporarily unavailable. Try /beezi:sync again.');
     return;
@@ -58,7 +66,7 @@ async function syncOne(account, options, label) {
   }
 
   if (result.scanned === 0) {
-    console.log('✓ Beezi: no Claude Code sessions found on this machine.');
+    console.log('✓ Beezi: no Claude Code or cached Cowork sessions found on this machine.');
     return;
   }
 
@@ -195,4 +203,6 @@ async function main() {
   }
 }
 
-main().catch((error) => fail(friendlyMessage(error)));
+main().then(() => {
+  if (!process.argv.includes('--dry-run')) maybeSpawnCoworkLive();
+}).catch((error) => fail(friendlyMessage(error)));

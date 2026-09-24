@@ -3,7 +3,7 @@ import { sessionFor as _sessionFor } from './sessions.mjs';
 import { getAuthentication as _getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from './token.mjs';
 import { AUTH_STATES } from './auth-state.mjs';
 import { runCheckpoint as _runCheckpoint, flushQueue as _flushQueue } from './checkpoint.mjs';
-import { listAllTranscripts as _listAllTranscripts, firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
+import { firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
 import {
   loadLedger as _loadLedger,
   saveLedger as _saveLedger,
@@ -25,6 +25,9 @@ import {
 } from './audit-flush.mjs';
 import { ENDPOINTS } from './config.mjs';
 import { readLastCostState as _readLastCostState, toCostStateItem } from './cost-state.mjs';
+import { listAnalyticsSessions } from './analytics-sessions.mjs';
+import { nonRegressingSnapshot, sameCumulativeUsage } from './cowork-snapshot.mjs';
+import { acquireLock, releaseLock } from './single-instance-lock.mjs';
 import { readSessionShell as _readSessionShell } from './transcript-shell.mjs';
 import { sessionNameFrom as _sessionNameFrom } from './session-name.mjs';
 import { loadRepoMap as _loadRepoMap, resolveRemoteOffline } from './repo-map.mjs';
@@ -123,6 +126,7 @@ async function mapLimited(items, limit, worker) {
 // blocking would deadlock the seal forever.
 export function shouldFinalize(result, options = {}) {
   if (!result.ok) return false;
+  if (result.coworkWarnings > 0) return false;
   // /beezi:sync is repeatable by definition; sealing the one-time pull from it would lock the user
   // out of the very command they just ran.
   if (options.mode === SYNC_MODE) return false;
@@ -156,8 +160,18 @@ export function shouldFinalize(result, options = {}) {
 // live-only follow-up — and only for sessions the server judged accepted, so a failed session
 // stays fully retryable.
 export async function runAudit(deps = {}, options = {}) {
+  if (options.account == null) return runAuditUnlocked(deps, options);
+  const lock = deps.acquireAuditLock == null ? acquireLock : deps.acquireAuditLock;
+  const unlock = deps.releaseAuditLock == null ? releaseLock : deps.releaseAuditLock;
+  const name = 'session-audit';
+  if (!lock(name)) return { ok: false, reason: 'busy', scanned: 0 };
+  try { return await runAuditUnlocked(deps, options); }
+  finally { unlock(name); }
+}
+
+async function runAuditUnlocked(deps, options) {
   const getAuthentication = deps.getAuthentication == null ? _getAuthentication : deps.getAuthentication;
-  const listTranscripts = deps.listTranscripts == null ? _listAllTranscripts : deps.listTranscripts;
+  const listTranscripts = deps.listTranscripts == null ? listAnalyticsSessions : deps.listTranscripts;
   const recordedCwd = deps.firstRecordedCwd == null ? _firstRecordedCwd : deps.firstRecordedCwd;
   const runCheckpoint = deps.runCheckpointImpl == null ? _runCheckpoint : deps.runCheckpointImpl;
   const flushBackfillChunks = deps.flushBackfillChunksImpl == null ? _flushBackfillChunks : deps.flushBackfillChunksImpl;
@@ -302,12 +316,13 @@ export async function runAudit(deps = {}, options = {}) {
   // queue/<segmentId>.json; if it landed after this run's wide re-send, the server would hold a
   // narrow row inside a wider one — the one direction its containment supersede cannot dedupe, so
   // both would count in every SUM. Draining first also makes the coverage answer below current.
-  if (syncMode) {
+  if (syncMode && !options.coworkLive) {
     try { await flushQueue(session, { fetchImpl }); } catch { /* best-effort; coverage still bounds us */ }
   }
 
   const live = liveSessionId(env, deps);
   const all = listTranscripts();
+  result.coworkWarnings = all.coworkWarnings || 0;
   result.scanned = all.length;
 
   // Live-tracking tenants: everything since the machine link was tracked live; re-sending it
@@ -321,9 +336,10 @@ export async function runAudit(deps = {}, options = {}) {
 
   const candidates = [];
   for (const entry of all) {
-    if (live && entry.sessionId === live) { result.live += 1; continue; }
-    if (entry.mtimeMs > activeCutoffMs) { result.active += 1; continue; }
-    if (linkCutoffMs != null && entry.mtimeMs >= linkCutoffMs) { result.liveTracked += 1; continue; }
+    const liveCowork = options.coworkLive === true && entry.source === 'claude-cowork';
+    if (!liveCowork && live && entry.sessionId === live) { result.live += 1; continue; }
+    if (!liveCowork && entry.mtimeMs > activeCutoffMs) { result.active += 1; continue; }
+    if (entry.source !== 'claude-cowork' && linkCutoffMs != null && entry.mtimeMs >= linkCutoffMs) { result.liveTracked += 1; continue; }
     // Session-keyed, so it goes stale the moment a session grows — coverage supersedes it in sync.
     if (!syncMode && !options.force && isImported(ledger, entry.sessionId)) { result.alreadyImported += 1; continue; }
     if (options.sinceMs != null && entry.mtimeMs < options.sinceMs) continue;
@@ -377,6 +393,9 @@ export async function runAudit(deps = {}, options = {}) {
   let halted = false;
 
   const dispatchBatch = async (batch) => {
+    if (deps.shouldContinue != null && !deps.shouldContinue()) {
+      result.halt = 'tracking-stopped'; halted = true; return;
+    }
     result.plannedReports += batch.reduce((sum, g) => sum + g.reports.length, 0);
     if (options.dryRun) {
       const chunks = planChunks(batch);
@@ -431,13 +450,22 @@ export async function runAudit(deps = {}, options = {}) {
         status === BackfillSessionStatus.PARTIAL ||
         status === BackfillSessionStatus.REJECTED
       ) {
+        const previousEntry = ledger.sessions[group.sessionId];
         markImported(ledger, group.sessionId, { outcome: status, reports: group.reports.length });
+        if (previousEntry != null && previousEntry.coworkSnapshot != null) {
+          ledger.sessions[group.sessionId].coworkSnapshot = previousEntry.coworkSnapshot;
+        }
+        if (group.cowork === true && status === BackfillSessionStatus.ACCEPTED) {
+          ledger.sessions[group.sessionId].coworkSnapshot = group.costState;
+        }
       } else {
         followups.delete(group.sessionId);
       }
     }
     // Written per dispatch, not once at the end, so Ctrl-C keeps the progress made so far.
-    try { saveLedger(key, ledger); } catch { /* best-effort */ }
+    if (deps.shouldContinue == null || deps.shouldContinue()) {
+      try { saveLedger(key, ledger); } catch { /* best-effort */ }
+    }
 
     if (flushed.halt) {
       result.halt = flushed.halt;
@@ -520,7 +548,7 @@ export async function runAudit(deps = {}, options = {}) {
   const costStateGroupFor = (entry) => {
     let block;
     try {
-      block = readCostState(entry.transcriptPath, entry.sessionId);
+      block = entry.source === 'claude-cowork' ? entry.costState : readCostState(entry.transcriptPath, entry.sessionId);
     } catch {
       return null;
     }
@@ -531,7 +559,7 @@ export async function runAudit(deps = {}, options = {}) {
     if (item == null) return null;
     let shell;
     try {
-      shell = readShell(entry.transcriptPath);
+      shell = entry.source === 'claude-cowork' ? entry.shell : readShell(entry.transcriptPath);
     } catch {
       return null;
     }
@@ -540,10 +568,10 @@ export async function runAudit(deps = {}, options = {}) {
     // back to the segment path, which can still recover a span from its own timing anchors.
     if (shell == null || shell.startedAt == null) return null;
 
-    const costState = { ...item, started_at: shell.startedAt };
+    let costState = { ...item, started_at: shell.startedAt };
     if (shell.endedAt != null) costState.ended_at = shell.endedAt;
     let name = null;
-    try { name = sessionNameFrom(entry.transcriptPath); } catch { /* best-effort */ }
+    try { name = entry.source === 'claude-cowork' ? entry.sessionName : sessionNameFrom(entry.transcriptPath); } catch { /* best-effort */ }
     if (name != null) costState.session_name = name;
     if (shell.cwd != null) {
       try {
@@ -559,7 +587,14 @@ export async function runAudit(deps = {}, options = {}) {
         if (remote != null && remote.length <= MAX_REPO_URL_LENGTH) costState.repo_urls = [remote];
       } catch { /* best-effort */ }
     }
-    return { sessionId: entry.sessionId, reports: [], timeline: null, costState: costState };
+    const cowork = entry.source === 'claude-cowork';
+    let unchanged = false;
+    if (cowork) {
+      const previous = ledger.sessions[entry.sessionId];
+      costState = nonRegressingSnapshot(costState, previous == null ? null : previous.coworkSnapshot);
+      unchanged = options.coworkLive === true && previous != null && sameCumulativeUsage(costState, previous.coworkSnapshot);
+    }
+    return { sessionId: entry.sessionId, reports: [], timeline: null, costState: costState, cowork, unchanged };
   };
 
   // Resolved for EVERY candidate up front, before the coverage question below. Two bounded reads
@@ -600,6 +635,7 @@ export async function runAudit(deps = {}, options = {}) {
     const fastPath = costStateBySession.get(entry.sessionId);
     if (fastPath != null) {
       processed += 1;
+      if (fastPath.unchanged) { result.empty += 1; continue; }
       result.costStateSessions += 1;
       pending.push(fastPath);
       pendingBytes += Buffer.byteLength(JSON.stringify(fastPath.costState), 'utf-8');

@@ -4,10 +4,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fork } from 'child_process';
-import { fileURLToPath } from 'url';
 import { readJson, readJsonSalvaged, writeJsonSecure } from '../lib/fs-store.mjs';
 
-const STORE = fileURLToPath(new URL('../lib/fs-store.mjs', import.meta.url));
+const STORE = new URL('../lib/fs-store.mjs', import.meta.url).href;
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'beezi-fs-store-'));
@@ -68,12 +67,15 @@ test('concurrent writers never leave the target unparseable', { timeout: 60_000 
     process.send('ready');
   `);
 
-  const start = (idx) => new Promise((resolve) => {
-    const child = fork(worker, [], { env: { ...process.env, WORKER: String(idx) }, stdio: 'ignore' });
-    child.once('message', () => resolve(child));
+  const start = (idx) => new Promise((resolve, reject) => {
+    const child = fork(worker, [], { env: { ...process.env, WORKER: String(idx) }, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    t.after(() => child.kill());
+    const earlyExit = (code) => reject(new Error(`Store worker exited before ready (${code})`));
+    child.once('error', reject);
+    child.once('exit', earlyExit);
+    child.once('message', () => { child.removeListener('exit', earlyExit); resolve(child); });
   });
   const workers = [await start(0), await start(1)];
-  t.after(() => workers.forEach((w) => w.kill()));
 
   // Different lengths on purpose — the real collision is a payload that drops the context/stats
   // fields landing over one that carries them.
@@ -84,8 +86,10 @@ test('concurrent writers never leave the target unparseable', { timeout: 60_000 
   const damaged = [];
   for (let round = 0; round < ROUNDS; round++) {
     const target = path.join(dir, `seg-${round}.json`);
-    await Promise.all(workers.map((w, i) => new Promise((resolve) => {
-      w.once('message', resolve);
+    await Promise.all(workers.map((w, i) => new Promise((resolve, reject) => {
+      const exited = (code) => reject(new Error(`Store worker exited during write (${code})`));
+      w.once('exit', exited);
+      w.once('message', () => { w.removeListener('exit', exited); resolve(); });
       w.send({ target, payload: i === 0 ? long : short });
     })));
     const raw = fs.readFileSync(target, 'utf8');
