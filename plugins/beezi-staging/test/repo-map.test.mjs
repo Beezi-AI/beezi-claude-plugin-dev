@@ -80,6 +80,16 @@ test('upsertRoot + knownOrigin roundtrip', (t) => {
   assert.equal(knownOrigin(path.join(base, 'nope'), map), null);
 });
 
+test('knownOrigin re-sanitizes cached values that predate the sanitizer', (t) => {
+  const base = tmp(t);
+  const repo = mkRepo(base, 'r');
+  const map = { version: 1, roots: {} };
+  upsertRoot(map, repo, 'https://host/o/r.git?token=abc');
+  assert.equal(knownOrigin(repo, map), 'https://host/o/r.git');
+  upsertRoot(map, repo, 'C:\\Users\\me\\src\\repo');
+  assert.equal(knownOrigin(repo, map), 'local:repo');
+});
+
 test('pruneRepoMap drops roots whose .git is gone, keeps live ones', (t) => {
   const base = tmp(t);
   const live = mkRepo(base, 'live');
