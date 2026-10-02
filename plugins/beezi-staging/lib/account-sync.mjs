@@ -210,7 +210,11 @@ export async function syncAccountIfNeeded(session, options = {}, deps = {}) {
     const hash = payloadHash(payload);
     // A keyless session (the pre-index login handshake) still checks in; it just has nowhere to
     // record the marker, so it re-sends next time.
-    const state = session.key == null ? null : readAccountSyncState(session.key, deps);
+    const stored = session.key == null ? null : readAccountSyncState(session.key, deps);
+    // A workspace-scoped check-in keeps its own marker under byTenant in the same file.
+    const tenantId = session.tenantId == null ? null : session.tenantId;
+    const byTenant = stored != null && stored.byTenant != null && typeof stored.byTenant === 'object' ? stored.byTenant : {};
+    const state = tenantId == null ? stored : (byTenant[tenantId] == null ? null : byTenant[tenantId]);
     const unchanged = state != null && state.lastSyncedHash === hash;
     if (!force && unchanged && !dueForResync(state, now.getTime())) {
       return { synced: false, reason: 'unchanged' };
@@ -219,7 +223,15 @@ export async function syncAccountIfNeeded(session, options = {}, deps = {}) {
     const res = await postJson(`${apiBase()}${ENDPOINTS.accountSync}`, session, payload, { fetchImpl });
     if (res != null && res.status >= 200 && res.status < 300) {
       if (session.key != null) {
-        writeAccountSyncState(session.key, { lastSyncedHash: hash, lastSyncedAt: now.toISOString() }, deps);
+        const marker = { lastSyncedHash: hash, lastSyncedAt: now.toISOString() };
+        // Re-read after the POST: parallel check-ins of other workspaces may have written meanwhile.
+        const latest = readAccountSyncState(session.key, deps);
+        const base = latest == null ? {} : { ...latest };
+        delete base.version;
+        const latestByTenant = base.byTenant != null && typeof base.byTenant === 'object' ? base.byTenant : {};
+        writeAccountSyncState(session.key, tenantId == null
+          ? { ...base, ...marker }
+          : { ...base, byTenant: { ...latestByTenant, [tenantId]: marker } }, deps);
       }
       return { synced: true, status: res.status };
     }

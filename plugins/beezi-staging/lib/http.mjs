@@ -11,7 +11,9 @@ export function authHeaders(session) {
   if (session == null || typeof session.token !== 'string' || !session.token) {
     throw new TypeError('An authenticated account session is required.');
   }
-  return { Authorization: `Bearer ${session.token}`, ...machineHeaders(session.clientId) };
+  const headers = { Authorization: `Bearer ${session.token}`, ...machineHeaders(session.clientId) };
+  if (typeof session.tenantId === 'string' && session.tenantId !== '') headers['X-Beezi-Tenant'] = session.tenantId;
+  return headers;
 }
 
 export async function postJson(url, session, body, deps = {}) {

@@ -1,6 +1,7 @@
-import { parseArgs, runAudit, SYNC_MODE } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
-import { parseAccountFlag, listAccounts, describeAccount, AccountStatus } from '../lib/accounts.mjs';
+import { parseAccountFlag, listAccounts, getAccount, describeAccount, AccountStatus } from '../lib/accounts.mjs';
+import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 
@@ -47,6 +48,10 @@ async function syncOne(account, options, label) {
   }
   if (result.reason === 'no-account') {
     console.error('✗ Beezi: that account is not linked or its link expired. Run /beezi:login and sign in as it.');
+    return;
+  }
+  if (result.reason === 'workspace-required') {
+    console.error('✗ Beezi: this account belongs to several workspaces and none was picked for this run. Check where analytics go with /beezi:settings, then run /beezi:sync again.');
     return;
   }
   if (result.halt === BackfillHalt.NOT_ALLOWED) {
@@ -181,9 +186,43 @@ async function syncOne(account, options, label) {
   );
 }
 
+function tenantLabel(row, tenantId) {
+  const t = tenantById(row, tenantId);
+  return t != null && t.name ? t.name : tenantId;
+}
+
+// Sessions a rule routes, then the rest by New folders; a zero clause is dropped and null means print nothing.
+function routeSummary(row, plan) {
+  const ruled = plan.counts.rule;
+  const rest = plan.counts['new-folders'] + plan.counts.none + plan.counts.pending;
+  const clauses = [];
+  if (ruled > 0) clauses.push(`${plural(ruled, 'past session')} ${ruled === 1 ? 'follows' : 'follow'} your rules`);
+  if (rest > 0) {
+    // The first printed clause names the sessions.
+    const lead = clauses.length === 0 ? plural(rest, 'past session') : String(rest);
+    const newFolders = newFoldersOf(row);
+    if (newFolders.mode === 'send') {
+      const names = newFolders.tenantIds.map((id) => tenantLabel(row, id)).join(', ');
+      clauses.push(`${lead} in new folders ${rest === 1 ? 'goes' : 'go'} to ${names}`);
+    } else if (newFolders.mode === 'none') {
+      clauses.push(`${lead} in new folders ${rest === 1 ? 'is' : 'are'} not sent`);
+    } else {
+      clauses.push(`${lead} in repos or folders with no rule ${rest === 1 ? 'is' : 'are'} not sent this time`);
+    }
+  }
+  return clauses.length === 0 ? null : `Beezi (${describeAccount(row)}): ${clauses.join('; ')}.`;
+}
+
 async function main() {
   const { account, rest } = await parseAccountFlag(process.argv.slice(2));
-  const options = parseArgs(rest);
+  const rows = account != null
+    ? [(await getAccount(account)) || { key: account }]
+    : (await listAccounts()).filter((a) => a.status === AccountStatus.LINKED);
+  if (rows.length === 0) fail('Beezi: this machine is not linked. Run /beezi:login first.');
+  if (rows.length > 1 && rest.indexOf('--tenant') !== -1) {
+    fail('Beezi: --tenant needs --account <key> when several accounts are linked.');
+  }
+  const options = parseArgs(rest.filter((arg, i) => arg !== '--tenant' && rest[i - 1] !== '--tenant'));
   if (options.sinceMs != null) {
     fail('Beezi: /beezi:sync does not take --since — it uploads exactly what Beezi is missing. Run it with no flags.');
   }
@@ -191,15 +230,33 @@ async function main() {
     fail('Beezi: /beezi:sync does not take --force — there is no one-time seal to force past.');
   }
 
-  if (account != null) {
-    await syncOne(account, { ...options }, null);
-    return;
-  }
-  const accounts = (await listAccounts()).filter((a) => a.status === AccountStatus.LINKED);
-  if (accounts.length === 0) fail('Beezi: this machine is not linked. Run /beezi:login first.');
-  for (const a of accounts) {
-    if (accounts.length > 1) console.log(`\n— ${describeAccount(a)} —`);
-    await syncOne(a.key, { ...options }, null);
+  // One run per account × routed workspace.
+  for (const row of rows) {
+    const override = parseTenantFlags(rest, row).tenantIds;
+    if (!isMultiTenant(row)) {
+      if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
+      await syncOne(row.key, { ...options, tenantId: null }, null);
+      continue;
+    }
+    // --tenant is an override: those workspaces get every past session, unrouted.
+    if (override.length > 0) {
+      for (const tenantId of override) {
+        console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
+        await syncOne(row.key, { ...options, tenantId }, null);
+      }
+      continue;
+    }
+    const plan = planWorkspaceRuns(row);
+    if (plan.scanned === 0) {
+      console.log(`\n✓ Beezi (${describeAccount(row)}): no Claude Code sessions found on this machine.`);
+      continue;
+    }
+    const summary = routeSummary(row, plan);
+    if (summary != null) console.log(`\n${summary}`);
+    for (const tenantId of plan.tenantIds) {
+      console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
+      await syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null);
+    }
   }
 }
 

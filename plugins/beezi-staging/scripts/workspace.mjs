@@ -1,0 +1,504 @@
+import os from 'os';
+import path from 'path';
+import {
+  AccountStatus, getDefaultKey, listAccounts, parseAccountFlag, removeWorkspaceRule, setNewFolders, setWorkspaceRule,
+} from '../lib/accounts.mjs';
+import { resolveSessionId } from '../lib/permission-mode-store.mjs';
+import {
+  findSessionWorkspaceByCwd,
+  initSessionWorkspace,
+  isMultiTenant,
+  listSessionWorkspaces,
+  newFoldersOf,
+  readSessionWorkspace,
+  recordReadTenant,
+  resolveTargets,
+  resolveTenantRef,
+  roleLabel,
+  tenantById,
+  tenantsOf,
+} from '../lib/workspace.mjs';
+import { releaseHeldQueue } from '../lib/workspace-queue.mjs';
+import { pluginRoot } from '../lib/workspace-prompt.mjs';
+import {
+  createRouteContext, outsideKey, planUnruledRoutes, routeForDir, routeKeyForDir, rulesOf, rulesTableLines, shortLabel,
+} from '../lib/workspace-rules.mjs';
+import { canonicalRemote } from '../lib/git.mjs';
+import { normPath, pathHasPrefix } from '../lib/repo-map.mjs';
+import { listAllTranscripts } from '../lib/transcript-index.mjs';
+import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
+import { sessionFor } from '../lib/sessions.mjs';
+import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
+import { fetchOauthKeyStatus } from '../lib/oauth-key-status.mjs';
+import { recordResolvedKeyData } from '../lib/plan-writeback.mjs';
+import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
+
+const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account <ref>]'
+  + ' | rule add (--current | --repo <url> | --folder <path> | --outside) (<id|name|n>… | none) [--session <id>] [--account <ref>]'
+  + ' | rule set <n> (<id|name|n>… | none) [--account <ref>]'
+  + ' | rule remove <n> [--account <ref>]'
+  + ' | rule add-all (<id|name|n>… | none) [--session <id>] [--account <ref>]'
+  + ' | routes [--session <id>] [--account <ref>]'
+  + ' | new-folders [ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
+  + ' | read <id|name|n> [--session <id>] [--account <ref>]';
+const NOT_LINKED = 'Beezi: this machine is not linked. Run /beezi:login to link an account.';
+const TARGET_FLAGS = ['--current', '--repo', '--folder', '--outside'];
+// Printed commands spell the script path out: tool output does not expand ${CLAUDE_PLUGIN_ROOT}.
+const SCRIPT = `node "${pluginRoot()}/scripts/workspace.mjs"`;
+
+function parseSessionFlag(argv) {
+  const rest = [];
+  let session = null;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--session') {
+      session = argv[++i];
+      if (session == null || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(session)) throw new UserError('--session needs a Claude Code session id.');
+      continue;
+    }
+    rest.push(argv[i]);
+  }
+  return { session, rest };
+}
+
+// --session, then the id Claude Code exports, then the newest session recorded for this directory.
+function resolveSession(flag) {
+  if (flag != null) return { sessionId: flag, state: readSessionWorkspace(flag) };
+  const fromEnv = resolveSessionId();
+  if (fromEnv != null) return { sessionId: fromEnv, state: readSessionWorkspace(fromEnv) };
+  const byCwd = findSessionWorkspaceByCwd(process.cwd());
+  return byCwd == null ? { sessionId: null, state: null } : byCwd;
+}
+
+function accountLabel(row) {
+  if (row.email) return row.email;
+  return row.name ? row.name : row.key;
+}
+
+// --account, then the default, then the only linked account.
+async function resolveAccount(key) {
+  const accounts = await listAccounts();
+  const linked = accounts.filter((a) => a.status === AccountStatus.LINKED);
+  if (accounts.length === 0) throw new UserError('This machine is not linked. Run /beezi:login to link an account.');
+  let chosen = key;
+  if (chosen == null) chosen = await getDefaultKey();
+  if (chosen == null && linked.length === 1) chosen = linked[0].key;
+  if (chosen == null) throw new UserError('Several accounts are linked and none is the default. Pass --account <ref> (see /beezi:settings account).');
+  const row = accounts.find((a) => a.key === chosen);
+  if (row == null) throw new UserError('No such linked account.');
+  return row;
+}
+
+// --account's row, else every linked account.
+async function selectedRows(account) {
+  return account == null
+    ? (await listAccounts()).filter((a) => a.status === AccountStatus.LINKED)
+    : [await resolveAccount(account)];
+}
+
+function choiceDir(state) {
+  return state != null && state.cwd != null ? state.cwd : process.cwd();
+}
+
+function tenantName(row, id) {
+  const t = tenantById(row, id);
+  return t != null && t.name ? t.name : id;
+}
+
+function tenantNames(row, ids) {
+  return ids.map((id) => tenantName(row, id)).join(', ');
+}
+
+function sendList(row, ids) {
+  return ids.length === 0 ? 'not tracked' : tenantNames(row, ids);
+}
+
+function idList(ids) {
+  return ids.length === 0 ? 'none' : ids.join(',');
+}
+
+function sessionsCount(n) {
+  return `${n} session${n === 1 ? '' : 's'}`;
+}
+
+function newFoldersLabel(row) {
+  const newFolders = newFoldersOf(row);
+  if (newFolders.mode === 'send') return `Send to ${tenantNames(row, newFolders.tenantIds)}`;
+  return newFolders.mode === 'none' ? 'Don\'t send' : 'Ask me';
+}
+
+// A rule's place in a sentence: its short name, or "sessions outside a project".
+function placeOf(key) {
+  return key.kind === 'outside' ? 'sessions outside a project' : shortLabel(key);
+}
+
+function ruleDone(row, key, tenantIds, changed) {
+  const now = changed ? 'now ' : '';
+  if (tenantIds.length > 0) return `✓ Analytics for ${placeOf(key)} ${now}go to ${tenantNames(row, tenantIds)}.`;
+  return `✓ ${key.kind === 'outside' ? 'Sessions outside a project are' : `${placeOf(key)} is`} ${now}not tracked.`;
+}
+
+function requireMulti(row) {
+  if (!isMultiTenant(row)) {
+    throw new UserError(`${accountLabel(row)} has one workspace (or its workspaces are not known yet), so there is nothing to choose.`);
+  }
+}
+
+// The workspaces to offer, one line each; role= is last and may be empty.
+function printWorkspaces(row) {
+  for (const t of tenantsOf(row)) console.log(`W. ${t.name ? t.name : t.id} account=${row.key} tenant=${t.id} role=${roleLabel(t)}`);
+}
+
+// The tenant-scoped check-in and key status a session holds back until it knows where it sends.
+async function checkIn(row, tenantId) {
+  try {
+    const live = await sessionFor(row.key);
+    if (live == null) return;
+    const session = { ...live, tenantId };
+    const env = oauthTokenEnvWithOsProbe(process.env);
+    await syncAccountIfNeeded(session, { force: true, via: 'workspace' }, { env });
+    const keyStatus = await fetchOauthKeyStatus(session, { env, refresh: true });
+    if (keyStatus != null && keyStatus.known && keyStatus.subscriptionPlan != null && row.key === await getDefaultKey()) {
+      recordResolvedKeyData(keyStatus);
+    }
+  } catch (error) {
+    console.error(`Beezi: workspace check-in skipped (${friendlyMessage(error)}).`);
+  }
+}
+
+function refValues(refs) {
+  const values = [];
+  for (const ref of refs) for (const part of String(ref).split(',')) if (part.trim() !== '') values.push(part.trim());
+  return values;
+}
+
+// Ids/names/positions (comma lists too) in row order; `none` anywhere wins and means send nowhere.
+function selection(row, refs) {
+  const values = refValues(refs);
+  if (values.length === 0) throw new UserError(USAGE);
+  if (values.some((v) => v.toLowerCase() === 'none')) return [];
+  const picked = values.map((v) => resolveTenantRef(row, v));
+  return tenantsOf(row).map((t) => t.id).filter((id) => picked.indexOf(id) !== -1);
+}
+
+function homeDir() {
+  return normPath(os.homedir());
+}
+
+// `/`, a drive root, home or a folder above it (e.g. /Users): a folder rule there would catch every session.
+function isHomeOrRoot(p) {
+  const home = homeDir();
+  return p === '/' || /^[a-z]:\/?$/i.test(p) || (home != null && pathHasPrefix(home, p));
+}
+
+function displayPath(p) {
+  const home = homeDir();
+  return home != null && pathHasPrefix(p, home) ? `~${p.slice(home.length)}` : p;
+}
+
+// Binds open sessions whose directory now routes to one of `indices`: the current one always, others when unbound or bound to that rule.
+// Each bound session's held reports are released, and each workspace it newly sends to gets one check-in.
+async function bindOpenSessions(row, indices, current, ctx) {
+  const checkedIn = [];
+  const target = (dir) => {
+    const route = dir == null ? null : routeForDir(row, dir, ctx);
+    return route != null && indices.indexOf(route.index) !== -1 ? route : null;
+  };
+  const bind = async (sid, prior, route, dir) => {
+    const before = resolveTargets(row, prior).targets;
+    // Records the directory too, so a session with no state yet can be found by folder later.
+    initSessionWorkspace(sid, { cwd: dir, routes: { [row.key]: route } });
+    releaseHeldQueue(row, sid);
+    for (const id of resolveTargets(row, readSessionWorkspace(sid)).targets) {
+      if (before.indexOf(id) !== -1 || checkedIn.indexOf(id) !== -1) continue;
+      checkedIn.push(id);
+      await checkIn(row, id);
+    }
+  };
+  if (current.sessionId != null) {
+    const dir = choiceDir(current.state);
+    const route = target(dir);
+    if (route != null) await bind(current.sessionId, current.state, route, dir);
+  }
+  for (const entry of listSessionWorkspaces()) {
+    if (entry.sessionId === current.sessionId) continue;
+    const route = target(entry.state.cwd);
+    if (route == null) continue;
+    const bound = entry.state.route[row.key];
+    if (bound != null && (bound.kind !== route.kind || bound.match !== route.match)) continue;
+    await bind(entry.sessionId, entry.state, route, entry.state.cwd);
+  }
+}
+
+// A rule or place in a machine line: its short name, then its full label in parentheses (none for outside).
+function labeled(key) {
+  return key.kind === 'outside' ? shortLabel(key) : `${shortLabel(key)} (${key.label})`;
+}
+
+function printRulesTable(rows, dir, ctx) {
+  console.log(rulesTableLines(rows, dir, ctx).join('\n'));
+}
+
+async function rules(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest: afterAccount } = await parseAccountFlag(afterSession);
+  const table = afterAccount.indexOf('--table') !== -1;
+  const rest = afterAccount.filter((a) => a !== '--table');
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const rows = await selectedRows(account);
+  if (rows.length === 0) {
+    console.log(NOT_LINKED);
+    return;
+  }
+  const dir = choiceDir(resolveSession(session).state);
+  const ctx = createRouteContext();
+  if (table) {
+    printRulesTable(rows, dir, ctx);
+    return;
+  }
+  for (const row of rows) {
+    const tenants = tenantsOf(row);
+    if (tenants == null || tenants.length === 0) {
+      console.log(`${accountLabel(row)}: workspaces not known yet; rules do not apply account=${row.key}`);
+      continue;
+    }
+    if (!isMultiTenant(row)) {
+      console.log(`${accountLabel(row)}: one workspace; rules do not apply account=${row.key}`);
+      continue;
+    }
+    const stored = rulesOf(row);
+    console.log(`${accountLabel(row)}: ${stored.length} rule(s) account=${row.key}`);
+    printWorkspaces(row);
+    for (const r of stored) {
+      console.log(`R${r.index}. ${labeled(r)} → ${sendList(row, r.tenantIds)} account=${row.key} rule=${r.index} kind=${r.kind} tenants=${idList(r.tenantIds)} match=${r.match}`);
+    }
+    const key = routeKeyForDir(dir, ctx);
+    if (key == null) {
+      console.log(`here: none account=${row.key}`);
+      continue;
+    }
+    const route = routeForDir(row, dir, ctx);
+    console.log(`here: ${labeled(key)} → ${route == null ? 'no rule' : `R${route.index}`} account=${row.key} rule=${route == null ? 'none' : route.index} kind=${key.kind} match=${key.match}`);
+  }
+}
+
+// The rule's key from --current (the session's directory; home, / and temp give `outside`), --repo, --folder or --outside.
+function ruleKey(target, dir, ctx) {
+  if (target.flag === '--outside') return outsideKey();
+  if (target.flag === '--current') {
+    const key = routeKeyForDir(dir, ctx);
+    if (key == null) throw new UserError('No folder is known for this session. Pass --repo <url>, --folder <path> or --outside.');
+    return key;
+  }
+  if (target.flag === '--repo') {
+    const canon = canonicalRemote(target.value);
+    if (canon == null) throw new UserError(`"${target.value}" is not a repository remote URL.`);
+    return { kind: 'repo', match: canon, label: canon };
+  }
+  const raw = target.value === '~' || target.value.indexOf('~/') === 0 ? path.join(os.homedir(), target.value.slice(1)) : target.value;
+  const folder = normPath(path.resolve(raw));
+  if (folder == null || isHomeOrRoot(folder)) {
+    throw new UserError('A folder rule can\'t be your home folder, a folder above it, or /: it would catch every session. Use --outside for sessions there.');
+  }
+  return { kind: 'folder', match: folder, label: displayPath(folder) };
+}
+
+function findRule(row, ref) {
+  const n = Number(String(ref).replace(/^R/i, ''));
+  const found = rulesOf(row).find((r) => r.index === n);
+  if (found == null) throw new UserError(`There is no rule ${ref}. Run /beezi:settings rules to list them.`);
+  return found;
+}
+
+async function ruleAdd(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  let target = null;
+  const refs = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    if (TARGET_FLAGS.indexOf(arg) === -1) {
+      refs.push(arg);
+      continue;
+    }
+    if (target != null) throw new UserError('Pass only one of --current, --repo <url>, --folder <path> or --outside.');
+    const bare = arg === '--current' || arg === '--outside';
+    const value = bare ? null : rest[++i];
+    if (!bare && (value == null || value.trim() === '')) throw new UserError(`${arg} needs a value.`);
+    target = { flag: arg, value };
+  }
+  if (target == null || refs.length === 0) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  requireMulti(row);
+  const current = resolveSession(session);
+  const ctx = createRouteContext();
+  const key = ruleKey(target, choiceDir(current.state), ctx);
+  const tenantIds = selection(row, refs);
+  const n = (await setWorkspaceRule(row.key, { kind: key.kind, match: key.match, label: key.label, tenantIds })).index;
+  console.log(ruleDone(row, key, tenantIds, false));
+  await bindOpenSessions(await resolveAccount(row.key), [n], current, ctx);
+  console.log(`rule=${n}`);
+}
+
+async function ruleSet(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length < 2) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  requireMulti(row);
+  const found = findRule(row, rest[0]);
+  const tenantIds = selection(row, rest.slice(1));
+  await setWorkspaceRule(row.key, { kind: found.kind, match: found.match, label: found.label, tenantIds });
+  console.log(ruleDone(row, found, tenantIds, true));
+  await bindOpenSessions(await resolveAccount(row.key), [found.index], resolveSession(session), createRouteContext());
+  console.log(`rule=${found.index}`);
+}
+
+async function ruleRemove(argv) {
+  const { account, rest } = await parseAccountFlag(argv);
+  if (rest.length !== 1) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  const removed = await removeWorkspaceRule(row.key, String(rest[0]).replace(/^R/i, ''));
+  console.log(`✓ Removed the rule for ${placeOf(removed)}. New sessions there follow New folders (${newFoldersLabel(row)}).`);
+  console.log(`removed=${removed.index}`);
+}
+
+// One rule per repo or folder that `routes` lists, all sending to the same workspaces.
+async function ruleAddAll(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length === 0) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  requireMulti(row);
+  const tenantIds = selection(row, rest);
+  const current = resolveSession(session);
+  const ctx = createRouteContext();
+  const groups = planUnruledRoutes(row, listAllTranscripts(), ctx, { liveSessionId: current.sessionId });
+  const added = [];
+  for (const g of groups) {
+    added.push((await setWorkspaceRule(row.key, { kind: g.kind, match: g.match, label: g.label, tenantIds })).index);
+  }
+  const n = added.length;
+  if (n === 0) {
+    console.log('✓ No repos or folders are waiting for a rule.');
+  } else {
+    const those = n === 1 ? 'that repo or folder' : 'those repos and folders';
+    const where = tenantIds.length === 0 ? `${those} ${n === 1 ? 'is' : 'are'} not tracked` : `analytics for ${those} go to ${tenantNames(row, tenantIds)}`;
+    console.log(`✓ Added ${n} rule${n === 1 ? '' : 's'}: ${where}.`);
+    await bindOpenSessions(await resolveAccount(row.key), added, current, ctx);
+  }
+  console.log(`rules-added=${n}`);
+}
+
+async function rule(argv) {
+  const [sub, ...rest] = argv;
+  if (sub === 'add') { await ruleAdd(rest); return; }
+  if (sub === 'set') { await ruleSet(rest); return; }
+  if (sub === 'remove') { await ruleRemove(rest); return; }
+  if (sub === 'add-all') { await ruleAddAll(rest); return; }
+  throw new UserError(USAGE);
+}
+
+// Past sessions waiting under New folders = Ask me, grouped by repo or folder, for the planning questions.
+async function routes(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const rows = await selectedRows(account);
+  const { sessionId } = resolveSession(session);
+  const ctx = createRouteContext();
+  let entries = null;
+  let total = 0;
+  for (const row of rows) {
+    if (row.status !== AccountStatus.LINKED || !isMultiTenant(row) || newFoldersOf(row).mode !== 'ask') continue;
+    if (entries == null) entries = listAllTranscripts();
+    const groups = planUnruledRoutes(row, entries, ctx, { liveSessionId: sessionId });
+    if (groups.length > 0) {
+      const count = groups.reduce((sum, g) => sum + g.sessions, 0);
+      const places = groups.length === 1 ? '1 repo or folder has' : `${groups.length} repos or folders have`;
+      console.log(`${accountLabel(row)}: ${places} past sessions with no rule (${sessionsCount(count)}) account=${row.key}`);
+      printWorkspaces(row);
+      for (const g of groups) {
+        total += 1;
+        console.log(`P${total}. ${labeled(g)}, ${sessionsCount(g.sessions)} account=${row.key} kind=${g.kind} match=${g.match}`);
+        // Single quotes keep $, backticks, " and \ in the match literal.
+        const where = g.kind === 'outside' ? '--outside' : `--${g.kind} '${g.match.replace(/'/g, "'\\''")}'`;
+        console.log(`P${total}-command=${SCRIPT} rule add ${where} --account ${row.key} <tenants>`);
+      }
+      console.log(`all-command=${SCRIPT} rule add-all --account ${row.key} <tenants>`);
+    }
+    const lost = groups.noDirectory;
+    if (lost > 0) {
+      console.log(lost === 1
+        ? '1 other past session has no recorded folder and is not sent.'
+        : `${lost} other past sessions have no recorded folder and are not sent.`);
+    }
+  }
+  console.log(`routes=${total}`);
+}
+
+async function newFolders(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  const row = await resolveAccount(account);
+  if (rest.length === 0) {
+    if (!isMultiTenant(row)) {
+      console.log(`new-folders=n/a multi=no account=${row.key}`);
+      return;
+    }
+    const several = (await listAccounts()).length > 1;
+    const newFoldersNow = newFoldersOf(row);
+    console.log(`New folders${several ? ` (${accountLabel(row)})` : ''}: ${newFoldersLabel(row)}`);
+    printWorkspaces(row);
+    console.log(`new-folders=${newFoldersNow.mode} set=${newFoldersNow.set ? 'yes' : 'no'} multi=yes account=${row.key}`);
+    return;
+  }
+  requireMulti(row);
+  const mode = String(rest[0]).toLowerCase();
+  if ((mode !== 'ask' && mode !== 'send' && mode !== 'none') || (mode !== 'send' && rest.length > 1)) throw new UserError(USAGE);
+  const tenantIds = mode === 'send' ? selection(row, rest.slice(1)) : [];
+  if (mode === 'send' && tenantIds.length === 0) throw new UserError('Send needs at least one workspace; use none to send nowhere.');
+  const current = resolveSession(session);
+  const before = resolveTargets(row, current.state);
+  await setNewFolders(row.key, { mode, tenantIds });
+  if (mode === 'ask') console.log('✓ New folders: Ask me — Beezi asks once per repo or folder.');
+  else if (mode === 'send') console.log(`✓ New folders: analytics go to ${tenantNames(row, tenantIds)}.`);
+  else console.log('✓ New folders: not uploaded.');
+  // A session here with no rule follows the new setting now: its held reports go out and new workspaces check in.
+  if (current.sessionId != null && before.rule == null) {
+    const fresh = await resolveAccount(row.key);
+    releaseHeldQueue(fresh, current.sessionId);
+    for (const id of resolveTargets(fresh, current.state).targets) {
+      if (before.targets.indexOf(id) === -1) await checkIn(fresh, id);
+    }
+  }
+  console.log(`new-folders=${mode}`);
+}
+
+async function read(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length !== 1) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  const tenantId = resolveTenantRef(row, rest[0]);
+  const { sessionId } = resolveSession(session);
+  if (sessionId == null || recordReadTenant(sessionId, row.key, tenantId) == null) {
+    throw new UserError('No Claude Code session found. Run this inside a Claude Code session or pass --session <id>.');
+  }
+  console.log(`✓ Reading from ${tenantName(row, tenantId)} in this session.`);
+  console.log(`read=${tenantId}`);
+}
+
+async function main() {
+  const [cmd, ...argv] = process.argv.slice(2);
+  if (cmd === 'rules') { await rules(argv); return; }
+  if (cmd === 'rule') { await rule(argv); return; }
+  if (cmd === 'routes') { await routes(argv); return; }
+  if (cmd === 'new-folders') { await newFolders(argv); return; }
+  if (cmd === 'read') { await read(argv); return; }
+  throw new UserError(cmd == null ? USAGE : `Unknown command "${cmd}". ${USAGE}`);
+}
+
+main().catch((error) => {
+  console.error(`\n✗ ${friendlyMessage(error)}`);
+  process.exit(1);
+});
