@@ -234,26 +234,27 @@ test('adding another tenant keeps the default and publishes its own credentials'
   assert.equal((await readCredentials(store, { account: result.account })).credentials.client_id, 'new-client');
 });
 
-test('another user in the same tenant is refused and the temporary client is unlinked', async t => {
+test('another user in the same tenant is linked as a second account', async t => {
   tmpHome(t); await seed(OLD);
   await addAccount({ key: ACCOUNT, email: 'dev@example.com', tenantId: 'tenant-one', clientId: 'old-client' });
   let unlinked = 0;
-  await assert.rejects(runLogin(deps({
+  const result = await runLogin(deps({
     probeIdentity: async () => ({ outcome: PROBE_OUTCOMES.AUTHENTICATED, identity: { email: 'other@example.com', tenantId: 'tenant-one' } }),
-    unlinkOnServer: async session => { assert.equal(session.clientId, 'new-client'); unlinked++; return { unlinked: true }; },
-  })), /already linked/);
-  assert.equal(unlinked, 1);
-  assert.equal((await readIndex()).accounts.length, 1);
+    unlinkOnServer: async () => { unlinked++; return { unlinked: true }; },
+  }));
+  assert.equal(result.status, 'linked');
+  assert.equal(unlinked, 0);
+  assert.equal((await readIndex()).accounts.length, 2);
   assert.equal((await committed()).credentials.client_id, 'old-client');
 });
 
-test('concurrent logins in one tenant cannot publish duplicate accounts', async t => {
+test('concurrent logins of two users in one tenant publish one account each', async t => {
   tmpHome(t);
   const outcomes = await Promise.allSettled(['one@example.com', 'two@example.com'].map(email => runLogin(deps({
     probeIdentity: async () => ({ outcome: PROBE_OUTCOMES.AUTHENTICATED, identity: { email, tenantId: 'same-tenant' } }),
   }))));
-  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 1);
-  assert.equal((await readIndex()).accounts.length, 1);
+  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 2);
+  assert.equal((await readIndex()).accounts.length, 2);
 });
 
 

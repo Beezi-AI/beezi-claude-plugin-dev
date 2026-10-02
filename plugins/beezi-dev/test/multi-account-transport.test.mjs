@@ -35,9 +35,11 @@ test('concurrent requests keep each bearer paired with its own machine client', 
   await Promise.all([a, b].map((session) => postJson('https://example.test', session, {}, { fetchImpl })));
   assert.deepEqual(seen.sort(), [['Bearer token-a', 'client-a'], ['Bearer token-b', 'client-b']]);
   assert.throws(() => authHeaders('token'), /session/);
+  assert.equal('X-Beezi-Tenant' in authHeaders(a), false);
+  assert.equal(authHeaders({ ...a, tenantId: 'tenant-a' })['X-Beezi-Tenant'], 'tenant-a');
 });
 
-test('identity probe carries the tenant and the explicit session identity', async () => {
+test('identity probe sends the explicit session identity and reads back the tenant', async () => {
   const result = await probeIdentity(b, { fetchImpl: async (url, request) => {
     assert.equal(request.headers['X-Beezi-Client'], 'client-b');
     assert.equal(request.headers.Authorization, 'Bearer token-b');

@@ -333,9 +333,9 @@ function fakeFetchWhoamiOkNoRepo() {
   };
 }
 
-// ─── test 12: stale subscription plan → appends /beezi:refresh nudge ────────
+// ─── test 12: stale subscription plan → appends /beezi:settings refresh nudge
 
-test('12. stale subscription plan — appends /beezi:refresh nudge', async (t) => {
+test('12. stale subscription plan — appends /beezi:settings refresh nudge', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
@@ -349,7 +349,7 @@ test('12. stale subscription plan — appends /beezi:refresh nudge', async (t) =
     isStale: () => true,
   });
 
-  assert.match(result ?? '', /\/beezi:refresh/);
+  assert.match(result ?? '', /\/beezi:settings refresh/);
 });
 
 // ─── setup-token nudge: the case neither billing nudge can structurally reach ──
@@ -357,7 +357,7 @@ test('12. stale subscription plan — appends /beezi:refresh nudge', async (t) =
 // billing.mjs forces SUBSCRIPTION for CLAUDE_CODE_OAUTH_TOKEN, so the UNKNOWN nudge can never fire
 // here, and the stale nudge points at a local re-capture a setup-token machine cannot do. Without
 // this check a CI runner reports unpriced usage in silence.
-test('12b. portal says the setup token has no plan — nudges to /beezi:refresh', async (t) => {
+test('12b. portal says the setup token has no plan — nudges to /beezi:settings refresh', async (t) => {
   const dir = makeTmpDir(t);
   setHome(dir);
 
@@ -371,7 +371,7 @@ test('12b. portal says the setup token has no plan — nudges to /beezi:refresh'
 
   assert.match(result ?? '', /setup token/);
   // Routed at the command that actually performs this resolution, not at the portal UI.
-  assert.match(result ?? '', /\/beezi:refresh/);
+  assert.match(result ?? '', /\/beezi:settings refresh/);
   assert.doesNotMatch(result ?? '', /Connections/);
 });
 
@@ -400,7 +400,7 @@ test('12c. a resolved setup token is silent, and its plan is adopted locally', a
 
   assert.doesNotMatch(result ?? '', /setup token/);
   // The whole point of the loop being closed: the server's answer reaches billing.json without the
-  // user having to run /beezi:refresh first.
+  // user having to run /beezi:settings refresh first.
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0].subscriptionPlan, 'max_20x');
   // The trimmings travel too. A setup-token machine cannot read any of these locally — the type and
@@ -501,7 +501,7 @@ test('13. fresh subscription plan — no nudge appended', async (t) => {
     isStale: () => false,
   });
 
-  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
+  assert.equal(/\/beezi:settings refresh/.test(result ?? ''), false);
 });
 
 // ─── test 14: non-subscription source → no nudge, even if isStale() would say stale ──
@@ -520,7 +520,7 @@ test('14. non-subscription billing source — no nudge even when isStale() would
     isStale: () => true,
   });
 
-  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
+  assert.equal(/\/beezi:settings refresh/.test(result ?? ''), false);
 });
 
 // ─── billing-source drift sync ───────────────────────────────────────────────
@@ -565,7 +565,7 @@ test('14b. billing source changed since last session — billing.json is realign
   assert.match(result ?? '', /billing source subscription → anthropic_api_key/);
   // Still no instruction attached — this switch is observed, not inferred, so there is nothing to
   // second-guess. Only the setup-token → login migration carries a correction hint.
-  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
+  assert.equal(/\/beezi:settings refresh/.test(result ?? ''), false);
 });
 
 test('14c. billing source unchanged — billing.json is left alone', async (t) => {
@@ -659,7 +659,7 @@ test('14e. unknown billing source — nudges the user instead of silently guessi
   assert.match(result ?? '', /unknown/);
   assert.match(result ?? '', /\/beezi:login/);
   // The stale subscription nudge must NOT also fire — the plan is no longer the problem.
-  assert.equal(/\/beezi:refresh/.test(result ?? ''), false);
+  assert.equal(/\/beezi:settings refresh/.test(result ?? ''), false);
   // And the file is realigned off the subscription claim it can no longer support. (The reconcile
   // may first stamp its heartbeat on the kept record; the realign write is the one that matters.)
   assert.ok(writes.length >= 1);
@@ -768,7 +768,7 @@ test('18. audit mode suppresses the billing nudges', async (t) => {
     readClaudeAccountAnchor: () => null,
   });
 
-  assert.ok(!String(message).includes('/beezi:refresh'), 'stale-plan nudge is noise for a dark tenant');
+  assert.ok(!String(message).includes('/beezi:settings refresh'), 'stale-plan nudge is noise for a dark tenant');
 });
 
 test('19. a live tenant with an unfinished pull gets the one-line audit offer', async (t) => {
@@ -843,7 +843,7 @@ test('status line detached → session start says live capture is off', async (t
   assert.equal(
     result,
     'Beezi: repo connected to "Acme". Task-branch sessions will be tracked.\n'
-      + 'Beezi: your status line no longer runs Beezi’s wrapper, so live plan-usage capture is off. Run /beezi:login to wrap it again.',
+      + 'Beezi: your status line no longer runs Beezi’s wrapper, so live plan-usage capture is off. Turn it back on with /beezi:settings statusline on.',
   );
 });
 

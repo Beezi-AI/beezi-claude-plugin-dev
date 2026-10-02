@@ -18,6 +18,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { migrateSingleAccountStore, CREDENTIAL_STATUS } from './credentials.mjs';
 import { markUpgradeNoticePending } from './auth-markers.mjs';
 import { UserError } from './friendly-error.mjs';
+import { rulesOf, outsideKey } from './workspace-rules.mjs';
 
 const INDEX_VERSION = 1;
 const LOCK_WAIT_MS = 8_000;
@@ -202,6 +203,9 @@ export function addAccount(row, deps = {}) {
       name: row.name == null ? null : row.name,
       tenantId: row.tenantId == null ? null : row.tenantId,
       tenantName: row.tenantName == null ? null : row.tenantName,
+      tenants: Array.isArray(row.tenants) ? row.tenants : null,
+      newFolders: row.newFolders != null && typeof row.newFolders === 'object' ? row.newFolders : null,
+      workspaceRules: Array.isArray(row.workspaceRules) ? row.workspaceRules : [],
       clientId: row.clientId == null ? null : row.clientId,
       linkedAt: row.linkedAt == null ? new Date().toISOString() : row.linkedAt,
       status: row.status == null ? AccountStatus.LINKED : row.status,
@@ -219,12 +223,84 @@ export function updateAccount(key, patch, deps = {}) {
     const index = await readIndex(deps);
     const row = index.accounts.find((a) => a.key === key);
     if (!row) return index;
-    for (const field of ['email', 'name', 'tenantId', 'tenantName', 'clientId', 'linkedAt', 'status']) {
+    for (const field of ['email', 'name', 'tenantId', 'tenantName', 'tenants', 'newFolders', 'workspaceRules', 'clientId', 'linkedAt', 'status']) {
       if (patch[field] == null) continue;
       row[field] = field === 'email' ? String(patch[field]).toLowerCase() : patch[field];
     }
     writeIndex(index);
     return index;
+  });
+}
+
+// Where repos and folders with no rule send: ask, send (to tenantIds) or none; returns the stored value.
+export function setNewFolders(key, { mode, tenantIds = [] } = {}, deps = {}) {
+  if (mode !== 'ask' && mode !== 'send' && mode !== 'none') {
+    return Promise.reject(new UserError(`Unknown New folders setting "${mode}". Use ask, send or none.`));
+  }
+  const ids = Array.isArray(tenantIds) ? tenantIds.filter((id) => typeof id === 'string' && id !== '') : [];
+  if (mode === 'send' && ids.length === 0) return Promise.reject(new UserError('Sending needs at least one workspace.'));
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) throw new UserError('No such linked account.');
+    row.newFolders = { mode, tenantIds: mode === 'send' ? ids : [] };
+    // Replaced by newFolders and rules.
+    delete row.tenantPolicies;
+    writeIndex(index);
+    return row.newFolders;
+  });
+}
+
+// Adds a routing rule, or replaces the tenantIds of the one with the same kind and match in place; returns its 1-based number.
+export function setWorkspaceRule(key, { kind, match, label = null, tenantIds } = {}, deps = {}) {
+  if (kind !== 'repo' && kind !== 'folder' && kind !== 'outside') {
+    return Promise.reject(new UserError(`Unknown rule kind "${kind}". Use repo, folder or outside.`));
+  }
+  // One outside rule per account, whatever match the caller passed.
+  if (kind === 'outside') ({ match, label } = outsideKey());
+  if (typeof match !== 'string' || match === '') return Promise.reject(new UserError('A rule needs a repository or folder to match.'));
+  if (!Array.isArray(tenantIds) || tenantIds.some((id) => typeof id !== 'string' || id === '')) {
+    return Promise.reject(new UserError('A rule needs a list of workspace ids (none sends nowhere).'));
+  }
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) throw new UserError('No such linked account.');
+    const stored = Array.isArray(row.workspaceRules) ? row.workspaceRules.slice() : [];
+    const existing = rulesOf({ workspaceRules: stored }).find((r) => r.kind === kind && r.match === match);
+    const rule = {
+      kind,
+      match,
+      label: typeof label === 'string' && label !== '' ? label : match,
+      tenantIds: tenantIds.slice(),
+      createdAt: existing != null && existing.createdAt != null ? existing.createdAt : new Date().toISOString(),
+    };
+    let n;
+    if (existing != null) {
+      stored[existing.index - 1] = rule;
+      n = existing.index;
+    } else {
+      stored.push(rule);
+      n = stored.length;
+    }
+    row.workspaceRules = stored;
+    writeIndex(index);
+    return { index: n, rule };
+  });
+}
+
+// Removes rule number n (1-based, as rulesOf numbers it); returns the removed rule.
+export function removeWorkspaceRule(key, n, deps = {}) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) throw new UserError('No such linked account.');
+    const position = Number(n);
+    const found = Number.isInteger(position) ? rulesOf(row).find((r) => r.index === position) : null;
+    if (found == null) throw new UserError(`There is no rule ${n}. Run /beezi:settings rules to list them.`);
+    row.workspaceRules.splice(position - 1, 1);
+    writeIndex(index);
+    return found;
   });
 }
 
@@ -261,7 +337,7 @@ export async function resolveAccountRef(ref, deps = {}) {
     const row = accounts[Number(value) - 1];
     if (row) return row.key;
   }
-  throw new UserError(`No linked account matches "${value}". Run /beezi:accounts to list them.`);
+  throw new UserError(`No linked account matches "${value}". Run /beezi:settings account to list them.`);
 }
 
 // Strips --account <ref> out of argv; `account` is the resolved key or null.
@@ -271,15 +347,10 @@ export async function parseAccountFlag(argv, deps = {}) {
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--account') {
       ref = argv[++i];
-      if (ref == null) throw new UserError('--account needs a value: a key, an email, or a position from /beezi:accounts.');
+      if (ref == null) throw new UserError('--account needs a value: a key, an email, or a position from /beezi:settings account.');
       continue;
     }
     rest.push(argv[i]);
   }
   return { account: ref == null ? null : await resolveAccountRef(ref, deps), rest };
-}
-
-export async function findByTenant(tenantId, deps = {}) {
-  if (!tenantId) return null;
-  return (await listAccounts(deps)).find((a) => a.tenantId === tenantId && a.status === AccountStatus.LINKED) || null;
 }

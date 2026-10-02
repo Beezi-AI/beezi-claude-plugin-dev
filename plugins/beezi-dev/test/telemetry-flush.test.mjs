@@ -268,7 +268,7 @@ test('a 200 with an html body preserves the batch too', async (t) => {
 
 // The brief's "recheck consent immediately before transmission" — a run can make several
 // requests (a 413 halves the batch and goes round again), and a user who types
-// /beezi:telemetry off between two of them must not have the rest sent anyway.
+// /beezi:settings telemetry off between two of them must not have the rest sent anyway.
 test('consent withdrawn between requests stops the rest of the run', async (t) => {
   const home = withHome(t);
   const dir = seed(home, [

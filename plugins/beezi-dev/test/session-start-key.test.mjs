@@ -81,7 +81,7 @@ test('an unknown key is registered by a forced check-in, then asked about again'
   // the state of a machine whose key is unknown for any reason other than a changed payload. The
   // forced send is what actually registers it.
   assert.ok(syncs.some((o) => o != null && o.force === true), 'a forced check-in was issued');
-  assert.match(result ?? '', /\/beezi:refresh/);
+  assert.match(result ?? '', /\/beezi:settings refresh/);
 });
 
 test('a probe that could not ask does NOT trigger a check-in or a second read', async (t) => {

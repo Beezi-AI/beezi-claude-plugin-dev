@@ -193,7 +193,11 @@ export async function maybePostUsageSnapshot(session, deps = {}) {
   const stateFile = usageSnapshotStateFile(session.key);
   const storedState = readJson(stateFile);
   const state = storedState == null ? {} : storedState;
-  const sent = state.lastSent == null ? {} : state.lastSent;
+  // A workspace-scoped report keeps its own marker under lastSentByTenant.
+  const tenantId = session.tenantId == null ? null : session.tenantId;
+  const byTenant = state.lastSentByTenant == null ? {} : state.lastSentByTenant;
+  const marker = tenantId == null ? state.lastSent : byTenant[tenantId];
+  const sent = marker == null ? {} : marker;
   if (sent.accountUuid === utilization.accountUuid && sent.fetchedAtMs === utilization.fetchedAtMs) {
     return { reported: false, reason: 'already-sent' };
   }
@@ -212,10 +216,16 @@ export async function maybePostUsageSnapshot(session, deps = {}) {
   try {
     const res = await postJson(`${apiBase()}${ENDPOINTS.usageSnapshot}`, session, payload, { fetchImpl });
     if (res.status >= 200 && res.status < 300) {
-      writeJsonSecure(stateFile, {
-        version: 1,
-        lastSent: { accountUuid: utilization.accountUuid, fetchedAtMs: utilization.fetchedAtMs },
-      });
+      const lastSent = { accountUuid: utilization.accountUuid, fetchedAtMs: utilization.fetchedAtMs };
+      const latest = readJson(stateFile);
+      const current = latest == null ? {} : latest;
+      const next = { version: 1 };
+      if (tenantId == null) next.lastSent = lastSent;
+      else if (current.lastSent != null) next.lastSent = current.lastSent;
+      const tenants = { ...(current.lastSentByTenant == null ? {} : current.lastSentByTenant) };
+      if (tenantId != null) tenants[tenantId] = lastSent;
+      if (Object.keys(tenants).length > 0) next.lastSentByTenant = tenants;
+      writeJsonSecure(stateFile, next);
       return { reported: true, status: res.status };
     }
     return { reported: false, status: res.status };

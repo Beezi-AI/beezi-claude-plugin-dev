@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enqueue, flushQueue, runCheckpoint } from '../lib/checkpoint.mjs';
+import { enqueue, flushQueue, runCheckpoint, unwrapQueueFile } from '../lib/checkpoint.mjs';
 import { runSessionStart } from '../lib/session-start.mjs';
 import { readTrackingState, writeTrackingState } from '../lib/tracking.mjs';
 import { queueDir } from '../lib/paths.mjs';
@@ -56,7 +56,7 @@ test('checkpoint computes one delta and queues identical reports only to eligibl
     listAccounts: async () => [a, b, dark].map(({ token, ...row }) => ({ ...row, status: 'linked' })),
   }, { skipFlush: true });
   assert.equal(result.enqueued, 1);
-  const read = (s) => fs.readdirSync(queueDir(s.key)).map((name) => JSON.parse(fs.readFileSync(path.join(queueDir(s.key), name))));
+  const read = (s) => fs.readdirSync(queueDir(s.key)).map((name) => unwrapQueueFile(JSON.parse(fs.readFileSync(path.join(queueDir(s.key), name)))).payload);
   assert.deepEqual(read(a), read(b));
   assert.equal(fs.existsSync(queueDir(dark.key)), false);
 });

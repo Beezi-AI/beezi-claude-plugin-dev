@@ -1,6 +1,7 @@
-import { parseArgs, runAudit } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
-import { parseAccountFlag } from '../lib/accounts.mjs';
+import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
+import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 
 // The login flow's final step: uploads this machine's past sessions into Beezi. There is no
@@ -15,11 +16,20 @@ function fail(message) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-async function main() {
-  const { account, rest } = await parseAccountFlag(process.argv.slice(2));
-  const options = parseArgs(rest);
-  if (account == null) fail('Beezi: backfill needs --account <key|email|n>. /beezi:login passes it automatically.');
+// Prints the error and reports a failed run, so the remaining workspaces still run.
+function failed(message) {
+  console.error(`✗ ${message}`);
+  return 1;
+}
+
+const DEFERRED_LINE = '  Your one-time history upload stays open until those repos and folders have a rule — run /beezi:login or /beezi:sync to choose.';
+
+// One workspace's run; returns the exit status instead of exiting mid-loop.
+async function backfillOne(account, tenantId, argv, sessionRoutes) {
+  const options = parseArgs(argv);
   options.account = account;
+  options.tenantId = tenantId;
+  options.sessionRoutes = sessionRoutes;
   const viaLogin = options.via === 'login';
 
   const result = await runAudit(
@@ -42,13 +52,16 @@ async function main() {
     console.log('Beezi: some Cowork cache data could not be read; run /beezi:sync again to retry.');
   }
   if (result.reason === 'no-account') {
-    fail('Beezi: this machine is not linked. Run /beezi:login first.');
+    return failed('Beezi: this machine is not linked. Run /beezi:login first.');
+  }
+  if (result.reason === 'workspace-required') {
+    return failed('Beezi: this account belongs to several workspaces and none was picked for this run. Check where analytics go with /beezi:settings, then re-run /beezi:login.');
   }
   // Linked, but the credential could not be read right now — a busy OS credential store, a
   // refresh still in flight, a held lock. Signing in again fixes none of those and re-running
   // login is what this message used to ask for, so it says the opposite: wait and retry.
   if (result.reason === 'auth-unavailable') {
-    fail(
+    return failed(
       'Beezi: this machine is linked, but its saved login could not be read just now '
         + `(${result.authReason == null ? result.authState : result.authReason}). `
         + 'Nothing was removed — wait a moment and run /beezi:sync to finish the upload.',
@@ -71,18 +84,18 @@ async function main() {
     if (viaLogin) {
       console.log(`✓ ${lines[0]}`);
       if (lines[1]) console.log(`  ${lines[1]}`);
-      return;
+      return 0;
     }
-    fail(lines.join(' '));
+    return failed(lines.join(' '));
   }
   if (result.halt === BackfillHalt.NOT_ALLOWED) {
-    fail('Beezi: the audit period has ended — new history pulls are disabled for this workspace.');
+    return failed('Beezi: the audit period has ended — new history pulls are disabled for this workspace.');
   }
   if (result.halt === BackfillHalt.UNSUPPORTED_SERVER) {
-    fail('Beezi: the server does not support the history pull yet — try again after the portal update.');
+    return failed('Beezi: the server does not support the history pull yet — try again after the portal update.');
   }
   if (result.halt === BackfillHalt.FORBIDDEN) {
-    fail(
+    return failed(
       `Beezi: the server refused the upload (${result.lastError == null ? 'forbidden' : result.lastError}). ` +
         'Check your seat with your workspace admin, then re-run /beezi:login.',
     );
@@ -90,7 +103,7 @@ async function main() {
 
   if (result.scanned === 0) {
     console.log('✓ Beezi: no past Claude Code sessions found to upload.');
-    return;
+    return 0;
   }
   if (result.candidates === 0) {
     const bits = [];
@@ -98,7 +111,8 @@ async function main() {
     if (result.liveTracked > 0) bits.push(`${result.liveTracked} already tracked live`);
     console.log(`✓ Beezi: nothing new to upload${bits.length ? ` (${bits.join(', ')})` : ''}.`);
     if (result.finalized) console.log('✓ Beezi: your history pull is finalized.');
-    return;
+    else if (result.routeDeferred > 0) console.log(DEFERRED_LINE);
+    return 0;
   }
 
   if (options.dryRun) {
@@ -107,7 +121,7 @@ async function main() {
         `${plural(result.plannedReports, 'report')} in ${plural(result.plannedChunks, 'request')} ` +
         '(dry run — nothing sent).',
     );
-    return;
+    return 0;
   }
 
   // Everything that was parsed but never judged by the server. Those sessions stay unledgered, so
@@ -116,12 +130,12 @@ async function main() {
     // A server that rejects the cost records outright is a version mismatch, not an unreachable
     // one, and re-running against the same build would fail identically. Say which it is.
     if (result.costStatesUnsupported) {
-      fail(
+      return failed(
         'Beezi: upload stopped — this Beezi server does not accept Claude cost records yet. ' +
           'Nothing was uploaded and nothing was lost; re-run /beezi:login after the portal update.',
       );
     }
-    fail(
+    return failed(
       `Beezi: upload stopped — could not reach the server (${result.lastError == null ? 'unknown error' : result.lastError}). ` +
         'Re-run /beezi:login to continue where it left off.',
     );
@@ -207,6 +221,8 @@ async function main() {
       `  Your history is NOT finalized yet — ${plural(result.retriableUnreadable, 'session')} could not be read ` +
         'this time. Re-run /beezi:login to retry them; if they fail again the pull finalizes without them.',
     );
+  } else if (result.routeDeferred > 0) {
+    console.log(DEFERRED_LINE);
   } else {
     console.log(
       '  Your history is NOT finalized yet — re-run /beezi:login once the remaining sessions can be delivered.',
@@ -231,6 +247,72 @@ async function main() {
   console.log(
     '  Plan and billing details reflect your current setup, not the plan you were on at the time.',
   );
+  return 0;
+}
+
+function tenantLabel(row, tenantId) {
+  const t = tenantById(row, tenantId);
+  return t != null && t.name ? t.name : tenantId;
+}
+
+// Sessions a rule routes, then the rest by New folders; a zero clause is dropped and null means print nothing.
+function routeSummary(row, plan) {
+  const ruled = plan.counts.rule;
+  const rest = plan.counts['new-folders'] + plan.counts.none + plan.counts.pending;
+  const clauses = [];
+  if (ruled > 0) clauses.push(`${plural(ruled, 'past session')} ${ruled === 1 ? 'follows' : 'follow'} your rules`);
+  if (rest > 0) {
+    // The first printed clause names the sessions.
+    const lead = clauses.length === 0 ? plural(rest, 'past session') : String(rest);
+    const newFolders = newFoldersOf(row);
+    if (newFolders.mode === 'send') {
+      const names = newFolders.tenantIds.map((id) => tenantLabel(row, id)).join(', ');
+      clauses.push(`${lead} in new folders ${rest === 1 ? 'goes' : 'go'} to ${names}`);
+    } else if (newFolders.mode === 'none') {
+      clauses.push(`${lead} in new folders ${rest === 1 ? 'is' : 'are'} not sent`);
+    } else {
+      clauses.push(`${lead} in repos or folders with no rule ${rest === 1 ? 'is' : 'are'} not sent this time`);
+    }
+  }
+  return clauses.length === 0 ? null : `Beezi (${describeAccount(row)}): ${clauses.join('; ')}.`;
+}
+
+async function main() {
+  const { account, rest } = await parseAccountFlag(process.argv.slice(2));
+  if (account == null) fail('Beezi: backfill needs --account <key|email|n>. /beezi:login passes it automatically.');
+  const row = (await getAccount(account)) || { key: account };
+  const { argv, tenantIds: override } = parseTenantFlags(rest, row);
+  // One or unknown workspaces: one headerless run.
+  if (!isMultiTenant(row)) {
+    if (await backfillOne(account, null, argv, null) !== 0) process.exit(1);
+    return;
+  }
+  // --tenant is an override: those workspaces get every past session, unrouted.
+  let tenantIds = override;
+  let routes = null;
+  if (tenantIds.length === 0) {
+    const plan = planWorkspaceRuns(row, { markWaiting: true });
+    if (plan.scanned === 0) {
+      console.log('✓ Beezi: no past Claude Code sessions found to upload.');
+      return;
+    }
+    const summary = routeSummary(row, plan);
+    if (summary != null) console.log(summary);
+    tenantIds = plan.tenantIds;
+    routes = plan.routes;
+  }
+  let status = 0;
+  for (const tenantId of tenantIds) {
+    console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
+    // One workspace's exception must not stop the rest.
+    try {
+      if (await backfillOne(account, tenantId, argv, routes) !== 0) status = 1;
+    } catch (error) {
+      console.error(`✗ ${friendlyMessage(error)}`);
+      status = 1;
+    }
+  }
+  if (status !== 0) process.exit(status);
 }
 
 main().catch((error) => fail(friendlyMessage(error)));

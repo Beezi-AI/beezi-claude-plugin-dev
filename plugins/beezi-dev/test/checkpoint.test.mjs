@@ -111,7 +111,7 @@ function readQueue(homeDir) {
   try {
     return fs.readdirSync(qdir).map(f => ({
       name: f,
-      payload: JSON.parse(fs.readFileSync(path.join(qdir, f), 'utf-8')),
+      payload: unwrapQueueFile(JSON.parse(fs.readFileSync(path.join(qdir, f), 'utf-8'))).payload,
     }));
   } catch {
     return [];
@@ -1651,7 +1651,7 @@ test('32. the default path is unchanged — queue written, state persisted, flus
 
 import { writeTrackingState, readTrackingState, TrackingMode } from '../lib/tracking.mjs';
 
-import { QUEUE_HOLD_MS } from '../lib/checkpoint.mjs';
+import { QUEUE_HOLD_MS, unwrapQueueFile } from '../lib/checkpoint.mjs';
 
 function fakeJsonFetch(replies) {
   let i = 0;

@@ -19,7 +19,7 @@ test('the consent ask appears once and never again', async (t) => {
   withHome(t);
   const { consentPrompt } = await import('../lib/session-start.mjs?p');
   const first = consentPrompt();
-  assert.ok(first && first.includes('/beezi:telemetry'), 'names the command to answer with');
+  assert.ok(first && first.includes('/beezi:settings telemetry'), 'names the command to answer with');
   assert.equal(consentPrompt(), null, 'asked exactly once per machine');
 });
 
@@ -28,11 +28,11 @@ test('the ask offers all three answers and recommends correlate', async (t) => {
   const { consentPrompt } = await import('../lib/session-start.mjs?recommend');
   const ask = consentPrompt();
   for (const mode of ['correlate', 'on', 'off']) {
-    assert.ok(ask.includes(`/beezi:telemetry ${mode}`), `offers ${mode}`);
+    assert.ok(ask.includes(`/beezi:settings telemetry ${mode}`), `offers ${mode}`);
   }
-  assert.ok(/Recommended: \/beezi:telemetry correlate/.test(ask), 'correlate is the recommendation');
+  assert.ok(/Recommended: \/beezi:settings telemetry correlate/.test(ask), 'correlate is the recommendation');
   assert.ok(
-    ask.indexOf('/beezi:telemetry correlate') < ask.indexOf('/beezi:telemetry on'),
+    ask.indexOf('/beezi:settings telemetry correlate') < ask.indexOf('/beezi:settings telemetry on'),
     'the recommended answer is offered first',
   );
 });
@@ -60,7 +60,7 @@ test('a machine that consented before this change is still offered correlation',
   const { grantConsent, correlationPrompt } = await import('../lib/telemetry-consent.mjs?legacy');
   grantConsent();
   const offer = correlationPrompt();
-  assert.ok(offer && offer.includes('/beezi:telemetry correlate'), 'the older grant still gets the offer');
+  assert.ok(offer && offer.includes('/beezi:settings telemetry correlate'), 'the older grant still gets the offer');
 });
 
 test('turning telemetry off deletes anything still pending', async (t) => {

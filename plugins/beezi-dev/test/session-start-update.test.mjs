@@ -156,7 +156,7 @@ test('4. nudge lands after the one-time consent ask, not before it', async (t) =
   const lines = String(result).split('\n');
   assert.equal(lines[lines.length - 1], NUDGE, 'the nudge must be the final line');
   assert.ok(
-    lines.some(l => l.includes('/beezi:telemetry on')),
+    lines.some(l => l.includes('/beezi:settings telemetry on')),
     'the consent ask must still be present, above the nudge',
   );
 });

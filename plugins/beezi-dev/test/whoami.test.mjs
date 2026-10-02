@@ -26,6 +26,7 @@ test('whoami — 200 with body → valid with fields', async () => {
     tenantTier: 'audit',
     trackingMode: 'backfill_only',
     backfillCompleted: false,
+    tenants: null,
   });
 });
 
@@ -61,6 +62,7 @@ test('whoami — 200 but body missing fields → nulls', async () => {
     tenantTier: null,
     trackingMode: null,
     backfillCompleted: false,
+    tenants: null,
   });
 });
 
