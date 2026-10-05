@@ -39,8 +39,9 @@ output is for you only; do not show it):
 It prints:
 
 - `menu=<label>|<label>…` — the sections that apply here;
-- one line per linked account: `account=<key> default=<yes|no> multi=<yes|no> status=<…> email=<email>`
-  (`multi=yes`: the account is in several workspaces; no such line: nothing is linked);
+- one line per linked account: `account=<key> default=<yes|no> multi=<yes|no> workspaces=<n> status=<…> email=<email>`
+  (`multi=yes`: the account is in several workspaces; `workspaces=<n>` is its known workspace
+  count, `0` when not known yet; no such line: nothing is linked);
 - `crash=<correlate|on|anonymous|off> statusline=<on|off>`.
 
 ## Route
@@ -74,10 +75,13 @@ Otherwise, by the first word of the arguments:
 
 ## Choosing the account (Rules and New folders)
 
-Use the `account=` lines with `multi=yes`.
+Rules uses the `account=` lines with `multi=yes` or `workspaces=1`. New folders uses only the
+`account=` lines with `multi=yes`.
 
 - No `account=` line at all → say this machine is not linked and to run /beezi:login; stop.
-- None with `multi=yes` → say this setting applies only to an account in several workspaces, and stop.
+- None qualify → for New folders, say this setting applies only to an account in several
+  workspaces, and stop. For Rules, say the account's workspaces are not known yet and to start a
+  new Claude Code session, and stop.
 - Exactly one → use it.
 - Several → ask (single-select) "Whose rules?" (Rules) or "Whose New folders setting?" (New
   folders), one option per such line: label = its `email=`, at most 4 options (the "Other" answer
@@ -121,7 +125,7 @@ Then run EXACTLY (for you only; do not show it):
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rules --account <key>`
 
-Its lines:
+For an account in several workspaces, its lines:
 
 - `W. <workspace> account=<key> tenant=<id> role=<role>` — one per workspace;
 - `R<n>. <short> (<label>) → <workspaces | not tracked> account=<key> rule=<n> kind=<…> tenants=<ids|none> match=<…>`
@@ -129,10 +133,17 @@ Its lines:
 - `here: <short> (<label>) → <R<n> | no rule> account=<key> rule=<n|none> kind=<…> match=<…>` — this
   folder, and the rule it follows now.
 
+For a one-workspace account (the chosen `account=` line, from `keys`, has `workspaces=1`), there
+are no `W.` lines; the first line reads `<account>: <n> rule(s) account=<key> workspaces=1`
+instead, and each `R<n>.` line reads `→ <not tracked | tracked>` in place of naming workspaces.
+
 A `kind=outside` line has no ` (<label>)`. `<here>` = the `here:` line's `<short>`, or "sessions
 outside a project" when its `kind=outside`. The `here:` line's rule is "its own" when that `R<n>.`
 line has the same `kind=` and `match=` as the `here:` line; otherwise it is a wider rule (a parent
 folder) that covers this repo or folder.
+
+For a one-workspace account, use "One-workspace rules", below, instead of the rest of this
+section.
 
 Then by the rest of the arguments:
 
@@ -148,6 +159,8 @@ Then by the rest of the arguments:
     `<rule short>` = that `R<n>.` line's `<short>`, description = that line up to ` account=`;
   - "Add a rule just for <here>" — the `here:` line names a wider rule; description "Only <here>
     changes; R<n> keeps the rest";
+  - "Add a rule for another folder or repo…" — only when the `here:` line does not name a wider
+    rule; description "Pick a different repo or folder"; see Typed target, below;
   - "Change a rule" — there is an `R<n>.` line;
   - "Remove a rule" — there is an `R<n>.` line;
   - "Done" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
@@ -167,10 +180,18 @@ line names, then run EXACTLY, with its `rule=` value:
 Change a rule — pick a rule ("Which rule do you want to change?"), ask the workspace question
 about its `R<n>.` line, then run the `rule set` command above with its number.
 
+"Add a rule for another folder or repo…" — go to Typed target, below, with `<ids>` from the
+workspace question it asks, then run EXACTLY, with the flag Typed target picked:
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --folder '<value>' <ids> --account <key>`
+
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --repo '<value>' <ids> --account <key>`
+
 Remove — with no `R<n>.` line, say the account has no rules and stop. With a number from the
 arguments: when no `R<n>.` line has it, say there is no rule R<n> and stop; otherwise ask
 (single-select) "Remove R<n> (<short>)?" (`<short>` from that line) with the options "Yes"
-(description "Delete the rule; new sessions there follow New folders") and "No" ("Keep it"), and
+(description "Delete the rule; new sessions there follow New folders", or for a one-workspace
+account "Delete the rule; new sessions there are tracked again") and "No" ("Keep it"), and
 only "Yes" goes on. Without a number, pick a rule ("Which rule do you want to remove?"). Run
 EXACTLY:
 
@@ -183,6 +204,61 @@ rule's number under Other."; the "Other" answer is the number (drop a leading `R
 dismissal runs nothing.
 
 After `rule add`, `rule set` or `rule remove`, write its first line verbatim (an error line too).
+
+### One-workspace rules
+
+For a one-workspace account (the chosen `account=` line has `workspaces=1`), there is no workspace
+question anywhere below. `<here>` and "its own rule" are defined above.
+
+By the rest of the arguments:
+
+- `remove <n>` → Remove, above, with rule `<n>` (drop a leading `R`).
+- `remove` → Remove, above.
+- Anything else, or nothing (including `add`, which has no single meaning here) → the menu below.
+
+Ask (single-select, with previews: the `rules --table` output) "What do you want to do with
+rules?", offering only the options that apply, in this order:
+
+- "Don't track <here>" — the `here:` line has `rule=none`, or the rule it names (own or wider) is
+  `tracked`. Run EXACTLY:
+
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current none --account <key>`
+
+- "Track <here> again" — `<here>`'s own rule is `not tracked`. Run EXACTLY, with that rule's
+  number, and without the Yes/No confirmation the general Remove flow uses:
+
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule remove <n> --account <key>`
+
+- "Don't track another folder or repo…" — go to Typed target, below, then run EXACTLY, with the
+  flag Typed target picked:
+
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --folder '<value>' none --account <key>`
+
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --repo '<value>' none --account <key>`
+
+- "Remove a rule" — there is an `R<n>.` line. Use the Remove flow, above.
+- "Done" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
+
+"Done" or a dismissal stops. After any command, write its first line verbatim (an error line too).
+
+### Typed target
+
+Shared by both account kinds. Ask in plain text (not AskUserQuestion): "Which folder or repo? Reply
+with a folder path (like ~/work/client) or a repo URL." Then stop and wait for the user's reply.
+
+An empty reply or "cancel" stops. A reply containing `://` or starting with `git@` is a repo (the
+`--repo` flag, value `<reply>`); otherwise it is a folder (the `--folder` flag, value `<reply>`).
+`<value>` is the reply exactly as typed, trimmed — the template above already quotes it: replace
+each `'` in the reply with `'\''` before substituting it in.
+
+For a one-workspace account, that is all: go run the command the calling step named, with `none`.
+For an account in several workspaces, first ask the workspace question about it: `kind=` is
+`folder` or `repo` by the reply; `<label>` is the typed folder and `<short>` is the last path
+segment of the folder or repo. Then go run the command the calling step named, with the resulting
+`<ids>`.
+
+Either way, the script validates the value (home, `/`, or a non-URL repo are refused) and its first
+line is shown verbatim, errors included.
 
 ## New folders
 

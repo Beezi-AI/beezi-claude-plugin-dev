@@ -288,6 +288,8 @@ async function runAuditUnlocked(deps, options) {
     // Multi-workspace runs only: sessions whose route leaves this workspace out, and those of them still waiting for a rule.
     routedElsewhere: 0,
     routeDeferred: 0,
+    // One-workspace runs only: sessions a matched rule excludes from tracking (`excludedSessionIds`).
+    excluded: 0,
   };
 
   if (options.account == null) { result.reason = 'no-account'; return result; }
@@ -377,6 +379,7 @@ async function runAuditUnlocked(deps, options) {
   const linkCutoffMs = liveMode && !syncMode ? linkedAtMs(tracking) : null;
   const activeCutoffMs = now() - ACTIVE_SESSION_WINDOW_MS;
   const sessionRoutes = options.sessionRoutes == null ? null : options.sessionRoutes;
+  const excludedSessionIds = options.excludedSessionIds == null ? null : options.excludedSessionIds;
 
   const candidates = [];
   for (const entry of all) {
@@ -384,6 +387,8 @@ async function runAuditUnlocked(deps, options) {
     // Cowork sessions are never tracked by the hooks, so the post-link cutoff does not cover them.
     const trackedLive = entry.source !== 'claude-cowork' && linkCutoffMs != null && entry.mtimeMs >= linkCutoffMs;
     if (!liveCowork && live && entry.sessionId === live) { result.live += 1; continue; }
+    // One-workspace accounts only: a matched Don't-track rule. Anything not in the set flows through unchanged.
+    if (excludedSessionIds != null && excludedSessionIds.has(entry.sessionId)) { result.excluded += 1; continue; }
     // Filtered before the ledger and the cost-state pass, so a later rule can still send it here.
     if (sessionRoutes != null) {
       const route = sessionRoutes.get(entry.sessionId);

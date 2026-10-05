@@ -1,9 +1,10 @@
 import { getDefaultKey, listAccounts } from '../lib/accounts.mjs';
 import { accountHealth } from '../lib/me.mjs';
-import { currentSessionWorkspace, isMultiTenant, newFoldersOf, roleLabel, tenantById, tenantsOf } from '../lib/workspace.mjs';
+import { currentSessionWorkspace, isMultiTenant, isSingleTenant, newFoldersOf, roleLabel, tenantById, tenantsOf } from '../lib/workspace.mjs';
 import { createRouteContext, routeForDir, routeKeyForDir, rulesOf, rulesTableLines, shortLabel } from '../lib/workspace-rules.mjs';
 import { readBillingConfig } from '../lib/billing-config.mjs';
 import { BillingSource } from '../lib/billing.mjs';
+import { isLiveTrackingAllowed, readTrackingState } from '../lib/tracking.mjs';
 import { isCorrelationGranted, isTelemetryGranted, readConsent } from '../lib/telemetry-consent.mjs';
 import { statuslineInstalled } from '../lib/statusline-install.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
@@ -43,6 +44,18 @@ function thisFolder(row, dir, ctx) {
 function rulesCount(n) {
   if (n === 0) return 'none yet';
   return n === 1 ? '1 repo/folder' : `${n} repos/folders`;
+}
+
+// This folder's status for a one-workspace account: not tracked (with its rule) or tracked.
+// Skipped entirely when live tracking is off (audit mode or disabled): "→ tracked" would be wrong there.
+function thisFolderSingle(row, dir, ctx) {
+  if (!isLiveTrackingAllowed(readTrackingState(row.key))) return null;
+  const key = routeKeyForDir(dir, ctx);
+  if (key == null) return null;
+  const place = shortLabel(key);
+  const route = routeForDir(row, dir, ctx);
+  if (route != null && route.tenantIds.length === 0) return `${place} → not tracked (R${route.index})`;
+  return `${place} → tracked`;
 }
 
 // correlate, on (correlation never answered), anonymous (correlation declined) or off.
@@ -90,24 +103,40 @@ async function screen() {
     out.push(`Beezi · ${row.email || row.name || 'linked account'}${several && row.key === def ? ' (default)' : ''}`);
     const h = health[row.key];
     if (h != null && !h.ok && h.lines.length > 0) out.push(signInField(h.lines));
-    if (!isMultiTenant(row)) return;
-    const here = thisFolder(row, dir, ctx);
+    if (isMultiTenant(row)) {
+      const here = thisFolder(row, dir, ctx);
+      if (here != null) out.push(field('This folder', here));
+      out.push(field('Rules', rulesCount(rulesOf(row).length)));
+      out.push(field('New folders', newFoldersLabel(row)));
+      return;
+    }
+    if (!isSingleTenant(row)) return;
+    const here = thisFolderSingle(row, dir, ctx);
     if (here != null) out.push(field('This folder', here));
-    out.push(field('Rules', rulesCount(rulesOf(row).length)));
-    out.push(field('New folders', newFoldersLabel(row)));
+    const ruleCount = rulesOf(row).length;
+    if (ruleCount > 0) out.push(field('Rules', rulesCount(ruleCount)));
   });
   if (several) out.push('', 'This machine');
   console.log(out.concat(machine).join('\n'));
+}
+
+// Known workspace count; 0 when unknown.
+function workspaceCount(row) {
+  const tenants = tenantsOf(row);
+  return tenants == null ? 0 : tenants.length;
 }
 
 // For the command's routing only; never shown.
 async function keys() {
   const accounts = await listAccounts();
   const def = await getDefaultKey();
-  const menu = (accounts.some((a) => isMultiTenant(a)) ? ['Rules', 'New folders'] : []).concat(['Account', 'Crash reports & status line']);
+  const menu = [];
+  if (accounts.some((a) => workspaceCount(a) >= 1)) menu.push('Rules');
+  if (accounts.some((a) => isMultiTenant(a))) menu.push('New folders');
+  menu.push('Account', 'Crash reports & status line');
   console.log(`menu=${menu.join('|')}`);
   for (const a of accounts) {
-    console.log(`account=${a.key} default=${a.key === def ? 'yes' : 'no'} multi=${isMultiTenant(a) ? 'yes' : 'no'} status=${a.status || 'linked'} email=${a.email || 'unknown'}`);
+    console.log(`account=${a.key} default=${a.key === def ? 'yes' : 'no'} multi=${isMultiTenant(a) ? 'yes' : 'no'} workspaces=${workspaceCount(a)} status=${a.status || 'linked'} email=${a.email || 'unknown'}`);
   }
   console.log(`crash=${crashMode()} statusline=${statuslineInstalled() ? 'on' : 'off'}`);
 }

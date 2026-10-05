@@ -4,6 +4,7 @@ import { parseAccountFlag, listAccounts, getAccount, describeAccount, AccountSta
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
+import { usesRules } from '../lib/workspace-rules.mjs';
 
 // /beezi:sync — uploads every past session this machine still has on disk, skipping whatever Beezi
 // already holds. Unlike the one-time import at the end of /beezi:login, this is repeatable: it asks
@@ -35,6 +36,11 @@ async function syncOne(account, options, label) {
     options,
   );
 
+  // The real count, after the live-session skip the audit already applies — not the pre-run plan,
+  // which also counts the live session and sessions still being written.
+  if (options.excludedLabel != null && result.excluded > 0) {
+    console.log(`Beezi (${options.excludedLabel}): ${plural(result.excluded, 'past session')} in repos or folders you don't track ${result.excluded === 1 ? 'is' : 'are'} skipped.`);
+  }
   if (result.coworkWarnings > 0) {
     console.log('Beezi: some Cowork cache data could not be read; this sync may be incomplete.');
   }
@@ -246,7 +252,15 @@ async function main() {
     const override = parseTenantFlags(rest, row).tenantIds;
     if (!isMultiTenant(row)) {
       if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
-      await syncOne(row.key, { ...options, tenantId: null }, null);
+      if (usesRules(row)) {
+        const plan = planWorkspaceRuns(row);
+        const excludedSessionIds = new Set(
+          [...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId),
+        );
+        await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null);
+      } else {
+        await syncOne(row.key, { ...options, tenantId: null }, null);
+      }
       continue;
     }
     // --tenant is an override: those workspaces get every past session, unrouted.

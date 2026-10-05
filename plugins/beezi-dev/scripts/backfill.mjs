@@ -3,6 +3,8 @@ import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
+import { usesRules } from '../lib/workspace-rules.mjs';
+import { readTrackingState } from '../lib/tracking.mjs';
 
 // The login flow's final step: uploads this machine's past sessions into Beezi. There is no
 // slash command for it — /beezi:login runs it after the link and plan capture, and re-running
@@ -25,11 +27,12 @@ function failed(message) {
 const DEFERRED_LINE = '  Your one-time history upload stays open until those repos and folders have a rule — run /beezi:login or /beezi:sync to choose.';
 
 // One workspace's run; returns the exit status instead of exiting mid-loop.
-async function backfillOne(account, tenantId, argv, sessionRoutes) {
+async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessionIds = null, excludedLabel = null) {
   const options = parseArgs(argv);
   options.account = account;
   options.tenantId = tenantId;
   options.sessionRoutes = sessionRoutes;
+  options.excludedSessionIds = excludedSessionIds;
   const viaLogin = options.via === 'login';
 
   const result = await runAudit(
@@ -43,6 +46,12 @@ async function backfillOne(account, tenantId, argv, sessionRoutes) {
     },
     options,
   );
+
+  // The real count, after the live-session skip the audit already applies — not the pre-run plan,
+  // which also counts the live session and sessions still being written.
+  if (excludedLabel != null && result.excluded > 0) {
+    console.log(`Beezi (${excludedLabel}): ${plural(result.excluded, 'past session')} in repos or folders you don't track ${result.excluded === 1 ? 'is' : 'are'} skipped.`);
+  }
 
   if (result.reason === 'busy') {
     console.log('Beezi: another session sync is running. Run /beezi:sync after it finishes.');
@@ -289,7 +298,19 @@ async function main() {
   const { argv, tenantIds: override } = parseTenantFlags(rest, row);
   // One or unknown workspaces: one headerless run.
   if (!isMultiTenant(row)) {
-    if (await backfillOne(account, null, argv, null) !== 0) process.exit(1);
+    // Already sealed: every re-run (every /beezi:login) would otherwise re-plan and re-read up to
+    // 64KB of every transcript just to report "already uploaded" right after.
+    const tracking = readTrackingState(row.key);
+    const sealed = usesRules(row) && tracking != null && tracking.backfillCompleted === true;
+    if (usesRules(row) && !sealed) {
+      const plan = planWorkspaceRuns(row);
+      const excludedSessionIds = new Set(
+        [...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId),
+      );
+      if (await backfillOne(account, null, argv, null, excludedSessionIds, describeAccount(row)) !== 0) process.exit(1);
+    } else {
+      if (await backfillOne(account, null, argv, null) !== 0) process.exit(1);
+    }
     return;
   }
   // --tenant is an override: those workspaces get every past session, unrouted.
