@@ -660,3 +660,71 @@ test('37. bisecting a mixed chunk keeps each cost state with its own half', asyn
     assert.equal(result.bySession.get(id).status, BackfillSessionStatus.ACCEPTED, id);
   }
 });
+
+// ─── a session carrying both segments and its cost state ────────────────────
+
+const mixedGroup = (sessionId, count) => ({ ...group(sessionId, count), costState: costState(sessionId) });
+
+test('38. a session with reports and a cost state sends both in the same chunk', () => {
+  const chunks = planChunks([mixedGroup('m1', 2)]);
+
+  assert.equal(chunks.length, 1);
+  assert.deepEqual(chunks[0].sessionIds, ['m1']);
+  assert.equal(chunks[0].reports.length, 2);
+  assert.deepEqual(chunks[0].costStates.map((c) => c.sessionId), ['m1']);
+});
+
+test('39. a mixed session counts its cost state against the item cap', () => {
+  const chunks = planChunks([group('s1', MAX_CHUNK_ITEMS - 2), mixedGroup('m1', 2)]);
+
+  assert.equal(chunks.length, 2, 'two reports plus the cost state no longer fit beside the first session');
+  assert.deepEqual(chunks[1].sessionIds, ['m1']);
+  assert.equal(chunks[1].costStates.length, 1);
+});
+
+test('40. a split mixed session carries its cost state exactly once, in the first part', () => {
+  const chunks = planChunks([mixedGroup('m1', MAX_CHUNK_ITEMS * 2)]);
+
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks[0].costStates.length, 1);
+  for (const chunk of chunks.slice(1)) assert.equal(chunk.costStates.length, 0);
+  for (const chunk of chunks) {
+    assert.ok(chunk.reports.length + chunk.costStates.length <= MAX_CHUNK_ITEMS);
+  }
+  assert.equal(chunks.reduce((sum, c) => sum + c.reports.length, 0), MAX_CHUNK_ITEMS * 2);
+});
+
+test('41. a mixed session is judged by its segments even when its cost state is rejected', async () => {
+  const post = fakePost([
+    {
+      status: 200,
+      body: okBody({
+        stored: 1,
+        errors: [],
+        costStates: { stored: 0, skipped: 1, errors: [{ sessionId: 'm1', reason: 'no priced model usage' }] },
+      }),
+    },
+  ]);
+  const result = await flushBackfillChunks([mixedGroup('m1', 1)], 'tok', { postJsonImpl: post.impl });
+
+  assert.equal(post.calls[0].body.sessions.length, 1);
+  assert.equal(post.calls[0].body.costStates.length, 1);
+  assert.equal(result.bySession.get('m1').status, BackfillSessionStatus.ACCEPTED);
+});
+
+// Its segments are a full record on their own; only a cost-state-only session loses its usage.
+test('42. a 400 on the unknown costStates field still lands a mixed session through its segments', async () => {
+  const post = fakePost((body) => {
+    if (body.costStates != null) {
+      return { status: 400, raw: JSON.stringify({ message: ['property costStates should not exist'] }) };
+    }
+    return { status: 200, body: okBody({ stored: body.sessions.length, errors: [] }) };
+  });
+  const result = await flushBackfillChunks([mixedGroup('m1', 1), costGroup('c1')], 'tok', { postJsonImpl: post.impl });
+
+  assert.equal(result.costStatesUnsupported, true);
+  assert.equal(post.calls.length, 2);
+  assert.deepEqual(post.calls[1].body.sessions.map((r) => r.sessionId), ['m1']);
+  assert.equal(result.bySession.get('m1').status, BackfillSessionStatus.ACCEPTED);
+  assert.equal(result.bySession.get('c1').status, BackfillSessionStatus.FAILED);
+});
