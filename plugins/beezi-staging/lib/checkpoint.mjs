@@ -44,7 +44,7 @@ import {
 } from './usage-snapshot-report.mjs';
 import { readSessionWorkspace, resolveTargets, tenantsOf, isMultiTenant, QUEUE_HOLD_MS } from './workspace.mjs';
 import { enqueue, enqueueHeld, unwrapQueueFile, releaseHeldFile } from './workspace-queue.mjs';
-import { bindSessionRoutes } from './workspace-rules.mjs';
+import { bindSessionRoutes, usesRules } from './workspace-rules.mjs';
 
 function loadState(id) {
   return readJson(path.join(stateDir(), `${id}.json`), {
@@ -153,7 +153,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let workspaceState = null;
   try { workspaceState = readSessionWorkspace(session_id); } catch { /* best-effort */ }
   // A live session whose SessionStart saw no multi-workspace account (a login mid-session) is bound from here, so a rule or flush can find it.
-  if (workspaceState == null && options.sessions == null && recipients.some(isMultiTenant)) {
+  if (workspaceState == null && options.sessions == null && recipients.some(usesRules)) {
     try { workspaceState = bindSessionRoutes(session_id, cwd || process.cwd(), recipients); } catch { /* best-effort */ }
   }
   const skipGate = options.skipLiveTrackingGate === true;
@@ -171,7 +171,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     const targets = skipGate ? r.targets : r.targets.filter((t) => allowsLiveFor({ ...s, tenantId: t }, tracking));
     const hold = r.pendingAsk ? r.askTenants.filter((t) => !isTenantDark(tracking, t)) : [];
     if (targets.length === 0 && hold.length === 0) {
-      if (r.multi && r.targets.length === 0 && !r.pendingAsk) policyGated = true;
+      if ((r.source === 'rule' || r.source === 'none') && r.targets.length === 0 && !r.pendingAsk) policyGated = true;
       else darkGated = true;
     }
     return { session: s, multi, targets, hold };

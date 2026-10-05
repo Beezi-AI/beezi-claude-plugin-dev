@@ -1,7 +1,7 @@
 import os from 'os';
 import { loadRepoMap, normPath, pathHasPrefix, resolveRepoForRouting } from './repo-map.mjs';
 import { canonicalRemote } from './git.mjs';
-import { isMultiTenant, tenantsOf, tenantById, resolveTargets, readSessionWorkspace, newFoldersOf, initSessionWorkspace } from './workspace.mjs';
+import { isMultiTenant, isSingleTenant, tenantsOf, tenantById, resolveTargets, readSessionWorkspace, newFoldersOf, initSessionWorkspace } from './workspace.mjs';
 import { firstRecordedCwd } from './transcript-index.mjs';
 import { loadLedger, isImported } from './audit-ledger.mjs';
 
@@ -48,6 +48,11 @@ export function rulesOf(row) {
     if (rule != null) out.push(rule);
   });
   return out;
+}
+
+// Whether a row's rules can route anything: always for multi-workspace, else only with at least one rule.
+export function usesRules(row) {
+  return isMultiTenant(row) || (isSingleTenant(row) && rulesOf(row).length > 0);
 }
 
 // One repo map load and one key per directory for a whole pass.
@@ -122,10 +127,11 @@ export function shortLabel(rule) {
 // The rule this directory follows: the repo rule for its remote, else the longest folder prefix, else (home or above, / or temp only) the outside rule; tenantIds limited to current workspaces.
 export function routeForDir(row, dir, ctx) {
   const rules = rulesOf(row);
-  if (rules.length === 0 || !isMultiTenant(row)) return null;
+  const tenants = tenantsOf(row);
+  if (rules.length === 0 || tenants == null || tenants.length === 0) return null;
   const d = normPath(dir);
   if (d == null) return null;
-  const members = tenantsOf(row).map((t) => t.id);
+  const members = tenants.map((t) => t.id);
   // A rule whose workspaces the account has all left is skipped; one stored with [] still matches.
   const usable = (rule) => {
     const ids = rule.tenantIds.filter((id) => members.indexOf(id) !== -1);
@@ -159,18 +165,40 @@ export function routeForDir(row, dir, ctx) {
   return null;
 }
 
-// Binds each multi-workspace row's rule for cwd on the session (null unbinds) and records cwd; the saved state, or null.
+// Binds each row whose rules can route (null unbinds) for cwd on the session and records cwd; the saved state, or null when none qualify.
 export function bindSessionRoutes(sessionId, cwd, rows, ctx) {
   const context = ctx == null ? createRouteContext() : ctx;
   const routes = {};
-  for (const row of rows) if (isMultiTenant(row)) routes[row.key] = routeForDir(row, cwd, context);
+  let any = false;
+  for (const row of rows) {
+    if (!usesRules(row)) continue;
+    any = true;
+    routes[row.key] = routeForDir(row, cwd, context);
+  }
+  if (!any) return null;
   return initSessionWorkspace(sessionId, { cwd, routes });
 }
 
 // A past session's workspaces: the rule for its directory now, else New folders; source is 'single'|'rule'|'new-folders'|'none'|'pending'.
 // `key` is the directory's route key when the account has rules and the directory is known, else null.
 export function routePastSession(row, { state = null, readCwd = null } = {}, ctx) {
-  if (!isMultiTenant(row)) return { tenantIds: [null], source: 'single', pending: false, key: null };
+  if (!usesRules(row)) return { tenantIds: [null], source: 'single', pending: false, key: null };
+  if (isSingleTenant(row)) {
+    const context = ctx == null ? createRouteContext() : ctx;
+    const known = state != null && typeof state.cwd === 'string' && state.cwd !== '';
+    const cwd = known ? state.cwd : (typeof readCwd === 'function' ? readCwd() : null);
+    const key = cwd == null ? null : routeKeyForDir(cwd, context);
+    // A bound [] route stays honored (e.g. the clone was later deleted and the directory no longer
+    // keys to the same rule) as long as its rule is still stored — the same test resolveTargets uses.
+    const bound = state != null && state.route ? state.route[row.key] : null;
+    if (bound != null && Array.isArray(bound.tenantIds) && bound.tenantIds.length === 0
+      && rulesOf(row).some((r) => r.kind === bound.kind && r.match === bound.match && r.tenantIds.length === 0)) {
+      return { tenantIds: [], source: 'rule', pending: false, key };
+    }
+    const rule = routeForDir(row, cwd, context);
+    if (rule != null && rule.tenantIds.length === 0) return { tenantIds: [], source: 'rule', pending: false, key };
+    return { tenantIds: [null], source: 'single', pending: false, key: null };
+  }
   let key = null;
   if (rulesOf(row).length > 0) {
     const context = ctx == null ? createRouteContext() : ctx;
@@ -194,11 +222,11 @@ function safeReadState(readState, sessionId) {
 // sessionId → routePastSession result for every transcript entry; readState(sessionId), readCwd(transcriptPath).
 export function planSessionRoutes(row, entries, ctx, { readState = readSessionWorkspace, readCwd = firstRecordedCwd } = {}) {
   const context = ctx == null ? createRouteContext() : ctx;
-  const multi = isMultiTenant(row);
+  const needsState = usesRules(row);
   const routes = new Map();
   for (const entry of entries || []) {
     if (entry == null || entry.sessionId == null) continue;
-    const state = multi ? safeReadState(readState, entry.sessionId) : null;
+    const state = needsState ? safeReadState(readState, entry.sessionId) : null;
     const route = routePastSession(row, { sessionId: entry.sessionId, state, readCwd: () => readCwd(entry.transcriptPath) }, context);
     routes.set(entry.sessionId, route);
   }
@@ -286,19 +314,26 @@ function workspaceNames(row, ids) {
   }).join(', ');
 }
 
-// The user-facing rules table, as lines: only accounts in several workspaces, no machine fields.
+// The user-facing rules table, as lines: accounts with known workspaces, no machine fields.
 export function rulesTableLines(rows, dir, ctx) {
-  const multi = rows.filter((row) => isMultiTenant(row));
-  if (multi.length === 0) return ['Rules apply only to an account in several workspaces.'];
+  const known = rows.filter((row) => isMultiTenant(row) || isSingleTenant(row));
+  if (known.length === 0) return ['Rules need the account\'s workspaces, which are not known yet. Start a new session and try again.'];
   const out = [];
-  multi.forEach((row, i) => {
-    if (multi.length > 1) {
+  known.forEach((row, i) => {
+    if (known.length > 1) {
       if (i > 0) out.push('');
       out.push(`**${row.email || row.name || row.key}**`, '');
     }
     const stored = rulesOf(row);
+    const single = isSingleTenant(row);
     if (stored.length === 0) {
       out.push('No rules yet.');
+    } else if (single) {
+      out.push('| Rule | Repo or folder | Where | Tracked |', '|---|---|---|---|');
+      for (const r of stored) {
+        const where = r.kind === 'outside' ? 'home, / or temp folders' : r.label;
+        out.push(`| R${r.index} | ${cell(shortLabel(r))} | ${cell(where)} | ${r.tenantIds.length === 0 ? 'No' : 'Yes'} |`);
+      }
     } else {
       out.push('| Rule | Repo or folder | Where | Sends to |', '|---|---|---|---|');
       for (const r of stored) {

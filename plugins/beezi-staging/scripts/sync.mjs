@@ -4,6 +4,7 @@ import { parseAccountFlag, listAccounts, getAccount, describeAccount, AccountSta
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
+import { usesRules } from '../lib/workspace-rules.mjs';
 
 // /beezi:sync — uploads every past session this machine still has on disk, skipping whatever Beezi
 // already holds. Unlike the one-time import at the end of /beezi:login, this is repeatable: it asks
@@ -35,6 +36,11 @@ async function syncOne(account, options, label) {
     options,
   );
 
+  // The real count, after the live-session skip the audit already applies — not the pre-run plan,
+  // which also counts the live session and sessions still being written.
+  if (options.excludedLabel != null && result.excluded > 0) {
+    console.log(`Beezi (${options.excludedLabel}): ${plural(result.excluded, 'past session')} in repos or folders you don't track ${result.excluded === 1 ? 'is' : 'are'} skipped.`);
+  }
   if (result.coworkWarnings > 0) {
     console.log('Beezi: some Cowork cache data could not be read; this sync may be incomplete.');
   }
@@ -94,12 +100,17 @@ async function syncOne(account, options, label) {
         `${plural(result.candidates, 'session')} in ${plural(result.plannedChunks, 'request')} ` +
         '(dry run — nothing sent).',
     );
-    // Counted apart from `plannedReports`, which a fast-path session contributes nothing to: it
-    // sends one cost record and no reports, so the two numbers above would otherwise show a run
-    // uploading "0 reports across 300 sessions".
+    // Counted apart from `plannedReports`, which a cost-record-only session contributes nothing
+    // to: it sends one cost record and no reports.
     if (result.costStateSessions > 0) {
       console.log(
-        `  ${plural(result.costStateSessions, 'session')} of those would go up as Claude's own cost record.`,
+        `  ${plural(result.costStateSessions, 'session')} of those would carry Claude's own cost record.`,
+      );
+    }
+    if (result.costStateOnlySessions > 0) {
+      console.log(
+        `  ${plural(result.costStateOnlySessions, 'session')} would have only that record ` +
+          '(no repository, billing or timeline detail for those).',
       );
     }
     return;
@@ -130,20 +141,26 @@ async function syncOne(account, options, label) {
     parts.push(`${plural(result.itemErrors, 'report')} skipped — their repository is not connected to Beezi.`);
   }
   if (result.costStateSessions > 0) {
+    parts.push(`${plural(result.costStateSessions, 'session')} used Claude's own cost record for their totals.`);
+  }
+  if (result.costStateOnlySessions > 0) {
     parts.push(
-      `${plural(result.costStateSessions, 'session')} used Claude's own cost record ` +
-        '(no repository or timeline detail added for those).',
+      `${plural(result.costStateOnlySessions, 'session')} had only that record ` +
+        '(no repository, billing or timeline detail added for those).',
     );
   }
   if (result.sessionsRejected > 0) {
     parts.push(`${plural(result.sessionsRejected, 'session')} were rejected by the server.`);
   }
-  // Its own line: reportsFailed stays 0 for these sessions, so nothing else here would mention them.
-  if (result.costStatesUnsupported) {
+  // Its own line: reportsFailed stays 0 for cost-record-only sessions, so nothing else here would
+  // mention them. Sessions that also had segments landed through those.
+  if (result.costStatesUnsupported && result.costStatesFailed > 0) {
     parts.push(
       `${plural(result.costStatesFailed, 'session')} could not be uploaded — this Beezi server ` +
         'does not accept Claude cost records yet.',
     );
+  } else if (result.costStatesUnsupported) {
+    parts.push("This Beezi server does not accept Claude cost records yet, so totals use Beezi's own tally.");
   } else if (result.costStatesFailed > 0) {
     parts.push(
       `${plural(result.costStatesFailed, 'session')} could not be delivered — run /beezi:sync again to retry.`,
@@ -235,7 +252,15 @@ async function main() {
     const override = parseTenantFlags(rest, row).tenantIds;
     if (!isMultiTenant(row)) {
       if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
-      await syncOne(row.key, { ...options, tenantId: null }, null);
+      if (usesRules(row)) {
+        const plan = planWorkspaceRuns(row);
+        const excludedSessionIds = new Set(
+          [...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId),
+        );
+        await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null);
+      } else {
+        await syncOne(row.key, { ...options, tenantId: null }, null);
+      }
       continue;
     }
     // --tenant is an override: those workspaces get every past session, unrouted.

@@ -18,7 +18,7 @@
       "name": "beezi-staging",
       "source": "./plugins/beezi-staging",
       "description": "Reports Claude Code session token analytics for Beezi task branches and gives you a personal usage summary on demand. — staging environment build.",
-      "version": "0.33.0-staging.5510",
+      "version": "0.34.0-staging.5587",
       "author": {
         "name": "Beezi"
       },

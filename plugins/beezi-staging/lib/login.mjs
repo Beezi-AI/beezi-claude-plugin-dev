@@ -19,7 +19,7 @@ import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import { DIAGNOSTIC_SOURCES } from './telemetry-codes.mjs';
 import { recordAuthResult as _recordAuthResult } from './telemetry-auth.mjs';
 import { UserError } from './friendly-error.mjs';
-import { isMultiTenant, resolveTargets, currentSessionWorkspace } from './workspace.mjs';
+import { resolveTargets, currentSessionWorkspace } from './workspace.mjs';
 
 export function openBrowser(url) {
   // The URL comes from the server response — never pass it through a shell. Require a
@@ -202,7 +202,7 @@ export async function runLogin(deps = {}) {
     // One check-in per current target; the existing row supplies rules and New folders, and a pending session checks in once a rule or New folders answers it.
     // A whoami without tenants keeps the stored list, so a multi-workspace account never checks in headerless.
     const merged = { ...(existing || {}), ...identity, key, tenants: identity.tenants != null ? identity.tenants : (existing ? existing.tenants : null) };
-    const resolved = resolveTargets(merged, isMultiTenant(merged) ? currentSessionWorkspace() : null);
+    const resolved = resolveTargets(merged, currentSessionWorkspace());
     for (const tenantId of resolved.targets) {
       const session = resolved.multi ? { ...fresh, key, tenantId } : { ...fresh, key };
       await sync(session, { force: true, via: 'login' }, { env: oauthTokenEnvWithOsProbe(process.env) }).catch(() => {});
