@@ -473,9 +473,169 @@ test('drain — an unstated uuid is an explicit null, not an omission', async ()
     env: {},
     readPendingStatuslineUsage: () => [PENDING_ROW],
     clearPendingStatuslineUsage: () => {},
-    readClaudeAccount: () => ACCOUNT,
+    // No live login: a live uuid would now answer ahead of billing.json, and this test is about the
+    // shape of an unstated uuid, not about precedence.
+    readClaudeAccount: () => null,
     readBillingConfig: () => ({ ...BILLING_WITH_EMAIL, accountUuid: null }),
   });
   assert.equal('account_uuid' in calls[0].body, true);
   assert.equal(calls[0].body.account_uuid, null);
+});
+
+// ─── the organization: one login, several subscriptions ──────────────────────
+
+const ORG_ACCOUNT = { ...ACCOUNT, email: 'dev@example.com', organizationUuid: 'org-company', organizationName: 'Acme' };
+
+test('maybePostUsageSnapshot — the live organization rides on the snapshot', async () => {
+  await withTempHome(async () => {
+    const calls = [];
+    await maybePostUsageSnapshot({ token: 'tok', key: 'a1b2c3d4' }, {
+      fetchImpl: okFetch(calls),
+      env: {},
+      readUsageUtilization: () => UTILIZATION,
+      readClaudeAccount: () => ORG_ACCOUNT,
+      readBillingConfig: () => null,
+    });
+    assert.equal(calls[0].body.account_uuid, 'acc-1');
+    assert.equal(calls[0].body.account_org_uuid, 'org-company');
+    assert.equal(calls[0].body.account_org_name, 'Acme');
+  });
+});
+
+// The cache names a different account than the live login: the live org describes the login, not
+// the numbers, and pairing it with the cache's uuid would invent an account that does not exist.
+test('buildSnapshotPayload — no organization next to a cache uuid it does not belong to', () => {
+  const stamp = { account_uuid: 'acc-OTHER', account_org_uuid: 'org-company', account_org_name: 'Acme' };
+  const p = buildSnapshotPayload(UTILIZATION, { ...ORG_ACCOUNT, accountUuid: 'acc-OTHER' }, stamp);
+  assert.equal(p.account_uuid, 'acc-1');
+  assert.equal('account_org_uuid' in p, false);
+  assert.equal('account_org_name' in p, false);
+});
+
+const recordedRow = (account) => ({ ...PENDING_ROW, account });
+
+// The row was observed under the personal subscription; by drain time this machine runs the company
+// one. The row is about the subscription it was SEEN under.
+test('drain — a row keeps the organization it was recorded under', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: {},
+    readPendingStatuslineUsage: () => [
+      recordedRow({ uuid: 'acc-1', email: 'dev@example.com', organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    ],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ORG_ACCOUNT,
+    readBillingConfig: () => null,
+  });
+  const body = calls[0].body;
+  assert.equal(body.account_uuid, 'acc-1');
+  assert.equal(body.account_org_uuid, 'org-personal');
+  assert.equal(body.account_org_name, 'Personal');
+  assert.equal('account' in body, false, 'the local bookkeeping key never reaches the wire');
+});
+
+// Rows recorded before this field existed carry no identity: the current one is the best there is.
+test('drain — an old row with no recorded identity takes the current organization', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: {},
+    readPendingStatuslineUsage: () => [PENDING_ROW],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ORG_ACCOUNT,
+    readBillingConfig: () => null,
+  });
+  assert.equal(calls[0].body.account_uuid, 'acc-1');
+  assert.equal(calls[0].body.account_org_uuid, 'org-company');
+});
+
+// A row recorded under another account must not borrow the current one's email or plan.
+test('drain — a row recorded under another account carries none of the current account', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: {},
+    readPendingStatuslineUsage: () => [recordedRow({ uuid: 'acc-previous', email: null, organizationUuid: null, organizationName: null })],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ORG_ACCOUNT,
+    readBillingConfig: () => ({ ...BILLING_WITH_EMAIL, accountUuid: 'acc-1', subscriptionType: 'max', plan: 'max_20x' }),
+  });
+  const body = calls[0].body;
+  assert.equal(body.account_uuid, 'acc-previous');
+  assert.equal('account_email' in body, false);
+  assert.equal('account_org_uuid' in body, false);
+  assert.equal(body.subscription_plan, null, 'the current account’s plan is not the previous one’s');
+});
+
+// Same login, different subscription: the plan billing.json holds belongs to the other org.
+test('drain — a row recorded under another organization does not take the current plan', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: {},
+    readPendingStatuslineUsage: () => [recordedRow({ uuid: 'acc-1', email: null, organizationUuid: 'org-personal', organizationName: null })],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ORG_ACCOUNT,
+    readBillingConfig: () => ({
+      ...BILLING_WITH_EMAIL,
+      accountUuid: 'acc-1',
+      organizationUuid: 'org-company',
+      subscriptionType: 'team',
+      plan: 'team',
+    }),
+  });
+  assert.equal(calls[0].body.account_org_uuid, 'org-personal');
+  assert.equal(calls[0].body.subscription_plan, null);
+});
+
+// Under a setup token the recorded identity is the stale interactive login, exactly like the
+// current one — the suppression holds per row too.
+test('drain — a live fingerprint suppresses a row’s recorded identity', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: KEY_ENV,
+    readPendingStatuslineUsage: () => [recordedRow({ uuid: 'stale-uuid', email: 'stale@example.com', organizationUuid: 'org-stale', organizationName: 'Stale' })],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ORG_ACCOUNT,
+    readBillingConfig: () => null,
+  });
+  const body = calls[0].body;
+  assert.equal(body.account_uuid, null);
+  assert.equal('account_email' in body, false);
+  assert.equal('account_org_uuid' in body, false);
+  assert.equal('account' in body, false);
+  assert.equal(body.oauth_key_prefix, 'sk-ant-oat01');
+});
+
+// The token is invisible to the env (exported from a shell profile), but the record knows it belongs
+// to a key. The row's recorded identity came from the same stale ~/.claude.json and must stay off.
+test('drain — a key-scoped record suppresses a row’s recorded identity without a visible token', async () => {
+  const calls = [];
+  await drainStatuslineSnapshots([{ key: 'a1b2c3d4', clientId: 'client-a', token: 'tok' }], {
+    fetchImpl: okFetch(calls),
+    env: {},
+    readPendingStatuslineUsage: () => [recordedRow({ uuid: 'stale-uuid', email: 'stale@example.com', organizationUuid: 'org-stale', organizationName: 'Stale' })],
+    clearPendingStatuslineUsage: () => {},
+    readClaudeAccount: () => ({ ...ORG_ACCOUNT, accountUuid: 'stale-uuid' }),
+    readBillingConfig: () => ({
+      ...BILLING_WITH_EMAIL,
+      accountEmail: null,
+      accountUuid: null,
+      keyFingerprint: { prefix: 'sk-ant-oat01', last4: 'ab12', length: 56 },
+    }),
+  });
+  const body = calls[0].body;
+  assert.equal(body.account_uuid, null);
+  assert.equal('account_email' in body, false);
+  assert.equal('account_org_uuid' in body, false);
+  assert.equal('account' in body, false);
+});
+
+test('buildSnapshotPayload — no organization next to a cache that names no account', () => {
+  const stamp = { account_uuid: 'acc-1', account_org_uuid: 'org-company' };
+  const p = buildSnapshotPayload({ ...UTILIZATION, accountUuid: null }, ORG_ACCOUNT, stamp);
+  assert.equal(p.account_uuid, null);
+  assert.equal('account_org_uuid' in p, false);
 });

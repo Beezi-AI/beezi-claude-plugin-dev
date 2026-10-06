@@ -562,3 +562,105 @@ test('a session start after logging into another account announces the switch', 
   assert.equal(written.accountUuid, 'uuid-B');
   assert.match(message == null ? '' : message, /account alice@example\.com → bob@example\.com/);
 });
+
+// ─── the organization: two subscriptions under one Claude login ─────────────
+//
+// A personal plan and a company org share the accountUuid AND the email; oauthAccount's
+// organizationUuid is the only field that moves when the user switches between them. Without it the
+// switch is invisible here and both subscriptions merge into one account server-side.
+
+test('a different organization under the same login is a changed identity', () => {
+  assert.equal(
+    identityChanged(
+      { accountUuid: 'uuid-A', accountEmail: 'alice@example.com', organizationUuid: 'org-personal' },
+      { accountUuid: 'uuid-A', email: 'alice@example.com', organizationUuid: 'org-company' },
+    ),
+    true,
+  );
+});
+
+// Every billing.json written before this field existed. Filling the blank is not a switch — firing
+// here would wipe a good record on every machine at upgrade.
+test('a record that never stored an organization is not a changed identity', () => {
+  assert.equal(
+    identityChanged(
+      { accountUuid: 'uuid-A', accountEmail: 'alice@example.com' },
+      { accountUuid: 'uuid-A', email: 'alice@example.com', organizationUuid: 'org-company' },
+    ),
+    false,
+  );
+  assert.equal(
+    identityChanged(
+      { accountUuid: 'uuid-A', organizationUuid: 'org-personal' },
+      { accountUuid: 'uuid-A', organizationUuid: null },
+    ),
+    false,
+  );
+});
+
+test('an organization switch on the same login re-captures as a switch', () => {
+  const res = reconcile({
+    existing: loginRecord({ organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    sub: { ...subUnderLogin('alice@example.com', 'uuid-A'), organizationUuid: 'org-company', organizationName: 'Acme' },
+    fileAnchor: { value: 'uuid-A', source: 'account_uuid' },
+    fileAccount: { accountUuid: 'uuid-A', email: 'alice@example.com', organizationUuid: 'org-company', organizationName: 'Acme' },
+  });
+  assert.equal(res.outcome, 'switched');
+  assert.equal(res.config.organizationUuid, 'org-company');
+  assert.equal(res.config.organizationName, 'Acme');
+  assert.equal(res.config.plan, 'max_20x', 'the new subscription’s plan, not the previous one’s');
+});
+
+// The upgrade path: a fresh, non-stale record from before this field. The live file names an org
+// for the SAME account, so the reconcile fills it once — otherwise the check-in would carry no org
+// until the weekly heartbeat, and the next org switch would go unseen until then too.
+test('a record without an organization gains it once, without counting as a switch', () => {
+  const res = reconcile({
+    existing: loginRecord(),
+    sub: { ...subUnderLogin('alice@example.com', 'uuid-A', 'pro', 'default_claude_pro'), organizationUuid: 'org-personal', organizationName: 'Personal' },
+    fileAnchor: { value: 'uuid-A', source: 'account_uuid' },
+    fileAccount: { accountUuid: 'uuid-A', email: 'alice@example.com', organizationUuid: 'org-personal', organizationName: 'Personal' },
+  });
+  assert.notEqual(res.outcome, 'switched');
+  assert.notEqual(res.outcome, 'none', 'the missing organization is a reason to look');
+  assert.equal(res.config.organizationUuid, 'org-personal');
+  assert.equal(res.config.organizationName, 'Personal');
+  assert.equal(res.config.accountUuid, 'uuid-A');
+  assert.deepEqual(res.changes, [], 'filling a blank is not a billing change');
+});
+
+// Once filled, the steady state is quiet again: no CLI spawn, no write.
+test('a record that already holds the live organization triggers nothing', () => {
+  const res = reconcile({
+    existing: loginRecord({ organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    sub: subUnderLogin('alice@example.com', 'uuid-A'),
+    fileAnchor: { value: 'uuid-A', source: 'account_uuid' },
+    fileAccount: { accountUuid: 'uuid-A', email: 'alice@example.com', organizationUuid: 'org-personal' },
+  });
+  assert.equal(res.outcome, 'none');
+  assert.equal(res.writes.length, 0);
+});
+
+test('an overwrite keeps the stored organization when the fresh capture states none', () => {
+  const stale = loginRecord({
+    capturedAt: ISO(9 * DAYS),
+    anchorCheckedAt: ISO(9 * DAYS),
+    organizationUuid: 'org-personal',
+    organizationName: 'Personal',
+  });
+  const res = reconcile({
+    existing: stale,
+    sub: subUnderLogin('alice@example.com', 'uuid-A'),
+    fileAnchor: { value: 'uuid-A', source: 'account_uuid' },
+    fileAccount: { accountUuid: 'uuid-A', email: 'alice@example.com' },
+  });
+  assert.equal(res.outcome, 'captured');
+  assert.equal(res.config.organizationUuid, 'org-personal');
+  assert.equal(res.config.organizationName, 'Personal');
+});
+
+test('an organization switch is announced by name when the account line cannot show it', () => {
+  const before = loginRecord({ organizationUuid: 'org-personal', organizationName: 'Personal' });
+  const after = loginRecord({ organizationUuid: 'org-company', organizationName: 'Acme' });
+  assert.deepEqual(describeBillingChanges(before, after), ['organization Personal → Acme']);
+});

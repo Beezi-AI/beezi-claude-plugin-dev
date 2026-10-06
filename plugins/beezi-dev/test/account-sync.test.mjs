@@ -574,3 +574,41 @@ test('the check-in and the identity stamp suppress on the same answer', async ()
     assert.equal('email' in payload, 'account_email' in stamp);
   }
 });
+
+// ─── the organization: one login, several subscriptions ──────────────────────
+
+// A personal plan and a company org share the accountUuid and the email, so the organization is
+// the only field that lets the server keep them as two accounts.
+test('payload — the stored organization rides along with the identity', () => {
+  const p = buildAccountSyncPayload({
+    config: config({ accountUuid: 'acc-uuid-1', organizationUuid: 'org-1', organizationName: 'Acme Corp' }),
+    env: {},
+  });
+  assert.equal(p.organizationUuid, 'org-1');
+  assert.equal(p.organizationName, 'Acme Corp');
+});
+
+test('payload — an unknown organization is omitted, not nulled', () => {
+  const p = buildAccountSyncPayload({ config: config({ organizationUuid: null, organizationName: null }), env: {} });
+  assert.equal('organizationUuid' in p, false);
+  assert.equal('organizationName' in p, false);
+});
+
+// Identity is suppressed wholesale under a setup token, the organization included: the stored one
+// describes whatever login last touched the box.
+test('payload — a fingerprintable CLAUDE_CODE_OAUTH_TOKEN suppresses the organization too', () => {
+  const p = buildAccountSyncPayload({
+    config: config({ organizationUuid: 'org-1', organizationName: 'Acme' }),
+    env: { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN },
+  });
+  assert.equal('organizationUuid' in p, false);
+  assert.equal('organizationName' in p, false);
+});
+
+// The hash gate is what decides whether a check-in goes out at all; an org switch on the same login
+// that left the digest unchanged would never reach the server.
+test('hash — an organization change moves the digest', () => {
+  const personal = buildAccountSyncPayload({ config: config({ organizationUuid: 'org-personal' }), env: {} });
+  const company = buildAccountSyncPayload({ config: config({ organizationUuid: 'org-company' }), env: {} });
+  assert.notEqual(payloadHash(personal), payloadHash(company));
+});

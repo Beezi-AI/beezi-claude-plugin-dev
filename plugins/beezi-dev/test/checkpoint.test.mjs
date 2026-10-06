@@ -1971,6 +1971,7 @@ const USAGE_FIXTURE = { input_tokens: 100, output_tokens: 50, cache_read_input_t
 const USAGE_STAMP_KEYS = [
   'account_uuid', 'usage_account_uuid', 'usage_five_hour_pct', 'usage_seven_day_pct', 'usage_fetched_at',
   'account_email', 'oauth_key_prefix', 'oauth_key_last4', 'oauth_key_length',
+  'account_org_uuid', 'account_org_name',
 ];
 
 function usageDeps(extra = {}) {
@@ -2047,6 +2048,42 @@ test('identity stamp — account_email rides every payload from oauthAccount', a
   const p = readQueue(dir)[0].payload;
   assert.equal(p.account_email, 'dev@example.com');
   assert.equal(p.account_uuid, 'acc-1', 'the uuid still rides alongside');
+});
+
+// One Claude login, two subscriptions: the organization is what tells the server which one this
+// session ran under — and it is the LIVE login's, not whatever billing.json a newer session wrote.
+test('identity stamp — the live organization rides every payload', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.writeFileSync(
+    path.join(dir, 'billing.json'),
+    JSON.stringify({
+      version: 5,
+      source: 'subscription',
+      subscriptionType: 'team',
+      plan: 'team',
+      capturedAt: new Date().toISOString(),
+      accountUuid: 'acc-1',
+      accountEmail: 'dev@example.com',
+      organizationUuid: 'org-company',
+      organizationName: 'Acme',
+    }),
+  );
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  await runCheckpoint(
+    { session_id: 'sess-org', transcript_path: transcript, cwd: dir },
+    usageDeps({
+      readClaudeAccount: () => ({ ...ACCOUNT_FIXTURE, organizationUuid: 'org-personal', organizationName: 'Personal' }),
+      env: {},
+    }),
+  );
+  const p = readQueue(dir)[0].payload;
+  assert.equal(p.account_uuid, 'acc-1');
+  assert.equal(p.account_email, 'dev@example.com');
+  assert.equal(p.account_org_uuid, 'org-personal');
+  assert.equal(p.account_org_name, 'Personal');
 });
 
 test('identity stamp — billing-config anchor email is the fallback when oauthAccount has none', async (t) => {
@@ -2376,4 +2413,122 @@ test('advisor legs inside a subagent transcript reach the subagent segment', asy
   assert.equal(models['advisor-b'].by_effort.xhigh.token_input, 30000, 'bucketed under the subagent line effort');
   assert.equal(models['model-a'].token_input, 2, 'the subagent parent tally is untouched');
   assert.equal(agent.payload.token_total, 2 + 20 + 500 + 40 + 30000 + 1500, 'advisor tokens are inside the segment total');
+});
+
+// ─── per-session identity: a session stays on the subscription it started on ─────────────────
+
+const PERSONAL = { ...ACCOUNT_FIXTURE, organizationUuid: 'org-personal', organizationName: 'Personal' };
+const COMPANY = { ...ACCOUNT_FIXTURE, organizationUuid: 'org-company', organizationName: 'Acme' };
+const ORG_KEYS = ['account_org_uuid', 'account_org_name'];
+
+function appendLine(transcript, line) {
+  fs.appendFileSync(transcript, '\n' + JSON.stringify(line), 'utf-8');
+}
+
+function readSessionState(dir, sessionId) {
+  return JSON.parse(fs.readFileSync(path.join(dir, 'state', `${sessionId}.json`), 'utf-8'));
+}
+
+test('session identity — recorded on the first report, kept after the login switches', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  const sunk = [];
+  const opts = { sink: (p) => sunk.push(p), skipFlush: true, skipLiveTrackingGate: true };
+
+  await runCheckpoint(
+    { session_id: 'sess-stay', transcript_path: transcript, cwd: dir },
+    usageDeps({ readClaudeAccount: () => PERSONAL, env: {} }),
+    opts,
+  );
+  assert.equal(readSessionState(dir, 'sess-stay').identity.account_org_uuid, 'org-personal');
+
+  appendLine(transcript, assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T11:00:00.000Z'));
+  await runCheckpoint(
+    { session_id: 'sess-stay', transcript_path: transcript, cwd: dir },
+    usageDeps({ readClaudeAccount: () => COMPANY, env: {} }),
+    opts,
+  );
+
+  assert.equal(sunk.length, 2);
+  assert.equal(sunk[1].account_org_uuid, 'org-personal', 'the later segment keeps the starting subscription');
+  assert.equal(sunk[1].account_org_name, 'Personal');
+});
+
+test('session identity — backfill/sync stamps the identity recorded for that session', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'state', 'sess-old.json'),
+    JSON.stringify({
+      cursor: 0,
+      identity: { account_uuid: 'acc-1', account_email: 'dev@example.com', account_org_uuid: 'org-personal', account_org_name: 'Personal' },
+    }),
+  );
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  const sunk = [];
+
+  await runCheckpoint(
+    { session_id: 'sess-old', transcript_path: transcript, cwd: dir },
+    usageDeps({ readClaudeAccount: () => COMPANY, env: {} }),
+    { sink: (p) => sunk.push(p), skipFlush: true, persistState: false, skipLiveTrackingGate: true },
+  );
+
+  assert.equal(sunk.length, 1);
+  assert.equal(sunk[0].account_org_uuid, 'org-personal');
+  assert.equal(sunk[0].account_email, 'dev@example.com');
+});
+
+// A transcript the plugin never saw live has no recorded identity. Backfill and sync attribute it
+// to the CURRENT login, organization included — the account the user is syncing from.
+test('session identity — backfill/sync stamps the current account and org on an unrecorded session', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  const sunk = [];
+
+  await runCheckpoint(
+    { session_id: 'sess-unrecorded', transcript_path: transcript, cwd: dir },
+    usageDeps({ readClaudeAccount: () => COMPANY, env: {} }),
+    { sink: (p) => sunk.push(p), skipFlush: true, persistState: false, skipLiveTrackingGate: true },
+  );
+
+  assert.equal(sunk.length, 1);
+  assert.equal(sunk[0].account_uuid, 'acc-1');
+  assert.equal(sunk[0].account_org_uuid, 'org-company');
+  assert.equal(sunk[0].account_org_name, 'Acme');
+  assert.equal(fs.existsSync(path.join(dir, 'state', 'sess-unrecorded.json')), false, 'an audit run records nothing');
+});
+
+// Sessions a pre-identity plugin reported live still carry what was sent at the time on the
+// rename anchor — better evidence than today's login.
+test('session identity — backfill/sync falls back to the anchor a live run left behind', async (t) => {
+  const dir = makeTmpDir(t);
+  setHome(dir);
+  fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'state', 'sess-anchor.json'),
+    JSON.stringify({ cursor: 0, anchor: { segmentId: 'x', account_uuid: 'acc-then', account_email: 'then@example.com' } }),
+  );
+  const transcript = writeTranscript(dir, [
+    assistantLine('main', 'model-a', USAGE_FIXTURE, '2024-01-01T10:00:00.000Z'),
+  ]);
+  const sunk = [];
+
+  await runCheckpoint(
+    { session_id: 'sess-anchor', transcript_path: transcript, cwd: dir },
+    usageDeps({ readClaudeAccount: () => COMPANY, env: {} }),
+    { sink: (p) => sunk.push(p), skipFlush: true, persistState: false, skipLiveTrackingGate: true },
+  );
+
+  assert.equal(sunk[0].account_uuid, 'acc-then');
+  assert.equal(sunk[0].account_email, 'then@example.com');
+  for (const key of ORG_KEYS) assert.equal(key in sunk[0], false);
 });

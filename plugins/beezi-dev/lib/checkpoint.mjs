@@ -58,6 +58,68 @@ function saveState(id, state) {
   writeJsonSecure(path.join(stateDir(), `${id}.json`), state);
 }
 
+// The identity half of a stamp — which account a payload belongs to. Kept per session in its state
+// file so the session's later reports, and any backfill/sync of its transcript, name the
+// subscription it STARTED on rather than whichever login is current when they run.
+const IDENTITY_KEYS = [
+  'account_uuid', 'account_email', 'account_org_uuid', 'account_org_name',
+  'oauth_key_prefix', 'oauth_key_last4', 'oauth_key_length',
+];
+
+function pickIdentity(source, keys) {
+  const out = {};
+  if (source == null || typeof source !== 'object') return out;
+  for (const key of keys) {
+    if (source[key] != null) out[key] = source[key];
+  }
+  return out;
+}
+
+function namesAccount(identity) {
+  return identity.account_uuid != null || identity.account_email != null || identity.oauth_key_prefix != null;
+}
+
+// Fills only what the recorded identity lacks, and only from the SAME account: a live stamp that
+// names a different uuid or email is a login switch, which must not move the session.
+function completeIdentity(recorded, live) {
+  const sameUuid = recorded.account_uuid == null || live.account_uuid == null
+    || recorded.account_uuid === live.account_uuid;
+  const sameEmail = recorded.account_email == null || live.account_email == null
+    || recorded.account_email === live.account_email;
+  if (!sameUuid || !sameEmail) return recorded;
+  // An org that changed under the same login is exactly the switch this guards against.
+  if (recorded.account_org_uuid != null && live.account_org_uuid != null
+    && recorded.account_org_uuid !== live.account_org_uuid) return recorded;
+  const merged = Object.assign({}, recorded);
+  for (const key of IDENTITY_KEYS) {
+    if (merged[key] == null && live[key] != null) merged[key] = live[key];
+  }
+  return merged;
+}
+
+// Which identity this checkpoint stamps for the session:
+//   - one recorded for it (a live run saved it) — always, live or audit; a live run may only
+//     complete it from the same account;
+//   - live, nothing recorded: the live login, which becomes the record;
+//   - audit (backfill/sync), nothing recorded: the identity the last live payload carried (the
+//     rename anchor, which pre-identity plugin versions left behind), else — a transcript the
+//     plugin never saw live — the CURRENT login, organization included: the account the user is
+//     backfilling or syncing from. The server links a session to its subscription once, so that
+//     first attribution is the one that stays.
+export function resolveSessionIdentity(state, liveStamp, audit) {
+  const live = pickIdentity(liveStamp, IDENTITY_KEYS);
+  const recorded = pickIdentity(state == null ? null : state.identity, IDENTITY_KEYS);
+  if (namesAccount(recorded)) {
+    const identity = audit ? recorded : completeIdentity(recorded, live);
+    const changed = IDENTITY_KEYS.some((key) => identity[key] !== recorded[key]);
+    return { identity, record: changed ? identity : null };
+  }
+  if (!audit) return { identity: live, record: namesAccount(live) ? live : null };
+  const anchored = pickIdentity(state == null ? null : state.anchor, IDENTITY_KEYS);
+  if (namesAccount(anchored)) return { identity: anchored, record: null };
+  return { identity: live, record: null };
+}
+
 export { enqueue, unwrapQueueFile };
 
 const FLUSH_COUNTERS = ['flushed', 'rejected', 'failed', 'expired', 'salvaged', 'quarantined', 'workspacePending'];
@@ -344,17 +406,24 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   try { utilization = readUtilization(); } catch { utilization = null; }
   let claudeAccount = null;
   try { claudeAccount = readAccount(); } catch { claudeAccount = null; }
-  // Identity stamp: which vendor account this machine is logged into NOW, in every shape it can
-  // prove — the uuid, the email, and the setup-token fingerprint for CI machines that expose
-  // nothing else. The server's ingest links the session to its account with whichever arrives.
+  // Identity stamp: which vendor account this session runs under, in every shape it can prove —
+  // the uuid and its organization (one login can hold several subscriptions), the email, and the
+  // setup-token fingerprint for CI machines that expose nothing else. The live login outranks the
+  // machine-wide billing.json, so a session that outlives an account switch keeps stamping its own.
+  // The server's ingest links the session to its account with whichever arrives.
   //
   // Built by the shared builder, NOT inline, because the usage-snapshot report has to send the
   // identical stamp: it posts to a different route that resolves an account the same way, and two
   // builders reading the same sources in a different order would land this machine's sessions and
   // its limits data on two different accounts. See lib/identity-stamp.mjs.
   // `env` was resolved above the billing block so both readings share one answer — see there.
+  const sessionIdentity = resolveSessionIdentity(
+    state,
+    buildIdentityStamp(claudeAccount, billingConfig, env),
+    options.persistState === false,
+  );
   const usageStamp = {
-    ...buildIdentityStamp(claudeAccount, billingConfig, env),
+    ...sessionIdentity.identity,
     ...(utilization
       ? {
           usage_five_hour_pct: utilization.fiveHourPct,
@@ -582,6 +651,12 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
 
   if (nextCursor !== state.cursor) {
     state.cursor = nextCursor;
+    stateDirty = true;
+  }
+  // Recorded only once the session has actually reported under it: a checkpoint that sent nothing
+  // has attributed nothing yet, so a login switch before the first report should still win.
+  if (sessionIdentity.record != null && enqueued > 0) {
+    state.identity = sessionIdentity.record;
     stateDirty = true;
   }
   if (agentCursorsDirty) {

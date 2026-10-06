@@ -94,7 +94,7 @@ test('reconcile — a confirmed login→token switch resets the record to the ke
   // And the record now names the key it belongs to, so the server's answer can be scoped to it.
   assert.equal(config.accountAnchor.source, 'oauth_key');
   assert.deepEqual(config.keyFingerprint, FINGERPRINT);
-  assert.equal(config.version, 4);
+  assert.equal(config.version, 5);
 });
 
 test('reconcile — the switch is self-disabling: an oauth_key-anchored record does not re-fire', () => {

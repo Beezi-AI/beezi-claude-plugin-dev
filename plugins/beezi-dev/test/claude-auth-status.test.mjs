@@ -510,3 +510,52 @@ test('resolveClaudeSubscription — no token leaves the login merge exactly as i
   assert.equal(r.subscriptionType, 'max');
   assert.equal(r.rateLimitTier, 'default_claude_max_20x');
 });
+
+// ─── the organization: which subscription of a multi-org login is in force ───
+
+// The profile's org is the one field every other reader uses (the session stamp, the switch
+// precheck), so the stored record must hold the same one — never a second source that could
+// disagree in form and split one subscription across two server-side keys.
+test('resolveClaudeSubscription — the profile organization outranks the CLI orgId', () => {
+  const r = resolveClaudeSubscription({
+    env: {},
+    runClaudeAuthStatus: cliStatus({ email: 'cli@b.co', orgId: 'org-from-cli' }),
+    readClaudeAccount: account({ email: 'cli@b.co', organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    readClaudeAccountAnchor: noAnchor,
+  });
+  assert.equal(r.organizationUuid, 'org-personal');
+  assert.equal(r.organizationName, 'Personal');
+});
+
+test('resolveClaudeSubscription — the CLI orgId fills a profile that names no organization', () => {
+  const r = resolveClaudeSubscription({
+    env: {},
+    runClaudeAuthStatus: cliStatus({ orgId: 'org-from-cli' }),
+    readClaudeAccount: account(),
+    readClaudeAccountAnchor: noAnchor,
+  });
+  assert.equal(r.organizationUuid, 'org-from-cli');
+  assert.equal(r.organizationName, null);
+});
+
+test('resolveClaudeSubscription — the profile organization answers when the CLI states none', () => {
+  const r = resolveClaudeSubscription({
+    env: {},
+    runClaudeAuthStatus: cliStatus(),
+    readClaudeAccount: account({ organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    readClaudeAccountAnchor: noAnchor,
+  });
+  assert.equal(r.organizationUuid, 'org-personal');
+  assert.equal(r.organizationName, 'Personal');
+});
+
+test('resolveClaudeSubscription — a setup token states no organization', () => {
+  const r = resolveClaudeSubscription({
+    env: {},
+    runClaudeAuthStatus: () => TOKEN_JSON,
+    readClaudeAccount: account({ organizationUuid: 'org-personal', organizationName: 'Personal' }),
+    readClaudeAccountAnchor: noAnchor,
+  });
+  assert.equal(r.organizationUuid, null);
+  assert.equal(r.organizationName, null);
+});

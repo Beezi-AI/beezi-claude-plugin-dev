@@ -13,13 +13,21 @@ const BILLING = {
   accountAnchor: { value: 'anchor@example.com', source: 'email', updatedAt: '2026-08-01T00:00:00.000Z' },
 };
 
-// billing.json is the reconciled record — rewritten on every session start, key-scoped, and the
-// source the server's cli_agent_account resolution is fed from. ~/.claude.json is the fallback for
-// a machine that has no record yet, never a per-field second opinion.
-test('buildIdentityStamp — billing.json outranks the live login', () => {
+// A key-scoped record: the portal priced a setup token here, so ~/.claude.json names whoever logged
+// in interactively last. The record answers for the identity even when the env cannot see the key.
+const KEY_SCOPED = {
+  ...BILLING,
+  keyFingerprint: { prefix: 'sk-ant-oat01', last4: 'ab12', length: 56 },
+};
+
+// The session stamps the login it RUNS UNDER. billing.json is machine-wide and rewritten by
+// whichever session started last, so after a switch it names the new account while an older
+// session is still working under the previous one. ~/.claude.json's oauthAccount, read live (and
+// honouring CLAUDE_CONFIG_DIR), is the closer answer whenever it names an account.
+test('buildIdentityStamp — the live login outranks billing.json', () => {
   const stamp = buildIdentityStamp(ACCOUNT, BILLING, {});
-  assert.equal(stamp.account_uuid, 'acc-billing');
-  assert.equal(stamp.account_email, 'billing@example.com');
+  assert.equal(stamp.account_uuid, 'acc-1');
+  assert.equal(stamp.account_email, 'live@example.com');
   assert.equal(stamp.oauth_key_prefix, undefined);
 });
 
@@ -38,22 +46,38 @@ test('buildIdentityStamp — ~/.claude.json answers when there is no billing rec
   assert.equal(stamp.account_email, 'live@example.com');
 });
 
-// THE NULL RULE. A record that states no uuid states no uuid — the fallback is for a MISSING
-// record, not a missing field. Falling through would reach for ~/.claude.json on exactly the
-// machines it is wrong on: under a setup token it names whoever logged in interactively last, and
-// the reconcile deliberately carries a previously known uuid forward rather than blanking it.
-test('buildIdentityStamp — a null in billing.json never falls through to ~/.claude.json', () => {
+// THE NULL RULE, where it still matters: a record that belongs to a setup key. The env may not see
+// the token (exported from a shell profile, invisible to every env tier), and then ~/.claude.json
+// names whoever logged in interactively last. A record that states no uuid states no uuid — the
+// live file is never consulted to fill it.
+test('buildIdentityStamp — a null in a key-scoped billing.json never falls through to ~/.claude.json', () => {
   const stamp = buildIdentityStamp(
     ACCOUNT,
-    { accountUuid: null, accountEmail: 'billing@example.com' },
+    { ...KEY_SCOPED, accountUuid: null, accountEmail: 'billing@example.com', accountAnchor: null },
     {},
   );
   assert.equal(stamp.account_uuid, undefined);
   assert.equal(stamp.account_email, 'billing@example.com');
 });
 
-test('buildIdentityStamp — a billing record naming nobody states nothing', () => {
-  assert.deepEqual(buildIdentityStamp(ACCOUNT, { accountUuid: null, accountEmail: null }, {}), {});
+test('buildIdentityStamp — a key-scoped record naming nobody states nothing', () => {
+  assert.deepEqual(
+    buildIdentityStamp(ACCOUNT, { ...KEY_SCOPED, accountUuid: null, accountEmail: null, accountAnchor: null }, {}),
+    {},
+  );
+});
+
+// The same protection for a record whose key was captured through the anchor alone, and for one the
+// CLI confirmed is running under a setup token (planSource 'unresolved').
+test('buildIdentityStamp — an oauth_key anchor or an unresolved plan also keeps billing.json in charge', () => {
+  const anchored = buildIdentityStamp(ACCOUNT, {
+    accountUuid: null,
+    accountEmail: null,
+    accountAnchor: { value: 'sk-ant-oat01...ab12:56', source: 'oauth_key' },
+  }, {});
+  assert.deepEqual(anchored, {});
+  const unresolved = buildIdentityStamp(ACCOUNT, { accountUuid: null, accountEmail: null, planSource: 'unresolved' }, {});
+  assert.deepEqual(unresolved, {});
 });
 
 test('buildIdentityStamp — the email anchor is the last email fallback', () => {
@@ -102,8 +126,8 @@ test('buildIdentityStamp — a fingerprintable token replaces the uuid and the e
 // suppressing on it would trade a usable identity for none at all.
 test('buildIdentityStamp — a token too short to fingerprint suppresses nothing', () => {
   const stamp = buildIdentityStamp(ACCOUNT, BILLING, { CLAUDE_CODE_OAUTH_TOKEN: 'x' });
-  assert.equal(stamp.account_uuid, 'acc-billing');
-  assert.equal(stamp.account_email, 'billing@example.com');
+  assert.equal(stamp.account_uuid, 'acc-1');
+  assert.equal(stamp.account_email, 'live@example.com');
   assert.equal(stamp.oauth_key_prefix, undefined);
 });
 
@@ -160,14 +184,41 @@ test('buildIdentityStamp — the pair comes from one record, never mixed', () =>
   assert.equal(stamp.account_email, 'a@example.com');
 });
 
-test('buildIdentityStamp — a live uuid does not displace billing.json\'s', () => {
+// The switch the live-first rule exists for: billing.json was rewritten by a newer session under
+// account A, this session still runs under B. B's uuid wins, and A's email must NOT ride along —
+// a mixed pair the server would resolve by the uuid alone.
+test('buildIdentityStamp — a live uuid displaces billing.json\'s, and never borrows its email', () => {
   const stamp = buildIdentityStamp(
     { accountUuid: 'uuid-B', email: null },
     { accountUuid: 'uuid-A', accountEmail: 'a@example.com' },
     {},
   );
+  assert.equal(stamp.account_uuid, 'uuid-B');
+  assert.equal('account_email' in stamp, false);
+});
+
+// Same account on both sides: billing.json's email is the CLI's, which reflects the live credential
+// store, while oauthAccount's can survive a switch stale — so the record's email still answers.
+test('buildIdentityStamp — the same uuid keeps billing.json\'s fresher email', () => {
+  const stamp = buildIdentityStamp(
+    { accountUuid: 'uuid-A', email: 'old@example.com' },
+    { accountUuid: 'uuid-A', accountEmail: 'a@example.com' },
+    {},
+  );
   assert.equal(stamp.account_uuid, 'uuid-A');
   assert.equal(stamp.account_email, 'a@example.com');
+});
+
+// A record that names an email but no uuid cannot contradict the live uuid, so its email fills the
+// gap when the live login states none.
+test('buildIdentityStamp — a uuid-less record lends its email to a live uuid', () => {
+  const stamp = buildIdentityStamp(
+    { accountUuid: 'uuid-A', email: null },
+    { accountUuid: null, accountAnchor: { value: 'cli@example.com', source: 'email' } },
+    {},
+  );
+  assert.equal(stamp.account_uuid, 'uuid-A');
+  assert.equal(stamp.account_email, 'cli@example.com');
 });
 
 // An oauthAccount carrying only subscription metadata states no identity at all, so billing.json
@@ -176,4 +227,73 @@ test('buildIdentityStamp — an oauthAccount that names nobody still yields to b
   const stamp = buildIdentityStamp({ accountUuid: null, email: null, subscriptionType: 'pro' }, BILLING, {});
   assert.equal(stamp.account_uuid, 'acc-billing');
   assert.equal(stamp.account_email, 'billing@example.com');
+});
+
+// ---------------------------------------------------------------------------
+// The organization: one login, several subscriptions.
+// ---------------------------------------------------------------------------
+
+// A personal plan and a company org under ONE Claude login share the accountUuid and the email;
+// only oauthAccount's organizationUuid tells the server which subscription a session ran under.
+test('buildIdentityStamp — the live organization rides alongside the live uuid', () => {
+  const stamp = buildIdentityStamp(
+    { ...ACCOUNT, organizationUuid: 'org-1', organizationName: 'Acme Corp' },
+    BILLING,
+    {},
+  );
+  assert.equal(stamp.account_uuid, 'acc-1');
+  assert.equal(stamp.account_org_uuid, 'org-1');
+  assert.equal(stamp.account_org_name, 'Acme Corp');
+});
+
+// Two sessions on the same login, different orgs: each stamps its own, whatever billing.json says.
+test('buildIdentityStamp — the organization comes from the live login, not billing.json', () => {
+  const stamp = buildIdentityStamp(
+    { ...ACCOUNT, organizationUuid: 'org-personal', organizationName: null },
+    { ...BILLING, accountUuid: 'acc-1', organizationUuid: 'org-company', organizationName: 'Acme' },
+    {},
+  );
+  assert.equal(stamp.account_org_uuid, 'org-personal');
+  assert.equal('account_org_name' in stamp, false, 'a null name is omitted, not borrowed or nulled');
+});
+
+test('buildIdentityStamp — an unknown organization is omitted, never nulled', () => {
+  const stamp = buildIdentityStamp({ ...ACCOUNT, organizationUuid: null, organizationName: null }, null, {});
+  assert.equal('account_org_uuid' in stamp, false);
+  assert.equal('account_org_name' in stamp, false);
+});
+
+// When billing.json supplies the uuid, the live org would describe a different record — so it
+// stays off the wire rather than forming a mixed pair.
+test('buildIdentityStamp — no live organization next to a uuid billing.json supplied', () => {
+  const stamp = buildIdentityStamp(
+    { accountUuid: null, email: null, organizationUuid: 'org-1', organizationName: 'Acme' },
+    BILLING,
+    {},
+  );
+  assert.equal(stamp.account_uuid, 'acc-billing');
+  assert.equal('account_org_uuid' in stamp, false);
+  assert.equal('account_org_name' in stamp, false);
+});
+
+// Under a setup token the stamp is the fingerprint alone — the org, like the uuid, describes
+// whoever logged in interactively last.
+test('buildIdentityStamp — a fingerprintable token suppresses the organization too', () => {
+  const stamp = buildIdentityStamp(
+    { ...ACCOUNT, organizationUuid: 'org-1', organizationName: 'Acme' },
+    null,
+    { CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
+  );
+  assert.equal('account_org_uuid' in stamp, false);
+  assert.equal('account_org_name' in stamp, false);
+});
+
+test('buildIdentityStamp — a key-scoped record suppresses the live organization', () => {
+  const stamp = buildIdentityStamp(
+    { ...ACCOUNT, organizationUuid: 'org-1', organizationName: 'Acme' },
+    KEY_SCOPED,
+    {},
+  );
+  assert.equal(stamp.account_uuid, 'acc-billing');
+  assert.equal('account_org_uuid' in stamp, false);
 });

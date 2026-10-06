@@ -202,3 +202,26 @@ test('readClaudeAccountAnchor — null when neither identity exists or values ar
   assert.equal(readClaudeAccountAnchor(fakeFs({ [AT('.claude.json')]: '{not json' })), null);
   assert.equal(readClaudeAccountAnchor(fakeFs({})), null);
 });
+
+// One Claude login can hold several subscriptions — a personal plan and a company org — under the
+// SAME accountUuid and email. The organization is the only field that tells them apart.
+test('readClaudeAccount — exposes the organization uuid and name, trimmed', () => {
+  const r = readClaudeAccount(
+    withAccount({
+      accountUuid: 'acc-1',
+      organizationUuid: '  org-1  ',
+      organizationName: ' Acme Corp ',
+    }),
+  );
+  assert.equal(r.organizationUuid, 'org-1');
+  assert.equal(r.organizationName, 'Acme Corp');
+});
+
+test('readClaudeAccount — a missing or blank organization is null, not an empty string', () => {
+  const absent = readClaudeAccount(withAccount({ accountUuid: 'acc-1' }));
+  assert.equal(absent.organizationUuid, null);
+  assert.equal(absent.organizationName, null);
+  const blank = readClaudeAccount(withAccount({ accountUuid: 'acc-1', organizationUuid: '   ', organizationName: 42 }));
+  assert.equal(blank.organizationUuid, null);
+  assert.equal(blank.organizationName, null);
+});

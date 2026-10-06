@@ -84,3 +84,51 @@ test('recordStatuslineUsage — no rate limits on stdin records nothing', (t) =>
   assert.equal(r.recorded, false);
   assert.equal(r.reason, 'no-rate-limits');
 });
+
+// ─── the account a row was observed under ────────────────────────────────────
+//
+// Rows wait in the file until a hook drains them, possibly after the user switched accounts or
+// subscriptions. Each row therefore records whose limits it measured, at the moment it measured them.
+
+const withAccount = (iso, account) => ({ ...at(iso), readClaudeAccount: () => account });
+
+test('recordStatuslineUsage — a row records the live account and organization', (t) => {
+  useTmpHome(t);
+  recordStatuslineUsage(payload(23.5), withAccount('2026-08-11T10:00:00Z', {
+    accountUuid: 'acc-1',
+    email: 'dev@example.com',
+    organizationUuid: 'org-personal',
+    organizationName: 'Personal',
+    subscriptionType: 'max',
+  }));
+  const [row] = readPendingStatuslineUsage();
+  assert.deepEqual(row.account, {
+    uuid: 'acc-1',
+    email: 'dev@example.com',
+    organizationUuid: 'org-personal',
+    organizationName: 'Personal',
+  });
+});
+
+// The status line renders constantly; ~/.claude.json is read only for a render that earns a row.
+test('recordStatuslineUsage — an immaterial render never reads the account', (t) => {
+  useTmpHome(t);
+  recordStatuslineUsage(payload(23.5), withAccount('2026-08-11T10:00:00Z', { accountUuid: 'acc-1' }));
+  let reads = 0;
+  recordStatuslineUsage(payload(24.0), {
+    ...at('2026-08-11T10:05:00Z'),
+    readClaudeAccount: () => { reads += 1; return { accountUuid: 'acc-1' }; },
+  });
+  assert.equal(reads, 0);
+});
+
+test('recordStatuslineUsage — an unreadable account still records the row, without identity', (t) => {
+  useTmpHome(t);
+  const r = recordStatuslineUsage(payload(23.5), {
+    ...at('2026-08-11T10:00:00Z'),
+    readClaudeAccount: () => { throw new Error('boom'); },
+  });
+  assert.equal(r.recorded, true);
+  const [row] = readPendingStatuslineUsage();
+  assert.equal('account' in row, false);
+});
