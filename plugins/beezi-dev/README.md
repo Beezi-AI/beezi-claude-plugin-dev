@@ -33,6 +33,7 @@ only read correctly from a fresh session.
   - `/beezi:settings statusline on|off` — wrap (or unwrap) your status line so Beezi records the plan-usage numbers Claude Code already computes for it; your status line keeps rendering unchanged.
 
   Accounts in one workspace have no rules or New folders setting: their one workspace receives everything.
+- `/beezi:about` — the installed version, the newest published version (always fetched fresh from the marketplace manifest; the last cached reading stands in when offline), when Claude Code last updated the plugin on this machine and when it was first installed (read from Claude Code's own `~/.claude/plugins/installed_plugins.json`; unknown for a copy loaded from a local folder), and — when a newer version is out — the `/plugin` and `claude plugin …` steps to update, the same commands the SessionStart update notice names.
 - `/beezi:logout` — log one account (or all of them) out of this machine: asks the portal to drop that machine row and revoke that account's OAuth client, then deletes its credentials and its local state. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally. If the account that was the default goes and others remain, it asks which one becomes the default.
 
 ## Multiple accounts
