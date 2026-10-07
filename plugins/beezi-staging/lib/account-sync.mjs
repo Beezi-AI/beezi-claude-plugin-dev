@@ -129,6 +129,15 @@ export function buildAccountSyncPayload({ config = null, env = process.env } = {
     const storedEmail = config == null ? null : label(config.accountEmail);
     const email = storedEmail != null ? storedEmail : (anchorSource === 'email' ? anchorValue : null);
     if (email != null) payload.email = email;
+    // WHICH subscription of the login: a personal plan and a company org share the uuid and the
+    // email, so without it the server merges both into one account. Part of the identity, so it is
+    // suppressed with it, and part of the hash, so an org switch re-syncs.
+    const organizationUuid = config == null ? null : label(config.organizationUuid);
+    if (organizationUuid != null) {
+      payload.organizationUuid = organizationUuid;
+      const organizationName = label(config.organizationName);
+      if (organizationName != null) payload.organizationName = organizationName;
+    }
   }
   const subscriptionType = config == null ? null : label(config.subscriptionType);
   if (subscriptionType != null) payload.subscriptionType = subscriptionType;
