@@ -38,12 +38,16 @@ runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
   }
   let additionalContext = null;
   let targetsNotice = null;
+  let joinedNotice = null;
   try {
     // Re-binds on every source with the tenants runSessionStart just refreshed; asks only on startup or clear.
     if (prompt != null) additionalContext = await prompt.buildWorkspacePrompt(input);
     if (prompt != null && input.source !== 'compact') targetsNotice = await prompt.buildTargetsNotice(input);
+    // Built only when the status line will be written, since building it marks the join announced.
+    if (prompt != null && input.source !== 'compact' && failure == null) joinedNotice = await prompt.buildJoinedNotice();
   } catch { /* the ask is best-effort; the session still starts */ }
   if (targetsNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${targetsNotice}` : targetsNotice;
+  if (joinedNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${joinedNotice}` : joinedNotice;
   if (failure != null) {
     write({ systemMessage: null, additionalContext });
     throw failure;

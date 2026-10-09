@@ -2,6 +2,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   isMultiTenant,
+  joinTenantNames,
+  newTenantsOf,
   readSessionWorkspace,
   resolveTargets,
   roleLabel,
@@ -226,5 +228,21 @@ export async function buildTargetsNotice(input, deps = {}) {
       }
       return `${prefix}: ${text} Change with /beezi:settings.`;
     });
+  return lines.length === 0 ? null : lines.join('\n');
+}
+
+// SessionStart: one line per account with workspaces joined since the last notice here, which are then marked announced; null when none.
+export async function buildJoinedNotice() {
+  const accounts = await import('./accounts.mjs');
+  const rows = (await accounts.listAccounts()).filter((a) => a.status === accounts.AccountStatus.LINKED);
+  const lines = [];
+  for (const row of rows) {
+    const announced = Array.isArray(row.joinNoticedTenantIds) ? row.joinNoticedTenantIds : [];
+    const ids = newTenantsOf(row).filter((id) => announced.indexOf(id) === -1);
+    if (ids.length === 0) continue;
+    const prefix = rows.length > 1 ? `Beezi (${row.email ? row.email : row.key})` : 'Beezi';
+    lines.push(`${prefix}: you joined ${joinTenantNames(row, ids)}. Run /beezi:sync to choose which repos send analytics there.`);
+    try { await accounts.markJoinNoticed(row.key, ids); } catch { /* announced again next session */ }
+  }
   return lines.length === 0 ? null : lines.join('\n');
 }
