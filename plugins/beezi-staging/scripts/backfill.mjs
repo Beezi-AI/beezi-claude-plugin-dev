@@ -1,7 +1,7 @@
-import { parseArgs, runAudit, planWorkspaceRuns } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
-import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
+import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf, joinedAfterLink } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { usesRules } from '../lib/workspace-rules.mjs';
 import { readTrackingState } from '../lib/tracking.mjs';
@@ -264,6 +264,58 @@ async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessi
   return 0;
 }
 
+// A workspace joined after this machine linked the account got nothing live before the re-pick, so its
+// history resumes from what it already has (sync's coverage check). One that takes no uploads on
+// demand (audit-only) gets the one-time import instead, which has no link cutoff there.
+async function backfillJoinedOne(account, tenantId, argv, sessionRoutes) {
+  const options = { ...parseArgs(argv), account, tenantId, sessionRoutes, mode: SYNC_MODE, liveOnly: true };
+  const result = await runAudit(
+    { onProgress: ({ processed, total }) => { console.log(`Beezi: ${processed}/${total} sessions read…`); } },
+    options,
+  );
+  if (result.reason === 'audit-only' || result.halt === BackfillHalt.NOT_ALLOWED || result.halt === BackfillHalt.ALREADY_COMPLETED) {
+    return backfillOne(account, tenantId, argv, sessionRoutes);
+  }
+  // A stop the next run will not clear prints backfillOne's own ✗ line; a busy run gets the sync line below.
+  if (result.reason === 'no-account') {
+    return failed('Beezi: this machine is not linked. Run /beezi:login first.');
+  }
+  if (result.reason === 'auth-unavailable') {
+    return failed(
+      'Beezi: this machine is linked, but its saved login could not be read just now '
+        + `(${result.authReason == null ? result.authState : result.authReason}). `
+        + 'Nothing was removed — wait a moment and run /beezi:sync to finish the upload.',
+    );
+  }
+  if (result.halt === BackfillHalt.UNSUPPORTED_SERVER) {
+    return failed('Beezi: the server does not support the history pull yet — try again after the portal update.');
+  }
+  if (result.halt === BackfillHalt.FORBIDDEN) {
+    return failed(
+      `Beezi: the server refused the upload (${result.lastError == null ? 'forbidden' : result.lastError}). ` +
+        'Check your seat with your workspace admin, then re-run /beezi:login.',
+    );
+  }
+  if (options.dryRun) {
+    console.log(`✓ Beezi (dry run): would send ${plural(result.plannedReports > 0 ? result.plannedReports : 0, 'report')} to this workspace you joined — nothing was sent.`);
+    return 0;
+  }
+  const imported = result.sessionsImported > 0 ? result.sessionsImported : 0;
+  const complete = result.reason == null && result.halt == null
+    && !(result.coverageKnown === false && result.candidates > 0)
+    && !(result.reportsFailed > 0) && !(result.costStatesFailed > 0);
+  if (imported > 0) {
+    const stored = result.reportsStored > 0 ? result.reportsStored : 0;
+    console.log(`✓ Beezi: uploaded ${imported} session${imported === 1 ? '' : 's'} (${stored} report${stored === 1 ? '' : 's'} stored) to this workspace you joined.`);
+  } else if (complete) {
+    console.log('✓ Beezi: this workspace already has this machine\'s history.');
+  }
+  if (!complete) {
+    console.log('  Some history did not reach this workspace this time. Run /beezi:sync to send the rest and see why.');
+  }
+  return 0;
+}
+
 function tenantLabel(row, tenantId) {
   const t = tenantById(row, tenantId);
   return t != null && t.name ? t.name : tenantId;
@@ -327,12 +379,14 @@ async function main() {
     tenantIds = plan.tenantIds;
     routes = plan.routes;
   }
+  const joinedIds = joinedAfterLink(row);
   let status = 0;
   for (const tenantId of tenantIds) {
     console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
     // One workspace's exception must not stop the rest.
     try {
-      if (await backfillOne(account, tenantId, argv, routes) !== 0) status = 1;
+      const run = joinedIds.indexOf(tenantId) === -1 ? backfillOne : backfillJoinedOne;
+      if (await run(account, tenantId, argv, routes) !== 0) status = 1;
     } catch (error) {
       console.error(`✗ ${friendlyMessage(error)}`);
       status = 1;

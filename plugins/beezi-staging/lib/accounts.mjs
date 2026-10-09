@@ -227,6 +227,8 @@ export function updateAccount(key, patch, deps = {}) {
       if (patch[field] == null) continue;
       row[field] = field === 'email' ? String(patch[field]).toLowerCase() : patch[field];
     }
+    // A row with no link time measures later joins from its first refresh (newTenantsOf).
+    if (row.linkedAt == null && row.reviewBaselineAt == null) row.reviewBaselineAt = new Date().toISOString();
     writeIndex(index);
     return index;
   });
@@ -249,6 +251,35 @@ export function setNewFolders(key, { mode, tenantIds = [] } = {}, deps = {}) {
     writeIndex(index);
     return row.newFolders;
   });
+}
+
+// Adds ids to one of the row's id lists; a known workspace list prunes both id lists to its members.
+function addTenantIds(key, field, ids, deps) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) throw new UserError('No such linked account.');
+    const stored = Array.isArray(row[field]) ? row[field].filter((id) => typeof id === 'string') : [];
+    row[field] = stored.concat(ids.filter((id) => typeof id === 'string' && stored.indexOf(id) === -1));
+    if (Array.isArray(row.tenants)) {
+      const members = row.tenants.filter((t) => t != null && typeof t.id === 'string').map((t) => t.id);
+      for (const list of ['reviewedTenantIds', 'joinNoticedTenantIds']) {
+        if (Array.isArray(row[list])) row[list] = row[list].filter((id) => members.indexOf(id) !== -1);
+      }
+    }
+    writeIndex(index);
+    return row[field];
+  });
+}
+
+// Workspaces whose re-pick pass finished on this machine (workspace.mjs joined done / add-all).
+export function markTenantsReviewed(key, ids, deps = {}) {
+  return addTenantIds(key, 'reviewedTenantIds', ids, deps);
+}
+
+// Workspaces the session-start notice already announced on this machine.
+export function markJoinNoticed(key, ids, deps = {}) {
+  return addTenantIds(key, 'joinNoticedTenantIds', ids, deps);
 }
 
 // Adds a routing rule, or replaces the tenantIds of the one with the same kind and match in place; returns its 1-based number.

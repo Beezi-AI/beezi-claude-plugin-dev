@@ -1,7 +1,7 @@
 import os from 'os';
 import path from 'path';
 import {
-  AccountStatus, getDefaultKey, listAccounts, parseAccountFlag, removeWorkspaceRule, setNewFolders, setWorkspaceRule,
+  AccountStatus, getDefaultKey, listAccounts, markTenantsReviewed, parseAccountFlag, removeWorkspaceRule, setNewFolders, setWorkspaceRule,
 } from '../lib/accounts.mjs';
 import { resolveSessionId } from '../lib/permission-mode-store.mjs';
 import {
@@ -9,8 +9,10 @@ import {
   initSessionWorkspace,
   isMultiTenant,
   isSingleTenant,
+  joinTenantNames,
   listSessionWorkspaces,
   newFoldersOf,
+  newTenantsOf,
   readSessionWorkspace,
   recordReadTenant,
   recordSessionRoute,
@@ -23,7 +25,7 @@ import {
 import { releaseHeldQueue } from '../lib/workspace-queue.mjs';
 import { pluginRoot } from '../lib/workspace-prompt.mjs';
 import {
-  createRouteContext, outsideKey, planUnruledRoutes, routeForDir, routeKeyForDir, rulesOf, rulesTableLines, shortLabel,
+  createRouteContext, outsideKey, placeNow, planReviewPlaces, planUnruledRoutes, routeForDir, routeKeyForDir, rulesOf, rulesTableLines, shortLabel,
 } from '../lib/workspace-rules.mjs';
 import { canonicalRemote } from '../lib/git.mjs';
 import { normPath, pathHasPrefix } from '../lib/repo-map.mjs';
@@ -41,6 +43,7 @@ const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account 
   + ' | rule remove <n> [--account <ref>]'
   + ' | rule add-all (<id|name|n>… | none) [--session <id>] [--account <ref>]'
   + ' | routes [--session <id>] [--account <ref>]'
+  + ' | joined [add-all | done] [--session <id>] [--account <ref>]'
   + ' | new-folders [ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
   + ' | read <id|name|n> [--session <id>] [--account <ref>]';
 const NOT_LINKED = 'Beezi: this machine is not linked. Run /beezi:login to link an account.';
@@ -443,6 +446,11 @@ async function rule(argv) {
   throw new UserError(USAGE);
 }
 
+// The rule-add target flag for a place; single quotes keep $, backticks, " and \ in the match literal.
+function ruleTargetFlag(place) {
+  return place.kind === 'outside' ? '--outside' : `--${place.kind} '${place.match.replace(/'/g, "'\\''")}'`;
+}
+
 // Past sessions waiting under New folders = Ask me, grouped by repo or folder, for the planning questions.
 async function routes(argv) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
@@ -465,8 +473,7 @@ async function routes(argv) {
       for (const g of groups) {
         total += 1;
         console.log(`P${total}. ${labeled(g)}, ${sessionsCount(g.sessions)} account=${row.key} kind=${g.kind} match=${g.match}`);
-        // Single quotes keep $, backticks, " and \ in the match literal.
-        const where = g.kind === 'outside' ? '--outside' : `--${g.kind} '${g.match.replace(/'/g, "'\\''")}'`;
+        const where = ruleTargetFlag(g);
         console.log(`P${total}-command=${SCRIPT} rule add ${where} --account ${row.key} <tenants>`);
       }
       console.log(`all-command=${SCRIPT} rule add-all --account ${row.key} <tenants>`);
@@ -479,6 +486,92 @@ async function routes(argv) {
     }
   }
   console.log(`routes=${total}`);
+}
+
+// A match or label holding a control character could forge a machine line, so `joined` leaves such a place out.
+const UNSAFE_LINE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+// Accounts that joined a workspace since their last re-pick here: every place to re-pick, with where it sends now (login Step 4a, /beezi:sync Step 1).
+async function joined(argv) {
+  const [sub, ...after] = argv;
+  if (sub === 'add-all') { await joinedAddAll(after); return; }
+  if (sub === 'done') { await joinedDone(after); return; }
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const rows = await selectedRows(account);
+  const { sessionId } = resolveSession(session);
+  const ctx = createRouteContext();
+  let entries = null;
+  let total = 0;
+  for (const row of rows) {
+    if (row.status !== AccountStatus.LINKED) continue;
+    const newIds = newTenantsOf(row);
+    if (newIds.length === 0) continue;
+    if (entries == null) entries = listAllTranscripts();
+    const places = planReviewPlaces(row, entries, ctx, { liveSessionId: sessionId })
+      .filter((place) => !UNSAFE_LINE.test(place.match) && !UNSAFE_LINE.test(place.label));
+    if (places.length === 0) continue;
+    const count = places.length === 1 ? '1 repo or folder' : `${places.length} repos or folders`;
+    console.log(`${accountLabel(row)}: you joined ${joinTenantNames(row, newIds)} — ${count} to review account=${row.key} new=${newIds.join(',')}`);
+    for (const t of tenantsOf(row)) {
+      console.log(`W. ${t.name ? t.name : t.id} account=${row.key} tenant=${t.id} new=${newIds.indexOf(t.id) === -1 ? 'no' : 'yes'} role=${roleLabel(t)}`);
+    }
+    for (const place of places) {
+      total += 1;
+      const now = placeNow(row, place, newIds);
+      const where = now.pending ? 'no rule yet' : sendList(row, now.ids);
+      console.log(`J${total}. ${labeled(place)}, ${sessionsCount(place.sessions)}, now: ${where} account=${row.key} kind=${place.kind} match=${place.match} now=${now.pending ? 'pending' : idList(now.ids)}`);
+      console.log(`J${total}-command=${SCRIPT} rule add ${ruleTargetFlag(place)} --account ${row.key} <tenants>`);
+    }
+    console.log(`add-all-command=${SCRIPT} joined add-all --account ${row.key}`);
+    console.log(`done-command=${SCRIPT} joined done --account ${row.key}`);
+  }
+  console.log(`joined=${total}`);
+}
+
+// Adds the new workspaces to every listed place that already sends somewhere; Don't-track and no-rule-yet places stay as they are. Then marks the join reviewed.
+async function joinedAddAll(argv) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const { account, rest } = await parseAccountFlag(afterSession);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  requireMulti(row);
+  const newIds = newTenantsOf(row);
+  if (newIds.length === 0) {
+    console.log('✓ No new workspaces are waiting for a review.');
+    console.log('rules-added=0');
+    return;
+  }
+  const current = resolveSession(session);
+  const ctx = createRouteContext();
+  const members = tenantsOf(row).map((t) => t.id);
+  const added = [];
+  for (const place of planReviewPlaces(row, listAllTranscripts(), ctx, { liveSessionId: current.sessionId })) {
+    const now = placeNow(row, place, newIds);
+    if (now.pending || now.ids.length === 0) continue;
+    const tenantIds = members.filter((id) => now.ids.indexOf(id) !== -1 || newIds.indexOf(id) !== -1);
+    added.push((await setWorkspaceRule(row.key, { kind: place.kind, match: place.match, label: place.label, tenantIds })).index);
+  }
+  await markTenantsReviewed(row.key, newIds);
+  const n = added.length;
+  const names = joinTenantNames(row, newIds);
+  console.log(n === 0
+    ? `✓ Nothing to add: no repo or folder sends anywhere yet. ${names} won't be asked about again.`
+    : `✓ ${names} now ${newIds.length === 1 ? 'gets' : 'get'} analytics from ${n === 1 ? '1 repo or folder' : `${n} repos and folders`}.`);
+  if (n > 0) await bindOpenSessions(await resolveAccount(row.key), added, current, ctx);
+  console.log(`rules-added=${n}`);
+}
+
+// Marks the account's new workspaces reviewed, whatever the answers were.
+async function joinedDone(argv) {
+  const { account, rest } = await parseAccountFlag(argv);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const row = await resolveAccount(account);
+  const newIds = newTenantsOf(row);
+  await markTenantsReviewed(row.key, newIds);
+  console.log(newIds.length === 0 ? '✓ No new workspaces were waiting for a review.' : `✓ Done reviewing ${joinTenantNames(row, newIds)}.`);
+  console.log(`reviewed=${idList(newIds)}`);
 }
 
 async function newFolders(argv) {
@@ -538,6 +631,7 @@ async function main() {
   if (cmd === 'rules') { await rules(argv); return; }
   if (cmd === 'rule') { await rule(argv); return; }
   if (cmd === 'routes') { await routes(argv); return; }
+  if (cmd === 'joined') { await joined(argv); return; }
   if (cmd === 'new-folders') { await newFolders(argv); return; }
   if (cmd === 'read') { await read(argv); return; }
   throw new UserError(cmd == null ? USAGE : `Unknown command "${cmd}". ${USAGE}`);

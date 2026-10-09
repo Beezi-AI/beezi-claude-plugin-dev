@@ -141,6 +141,8 @@ export async function runLogin(deps = {}) {
       const check = await checkStored(existing);
       if ((check.probe && check.probe.outcome) === PROBE_OUTCOMES.AUTHENTICATED) {
         await discardFresh(); fresh = null;
+        // Stores the probe's workspace list so a join made since session start reaches joined and the upload.
+        try { await updateAccount(existing.key, check.probe.identity, deps); } catch { /* best-effort */ }
         log(`\n✓ This machine is already linked as ${describeAccount(existing)}.`);
         log(hint);
         const index = await readIndex(deps);

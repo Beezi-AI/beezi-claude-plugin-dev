@@ -345,6 +345,12 @@ async function runAuditUnlocked(deps, options) {
       result.upgradeAdvised = who.trackingMode != null && who.trackingMode !== TrackingMode.LIVE;
       return result;
     }
+    // liveOnly (login's upload to a joined workspace) stops before anything is sent when the workspace is not live, so it can take the one-time import.
+    if (syncMode && options.liveOnly === true && who.trackingMode != null && who.trackingMode !== TrackingMode.LIVE) {
+      result.ok = true;
+      result.reason = 'audit-only';
+      return result;
+    }
   }
 
   const ledger = loadLedger(key, identity, ledgerTenant);
