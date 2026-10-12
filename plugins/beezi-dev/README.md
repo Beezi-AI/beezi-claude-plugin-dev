@@ -21,6 +21,15 @@ that picks everything up; the plugin also prints this reminder once per machine.
 if you do not — the machine stays linked either way — but authentication status and diagnostics
 only read correctly from a fresh session.
 
+## Terminal setup
+
+The one-line installers finish by running `node scripts/setup.mjs` in your terminal. It asks the same questions
+as `/beezi:login` (account, new folders, plan, new workspaces and repos with no rule), uploads your past sessions,
+then offers crash reports and the status line, all without a Claude Code session. Each step runs the plugin's own
+script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
+earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
+run `/beezi:login` in Claude Code.
+
 ## Commands
 
 - `/beezi:login` — link a Beezi account to this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores that account's credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). Run it again to add another account: the browser signs in as whichever Beezi account it is already signed in as, so sign out there (or use a private window) first. After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes with that account's own **history backfill** (see below) — re-running `/beezi:login` for an already-linked account is the way to refresh the plan or resume an interrupted backfill.

@@ -57,6 +57,17 @@ test('a consented machine with pending reports spawns the worker, needing no tok
   assert.deepEqual(calls[0].args.slice(1), [], 'argv carries nothing at all');
 });
 
+test('terminal setup (BEEZI_SETUP=1) never spawns the worker or claims the send window', async (t) => {
+  withHome(t);
+  const { maybeSpawnDiagnostics } = await load(true, true);
+  let spawned = 0;
+  const deps = { spawnImpl: () => { spawned += 1; return { unref() {} }; }, now: () => 1000 };
+  assert.equal(maybeSpawnDiagnostics({ ...deps, env: { BEEZI_SETUP: '1' } }), false);
+  assert.equal(spawned, 0);
+  assert.equal(maybeSpawnDiagnostics({ ...deps, env: {} }), true, 'the window was not claimed');
+  assert.equal(spawned, 1);
+});
+
 test('the second hook of the same turn does not spawn a second worker', async (t) => {
   withHome(t);
   const { maybeSpawnDiagnostics } = await load(true, true);

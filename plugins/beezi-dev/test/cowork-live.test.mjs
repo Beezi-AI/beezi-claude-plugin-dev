@@ -51,6 +51,15 @@ test('startup is throttled and never spawns without linked live accounts', () =>
   assert.equal(spawned, 1);
 });
 
+test('terminal setup (BEEZI_SETUP=1) never spawns the live worker or stamps an attempt', () => {
+  let spawned = 0, writes = 0;
+  const deps = { env: { BEEZI_SETUP: '1' }, eligible: () => true, readState: () => null, writeState: () => { writes++; }, now: () => 100000, spawn: () => { spawned++; return true; } };
+  assert.equal(maybeSpawnCoworkLive(deps), false);
+  assert.equal(spawned, 0); assert.equal(writes, 0);
+  deps.env = {}; assert.equal(maybeSpawnCoworkLive(deps), true);
+  assert.equal(spawned, 1); assert.equal(writes, 1);
+});
+
 test('failed unchanged cache is retried and account changes trigger a fresh pass', async () => {
   const f = fixture(); let attempts = 0;
   f.deps.eligible = () => f.time() < 90000 ? (f.time() < 60000 ? 'account-a' : 'account-b') : '';
