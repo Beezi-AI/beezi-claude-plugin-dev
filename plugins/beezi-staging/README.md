@@ -76,7 +76,8 @@ as `/beezi:login` (account, new folders, plan, new workspaces and repos with no 
 then offers crash reports and the status line, all without a Claude Code session. Each step runs the plugin's own
 script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
 earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
-run `/beezi:login` in Claude Code.
+run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
+as the fallback where keys cannot be read; `NO_COLOR` turns the colours off.
 
 ## Commands
 

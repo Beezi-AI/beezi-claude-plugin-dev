@@ -3,9 +3,8 @@ import { askMachineSettings, offerDefault, uploadHistory } from './setup-finish.
 import { capturePlan } from './setup-plan.mjs';
 import { askNewFolders, reviewJoined, reviewRoutes } from './setup-routing.mjs';
 
-export const DONE = 'Beezi is set up. Open Claude Code and keep working — restart it first if it was already open.';
-export const PLAN_PROGRESS = 'Checking your plan…';
-export const SESSIONS_PROGRESS = 'Looking at your past sessions…';
+export const PLAN_PROGRESS = '==> Checking your plan…';
+export const SESSIONS_PROGRESS = '==> Looking at your past sessions…';
 
 // The terminal setup flow; 0 when done, 1 when no account was chosen or signed in.
 export async function runSetup(ctx) {
@@ -20,6 +19,5 @@ export async function runSetup(ctx) {
   await uploadHistory(ctx, account.key);
   await offerDefault(ctx, account);
   await askMachineSettings(ctx);
-  ctx.print(DONE);
   return 0;
 }
