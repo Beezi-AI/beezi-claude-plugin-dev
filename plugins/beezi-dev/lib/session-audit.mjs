@@ -3,7 +3,7 @@ import { sessionFor as _sessionFor } from './sessions.mjs';
 import { getAuthentication as _getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from './token.mjs';
 import { AUTH_STATES } from './auth-state.mjs';
 import { runCheckpoint as _runCheckpoint, flushQueue as _flushQueue } from './checkpoint.mjs';
-import { firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
+import { listAllTranscripts as _listAllTranscripts, firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
 import {
   loadLedger as _loadLedger,
   saveLedger as _saveLedger,

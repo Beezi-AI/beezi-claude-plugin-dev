@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runAudit } from './account-hook-fixtures.mjs';
-import { parseArgs, shouldFinalize } from '../lib/session-audit.mjs';
+import { parseArgs, shouldFinalize, planWorkspaceRuns } from '../lib/session-audit.mjs';
 import { BackfillSessionStatus, BackfillHalt } from '../lib/audit-flush.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -1305,4 +1305,28 @@ test('live Cowork sends active finalized snapshots once, retries failure and pre
   assert.ok(saved.length > writes);
   deps.shouldContinue = () => false; entry.costState.totalCostUSD = 3;
   const stopped = await runAudit(deps, options); assert.equal(stopped.halt, 'tracking-stopped'); assert.equal(bodies.length, 3);
+});
+
+// ─── workspace route planning ───────────────────────────────────────────────
+
+test('planWorkspaceRuns routes the transcripts it finds under the Claude projects dir', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-plan-'));
+  const prev = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, BEEZI_HOME: process.env.BEEZI_HOME };
+  process.env.CLAUDE_CONFIG_DIR = path.join(dir, 'claude');
+  process.env.BEEZI_HOME = path.join(dir, 'beezi');
+  t.after(() => {
+    for (const [name, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const projectDir = path.join(dir, 'claude', 'projects', '-work-repo');
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'sess-plan.jsonl'), JSON.stringify({ type: 'user', cwd: path.join(dir, 'repo') }), 'utf-8');
+
+  const plan = planWorkspaceRuns({ key: 'acct', tenants: [{ id: 't1' }, { id: 't2' }] });
+
+  assert.equal(plan.scanned, 1);
+  assert.deepEqual([...plan.routes.keys()], ['sess-plan']);
 });
