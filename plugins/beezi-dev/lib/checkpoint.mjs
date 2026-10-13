@@ -181,8 +181,10 @@ function detectTimezone() {
 // own coverage — see the three reads it overrides below.
 export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
-  const gitImpl = deps.gitImpl == null ? git : deps.gitImpl;
+  const gitImpl = deps.runCache != null ? deps.runCache.git : (deps.gitImpl == null ? git : deps.gitImpl);
   const computeDelta = deps.computeDelta == null ? _computeDelta : deps.computeDelta;
+  // The audit run's per-session memo: one read and parse per file for the delta, the Task map and the timeline.
+  const transcriptMemo = deps.transcriptMemo == null ? null : deps.transcriptMemo;
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const collectedErrors = [];
   const empty = (extra) => ({ enqueued: 0, flush: null, flushes: [], sessionErrors: collectedErrors, ...(extra || {}) });
@@ -205,10 +207,13 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   if (recipients.length === 0) return empty();
 
   // Diagnostics use the machine-wide anonymous worker; only identity correlation is authenticated.
-  let defaultKey = null;
-  try { defaultKey = await getDefaultKey(); } catch { /* best-effort */ }
-  const diag = diagnosticsSession(sessions, defaultKey);
-  try { await bindInstallationIfNeeded(diag, { postJsonImpl: deps.postJsonImpl }); } catch { /* best-effort */ }
+  // The audit run binds once for all its checkpoints, so each of them skips it.
+  if (options.skipInstallationBinding !== true) {
+    let defaultKey = null;
+    try { defaultKey = await getDefaultKey(); } catch { /* best-effort */ }
+    const diag = diagnosticsSession(sessions, defaultKey);
+    try { await bindInstallationIfNeeded(diag, { postJsonImpl: deps.postJsonImpl }); } catch { /* best-effort */ }
+  }
   try { rememberClaudeCodeVersion(transcript_path); } catch { /* best-effort */ }
   // One read per checkpoint; a tenant set on caller-supplied sessions (sync --tenant) wins. Account
   // rows carry the web-side tenantId, which must never be followed.
@@ -268,7 +273,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const map = loadRepoMap();
   let mapDirty = false;
 
-  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache, map);
+  const repoRootOf = (dir) => resolveRepoRoot(gitImpl, dir, rootCache, map, deps.runCache == null ? null : deps.runCache.gitRoots);
 
   const branchOf = (root, ms) => {
     if (!root) return '(unknown)';
@@ -328,7 +333,9 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     : null;
   let delta;
   try {
-    delta = computeDelta(transcript_path, cursor, { cwd, repoRootOf, branchAt: branchOf });
+    delta = computeDelta(transcript_path, cursor, transcriptMemo == null
+      ? { cwd, repoRootOf, branchAt: branchOf }
+      : { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.main });
   } catch {
     skipped.deltaFailed = true;
     return emptyResult;
@@ -533,13 +540,19 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   let agentCursorsDirty = false;
   // Each subagent's display name is the `description` of the Task block that spawned it; join via
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
-  const taskDescriptions = buildTaskDescriptionMap(transcript_path);
+  const taskDescriptions = buildTaskDescriptionMap(transcript_path, { transcriptMemo });
   const workflowNameOf = createWorkflowNameResolver(transcript_path, session_id);
-  for (const { agentId, path: agentPath, workflowId, agentType, spawnDepth, toolUseId } of listSubagentTranscripts(transcript_path, session_id)) {
+  const agentTranscripts = transcriptMemo == null
+    ? listSubagentTranscripts(transcript_path, session_id)
+    : transcriptMemo.subagents(transcript_path, session_id);
+  for (const { agentId, path: agentPath, workflowId, agentType, spawnDepth, toolUseId } of agentTranscripts) {
     const agentFrom = agentCursors[agentId] == null ? 0 : agentCursors[agentId];
     let agentDelta;
     try {
-      agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf });
+      // The memo parses the whole agent file and keeps its timestamps for the timeline's span.
+      agentDelta = computeDelta(agentPath, agentFrom, transcriptMemo == null
+        ? { cwd, repoRootOf, branchAt: branchOf }
+        : { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.agent });
     } catch { continue; }
     const taskDescription = toolUseId ? taskDescriptions.get(toolUseId) : null;
     // A workflow agent has no spawning Task block, so its run's state file names it instead.

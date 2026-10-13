@@ -1,8 +1,10 @@
 import fs from 'fs';
 import { sessionFor as _sessionFor } from './sessions.mjs';
-import { getAuthentication as _getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from './token.mjs';
+import { getAuthentication as _getAuthentication, getAccessToken as _getAccessToken, INTERACTIVE_REFRESH_WAIT_MS } from './token.mjs';
 import { AUTH_STATES } from './auth-state.mjs';
 import { runCheckpoint as _runCheckpoint, flushQueue as _flushQueue } from './checkpoint.mjs';
+import { git } from './git.mjs';
+import { memoizeGit } from './git-memo.mjs';
 import { listAllTranscripts as _listAllTranscripts, firstRecordedCwd as _firstRecordedCwd } from './transcript-index.mjs';
 import {
   loadLedger as _loadLedger,
@@ -33,12 +35,16 @@ import { sessionNameFrom as _sessionNameFrom } from './session-name.mjs';
 import { loadRepoMap as _loadRepoMap, resolveRemoteOffline } from './repo-map.mjs';
 import { fetchCoverage as _fetchCoverage } from './session-coverage.mjs';
 import { computeSessionTimeline as _computeSessionTimeline } from './session-timeline.mjs';
+import { createTranscriptMemo } from './transcript-memo.mjs';
 import { postSessionError as _postSessionError } from './session-error-report.mjs';
 import { resolveSessionTranscript } from './transcript.mjs';
 import { isMultiTenant, tenantsOf } from './workspace.mjs';
 import { createRouteContext, planSessionRoutes, waitingRoutes } from './workspace-rules.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { whoami as _whoami } from './whoami.mjs';
+import { bindInstallationIfNeeded as _bindInstallationIfNeeded } from './installation-binding.mjs';
+import { readUsageUtilization as _readUsageUtilization } from './usage-utilization.mjs';
+import { readClaudeAccount as _readClaudeAccount } from './claude-account.mjs';
 import {
   readTrackingState,
   matchesIdentity,
@@ -51,8 +57,8 @@ import {
 } from './tracking.mjs';
 import { UserError } from './friendly-error.mjs';
 
-// A transcript this big is read three times over (segments, timeline, task descriptions) and would
-// put the process into the hundreds of MB. Report it rather than let node die mid-run.
+// A transcript this big, parsed and held for its session (segments, timeline, task descriptions),
+// would put the process into the hundreds of MB. Report it rather than let node die mid-run.
 const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 // Error posts are single small upserts, so a little parallelism is free — but not unbounded,
@@ -60,6 +66,9 @@ const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 const FOLLOWUP_CONCURRENCY = 4;
 
 const AUDIT_TIMEOUT_MS = 60_000;
+
+// At most two chunk POSTs in flight: what today's server takes safely; more needs server work first.
+const UPLOAD_LANES = 2;
 
 // Repeatable history sync (/beezi:sync) rather than the one-time pull driven by /beezi:login.
 export const SYNC_MODE = 'sync';
@@ -123,6 +132,19 @@ async function mapLimited(items, limit, worker) {
     }
   });
   await Promise.all(runners);
+}
+
+// Calls `read` on first use only and keeps its answer for the run; a throw is kept as null, as runCheckpoint's own catch makes it.
+function readOnce(read) {
+  let done = false;
+  let value = null;
+  return () => {
+    if (!done) {
+      done = true;
+      try { value = read(); } catch { value = null; }
+    }
+    return value;
+  };
 }
 
 // Seal only when a re-run could not improve the outcome, and only when the run covered
@@ -231,10 +253,15 @@ async function runAuditUnlocked(deps, options) {
   const markCompleted = deps.markBackfillCompletedImpl == null ? markBackfillCompleted : deps.markBackfillCompletedImpl;
   const whoamiImpl = deps.whoamiImpl == null ? _whoami : deps.whoamiImpl;
   const recordWhoamiImpl = deps.recordWhoamiImpl == null ? recordWhoami : deps.recordWhoamiImpl;
+  const getAccessTokenImpl = deps.getAccessTokenImpl == null ? _getAccessToken : deps.getAccessTokenImpl;
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const onProgress = deps.onProgress == null ? (() => {}) : deps.onProgress;
   const env = deps.env == null ? process.env : deps.env;
   const now = deps.now == null ? (() => Date.now()) : deps.now;
+  const bindInstallation = deps.bindInstallationImpl == null ? _bindInstallationIfNeeded : deps.bindInstallationImpl;
+  // ~/.claude.json once per run instead of twice per session, handed to runCheckpoint's own reader seams.
+  const readUsageUtilization = readOnce(deps.readUsageUtilizationImpl == null ? _readUsageUtilization : deps.readUsageUtilizationImpl);
+  const readClaudeAccount = readOnce(deps.readClaudeAccountImpl == null ? _readClaudeAccount : deps.readClaudeAccountImpl);
 
   const result = {
     ok: false,
@@ -329,7 +356,8 @@ async function runAuditUnlocked(deps, options) {
   if (isMultiTenant(resolved) && tenantId == null) { result.reason = 'workspace-required'; return result; }
   // Each workspace of a multi-workspace account keeps its own ledger, so one import never blocks the rest.
   const ledgerTenant = isMultiTenant(resolved) ? tenantId : null;
-  const session = { ...resolved, token: auth.accessToken, tenantId };
+  // Rebound by renewSession; dispatches, follow-ups and /complete read it when they run.
+  let session = { ...resolved, token: auth.accessToken, tenantId };
   const identity = session.clientId;
   // Sync drops every gate that encodes one-timeness and every skip keyed on the session id alone;
   // the server's per-session line coverage decides what is already uploaded.
@@ -488,9 +516,34 @@ async function runAuditUnlocked(deps, options) {
   let processed = 0;
   let halted = false;
 
+  // Renews the run's token at most once per stale token; concurrent callers share one refresh.
+  let renewal = null;
+  // Tokens already refreshed from or minted by a refresh; a 401 on one of them answers null with no new refresh.
+  const spentTokens = new Set();
+  const renewSession = (stale) => {
+    if (stale.token !== session.token) return Promise.resolve(session);
+    if (renewal != null) return renewal;
+    if (spentTokens.has(stale.token)) return Promise.resolve(null);
+    spentTokens.add(stale.token);
+    renewal = new Promise((resolve) => { resolve(getAccessTokenImpl({}, { account: session.key, forceRefresh: true })); })
+      .catch(() => null)
+      .then((next) => {
+        renewal = null;
+        if (!next || next === session.token) return null;
+        spentTokens.add(next);
+        session = { ...session, token: next };
+        return session;
+      });
+    return renewal;
+  };
+
+  // One per run, shared by every flush: the first proxy refusal of gzip turns it off for the rest of the run.
+  const compression = { enabled: true };
+
   const dispatchBatch = async (batch) => {
     if (deps.shouldContinue != null && !deps.shouldContinue()) {
-      result.halt = 'tracking-stopped'; halted = true; return;
+      if (result.halt === null) result.halt = 'tracking-stopped';
+      halted = true; return;
     }
     result.plannedReports += batch.reduce((sum, g) => sum + g.reports.length, 0);
     if (options.dryRun) {
@@ -503,7 +556,7 @@ async function runAuditUnlocked(deps, options) {
     const flushed = await flushBackfillChunks(
       batch,
       session,
-      { fetchImpl },
+      { fetchImpl, renewSession, compression },
       { timeoutMs: AUDIT_TIMEOUT_MS, endpoint: syncMode ? ENDPOINTS.sessionsSync : ENDPOINTS.sessionsBackfill },
     );
     result.plannedChunks += flushed.chunks;
@@ -565,7 +618,8 @@ async function runAuditUnlocked(deps, options) {
     }
 
     if (flushed.halt) {
-      result.halt = flushed.halt;
+      // With two lanes the first halt is the one reported; a later lane must not overwrite it.
+      if (result.halt === null) result.halt = flushed.halt;
       halted = true;
       if (flushed.halt === BackfillHalt.ALREADY_COMPLETED) {
         markComplete(ledger);
@@ -590,23 +644,35 @@ async function runAuditUnlocked(deps, options) {
     onProgress({ processed, total: candidates.length, ...result });
   };
 
-  // One-deep pipeline: at most one batch in flight while the loop parses the next sessions —
-  // the run used to alternate CPU-bound parsing (network idle) with awaiting the upload (CPU
-  // idle). Dispatches stay strictly sequential (await the previous flight before starting the
-  // next), so the ledger writes and the never-two-POSTs invariant are untouched, and peak
-  // memory grows by exactly one pending batch.
-  let inFlight = null;
-  const dispatch = async () => {
+  // Up to UPLOAD_LANES batches upload while the loop parses; each holds whole sessions, so a split session stays in one flush.
+  const flights = new Set();
+  let flightError = null;
+  // A failed flight surfaces at the next dispatch or the final drain, once every other flight has landed.
+  const surfaceFlightError = async () => {
+    await Promise.all(flights);
+    throw flightError;
+  };
+  const dispatch = async ({ alone = false } = {}) => {
+    if (flightError != null) await surfaceFlightError();
     if (pending.length === 0) return;
     const batch = pending;
     pending = [];
     pendingBytes = 0;
     pendingItems = 0;
-    if (inFlight) await inFlight;
-    // A halt discovered by the previous flight drops this batch — its sessions stay
+    while (flights.size >= (alone ? 1 : UPLOAD_LANES)) await Promise.race(flights);
+    if (flightError != null) await surfaceFlightError();
+    // A halt discovered by an earlier flight drops this batch — its sessions stay
     // unledgered and eligible, exactly like the loop break below.
     if (halted) return;
-    inFlight = dispatchBatch(batch);
+    // The stored promise never rejects, so a failure waits in flightError instead of going unhandled.
+    const flight = dispatchBatch(batch).then(
+      () => { flights.delete(flight); },
+      (error) => {
+        flights.delete(flight);
+        if (flightError == null) flightError = error;
+      },
+    );
+    flights.add(flight);
   };
 
   // First failure earns a retry and holds the pull open; a second one does not, so a permanently
@@ -746,106 +812,144 @@ async function runAuditUnlocked(deps, options) {
     return { costState, only: false };
   };
 
+  // A full batch flies before the next group joins, so batches close where they always did and the last one goes alone.
+  const queueGroup = async (group, bytes, items) => {
+    if (pending.length > 0 && (pendingBytes >= MAX_BODY_BYTES || pendingItems >= MAX_CHUNK_ITEMS)) await dispatch();
+    pending.push(group);
+    pendingBytes += bytes;
+    pendingItems += items;
+  };
+
   const queueBlockOnly = async (group) => {
     const block = blockFor(group, []);
     if (block == null) return false;
     result.costStateSessions += 1;
     if (block.only) result.costStateOnlySessions += 1;
-    pending.push({ sessionId: group.sessionId, reports: [], timeline: null, costState: block.costState, cowork: group.cowork });
-    pendingBytes += Buffer.byteLength(JSON.stringify(block.costState), 'utf-8');
-    pendingItems += 1;
-    if (pendingBytes >= MAX_BODY_BYTES || pendingItems >= MAX_CHUNK_ITEMS) await dispatch();
+    await queueGroup(
+      { sessionId: group.sessionId, reports: [], timeline: null, costState: block.costState, cowork: group.cowork },
+      Buffer.byteLength(JSON.stringify(block.costState), 'utf-8'),
+      1,
+    );
     return true;
   };
+
+  // Run-wide memoized git shared by every checkpoint of this run; built per run, so nothing outlives it.
+  const runCache = { git: memoizeGit(git), gitRoots: new Map() };
+
+  // The installation binding each checkpoint used to attempt, once per run; a Cowork-only run reaches no checkpoint, so it never binds.
+  const reachesCheckpoint = candidates.some((entry) => {
+    const group = costStateBySession.get(entry.sessionId);
+    return group == null || !group.cowork;
+  });
+  if (reachesCheckpoint) {
+    try { await bindInstallation(session, {}); } catch { /* best-effort */ }
+  }
 
   // Parsing itself stays strictly sequential. computeDelta reads and JSON.parses the whole
   // transcript, so parsing sessions in parallel multiplies peak memory with no gain on a
   // single thread.
-  for (const entry of candidates) {
-    if (halted) break;
-    const costGroup = costStateBySession.get(entry.sessionId);
-    if (costGroup != null && costGroup.cowork) {
-      processed += 1;
-      if (costGroup.unchanged) { result.empty += 1; continue; }
-      await queueBlockOnly(costGroup);
-      continue;
-    }
-    const reports = [];
-    let sessionErrors = [];
-    let skipped = null;
-    try {
-      const checkpoint = await runCheckpoint(
-        {
-          session_id: entry.sessionId,
-          transcript_path: entry.transcriptPath,
-          cwd: recordedCwd(entry.transcriptPath),
-        },
-        { fetchImpl },
-        {
-          sessions: [session],
-          sink: (payload) => reports.push(payload),
-          skipFlush: true,
-          collectSessionErrors: true,
-          persistState: false,
-          skipLiveTrackingGate: true,
-          startCursor: startCursorFor(entry.sessionId),
-        },
-      );
-      sessionErrors = checkpoint == null || checkpoint.sessionErrors == null ? [] : checkpoint.sessionErrors;
-      skipped = checkpoint == null || checkpoint.skipped == null ? null : checkpoint.skipped;
-    } catch {
-      processed += 1;
-      // The cost record was read off the tail on its own, so the session still lands with it.
-      if (await queueBlockOnly(costGroup)) continue;
-      // One unreadable transcript must not end the run — but it is no longer silent.
-      result.unreadable += 1;
-      noteUnreadable(entry.sessionId);
-      continue;
-    }
-    processed += 1;
-    if (reports.length === 0) {
-      // Nothing new to segment — every line is already on the server, or the transcript could not
-      // be segmented. The block still goes up: as an overlay in the first case, as the session's
-      // only record in the second.
-      if (await queueBlockOnly(costGroup)) continue;
-      // Classify rather than drop on the floor. `empty` is the only benign outcome, so it is the
-      // fallback ONLY once every reason worth reporting has been ruled out — telling a user that
-      // a session we failed to upload "held no usage data" is the silent loss this exists to end.
-      if (skipped != null && skipped.deltaFailed) {
+  try {
+    for (const entry of candidates) {
+      // One event-loop turn per session so in-flight uploads progress; parsing alone never reaches I/O.
+      await new Promise((resolve) => setImmediate(resolve));
+      if (halted) break;
+      const costGroup = costStateBySession.get(entry.sessionId);
+      if (costGroup != null && costGroup.cowork) {
+        processed += 1;
+        if (costGroup.unchanged) { result.empty += 1; continue; }
+        await queueBlockOnly(costGroup);
+        continue;
+      }
+      const reports = [];
+      let sessionErrors = [];
+      let skipped = null;
+      // This session's transcripts are read and parsed once, for its checkpoint and its timeline.
+      const transcriptMemo = createTranscriptMemo();
+      try {
+        const checkpoint = await runCheckpoint(
+          {
+            session_id: entry.sessionId,
+            transcript_path: entry.transcriptPath,
+            cwd: recordedCwd(entry.transcriptPath),
+          },
+          { fetchImpl, runCache, transcriptMemo, readUsageUtilization, readClaudeAccount },
+          {
+            sessions: [session],
+            sink: (payload) => reports.push(payload),
+            skipFlush: true,
+            collectSessionErrors: true,
+            persistState: false,
+            skipLiveTrackingGate: true,
+            startCursor: startCursorFor(entry.sessionId),
+            skipInstallationBinding: true,
+          },
+        );
+        sessionErrors = checkpoint == null || checkpoint.sessionErrors == null ? [] : checkpoint.sessionErrors;
+        skipped = checkpoint == null || checkpoint.skipped == null ? null : checkpoint.skipped;
+      } catch {
+        transcriptMemo.clear();
+        processed += 1;
+        // The cost record was read off the tail on its own, so the session still lands with it.
+        if (await queueBlockOnly(costGroup)) continue;
+        // One unreadable transcript must not end the run — but it is no longer silent.
         result.unreadable += 1;
         noteUnreadable(entry.sessionId);
-      } else if (skipped != null && skipped.emitFailed != null && skipped.emitFailed > 0) result.emitFailed += 1;
-      else if (skipped != null && skipped.noRemote != null && skipped.noRemote > 0) result.noRemote += 1;
-      else result.empty += 1;
-      continue;
-    }
-
-    // Timeline travels with the session's own chunk. Best-effort: a timeline that fails to
-    // compute never blocks the usage upload.
-    let timeline = null;
-    try {
-      const computed = computeSessionTimeline(entry.transcriptPath, entry.sessionId);
-      if (
-        computed &&
-        (computed.periods.length > 0 || computed.subagents.length > 0 || computed.plan_events.length > 0)
-      ) {
-        timeline = { sessionId: entry.sessionId, ...computed };
-        result.timelinesOffered += 1;
+        continue;
       }
-    } catch { /* best-effort */ }
+      processed += 1;
+      if (reports.length === 0) {
+        transcriptMemo.clear();
+        // Nothing new to segment — every line is already on the server, or the transcript could not
+        // be segmented. The block still goes up: as an overlay in the first case, as the session's
+        // only record in the second.
+        if (await queueBlockOnly(costGroup)) continue;
+        // Classify rather than drop on the floor. `empty` is the only benign outcome, so it is the
+        // fallback ONLY once every reason worth reporting has been ruled out — telling a user that
+        // a session we failed to upload "held no usage data" is the silent loss this exists to end.
+        if (skipped != null && skipped.deltaFailed) {
+          result.unreadable += 1;
+          noteUnreadable(entry.sessionId);
+        } else if (skipped != null && skipped.emitFailed != null && skipped.emitFailed > 0) result.emitFailed += 1;
+        else if (skipped != null && skipped.noRemote != null && skipped.noRemote > 0) result.noRemote += 1;
+        else result.empty += 1;
+        continue;
+      }
 
-    const block = blockFor(costGroup, reports);
-    const costState = block == null ? null : block.costState;
-    if (costState != null) result.costStateSessions += 1;
+      // Timeline travels with the session's own chunk. Best-effort: a timeline that fails to
+      // compute never blocks the usage upload.
+      let timeline = null;
+      try {
+        const computed = computeSessionTimeline(entry.transcriptPath, entry.sessionId, { transcriptMemo });
+        if (
+          computed &&
+          (computed.periods.length > 0 || computed.subagents.length > 0 || computed.plan_events.length > 0)
+        ) {
+          timeline = { sessionId: entry.sessionId, ...computed };
+          result.timelinesOffered += 1;
+        }
+      } catch { /* best-effort */ }
+      // The timeline was the memo's last reader; drop this session's parsed records before queueing.
+      transcriptMemo.clear();
 
-    followups.set(entry.sessionId, { sessionErrors });
-    pending.push({ sessionId: entry.sessionId, reports, timeline, costState });
-    pendingBytes += Buffer.byteLength(JSON.stringify({ reports, timeline, costState }), 'utf-8');
-    pendingItems += reports.length + (costState == null ? 0 : 1);
-    if (pendingBytes >= MAX_BODY_BYTES || pendingItems >= MAX_CHUNK_ITEMS) await dispatch();
+      const block = blockFor(costGroup, reports);
+      const costState = block == null ? null : block.costState;
+      if (costState != null) result.costStateSessions += 1;
+
+      followups.set(entry.sessionId, { sessionErrors });
+      await queueGroup(
+        { sessionId: entry.sessionId, reports, timeline, costState },
+        Buffer.byteLength(JSON.stringify({ reports, timeline, costState }), 'utf-8'),
+        reports.length + (costState == null ? 0 : 1),
+      );
+    }
+  } finally {
+    // A throw from the loop itself still waits for every flight, so none writes after the lock is released.
+    await Promise.all(flights);
   }
-  await dispatch();
-  if (inFlight) await inFlight;
+  // The last batch flies alone once both lanes are clear; /complete below waits for every flight.
+  await dispatch({ alone: true });
+  await Promise.all(flights);
+  if (flightError != null) throw flightError;
 
   // A run can hit unreadable transcripts and dispatch nothing at all, so this cannot ride on the
   // per-dispatch save — without it the retry marker is lost and the next run blocks again.
