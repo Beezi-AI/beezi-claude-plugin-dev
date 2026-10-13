@@ -19,6 +19,9 @@ import { migrateSingleAccountStore, CREDENTIAL_STATUS } from './credentials.mjs'
 import { markUpgradeNoticePending } from './auth-markers.mjs';
 import { UserError } from './friendly-error.mjs';
 import { rulesOf, outsideKey } from './workspace-rules.mjs';
+import {
+  ruleRequestIds, removalRequestIds, newFoldersSendIds, gainedIds, requestHistory, noteAttempt, settleHistory, takeResults, SettleState,
+} from './pending-history.mjs';
 
 const INDEX_VERSION = 1;
 const LOCK_WAIT_MS = 8_000;
@@ -245,9 +248,11 @@ export function setNewFolders(key, { mode, tenantIds = [] } = {}, deps = {}) {
     const index = await readIndex(deps);
     const row = index.accounts.find((a) => a.key === key);
     if (!row) throw new UserError('No such linked account.');
+    const before = newFoldersSendIds(row);
     row.newFolders = { mode, tenantIds: mode === 'send' ? ids : [] };
     // Replaced by newFolders and rules.
     delete row.tenantPolicies;
+    requestHistory(row, gainedIds(before, newFoldersSendIds(row)), new Date().toISOString());
     writeIndex(index);
     return row.newFolders;
   });
@@ -277,9 +282,39 @@ export function markTenantsReviewed(key, ids, deps = {}) {
   return addTenantIds(key, 'reviewedTenantIds', ids, deps);
 }
 
-// Workspaces the session-start notice already announced on this machine.
-export function markJoinNoticed(key, ids, deps = {}) {
-  return addTenantIds(key, 'joinNoticedTenantIds', ids, deps);
+// The history worker stamps the start of its pass on the entries it is about to run.
+export function notePendingAttempt(key, tenantIds, nowIso, deps = {}) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) return;
+    noteAttempt(row, tenantIds, nowIso);
+    writeIndex(index);
+  });
+}
+
+// One workspace's run outcome, applied under the lock (lib/pending-history.mjs settleHistory).
+export function settlePendingHistory(key, tenantId, run, timing, deps = {}) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) return SettleState.MISSING;
+    const state = settleHistory(row, tenantId, run, timing);
+    writeIndex(index);
+    return state;
+  });
+}
+
+// Removes and returns the account's finished-upload results for the session-start notice.
+export function takeHistoryResults(key, limit = null, deps = {}) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row || !Array.isArray(row.historyResults) || row.historyResults.length === 0) return [];
+    const taken = takeResults(row, limit);
+    writeIndex(index);
+    return taken;
+  });
 }
 
 // Adds a routing rule, or replaces the tenantIds of the one with the same kind and match in place; returns its 1-based number.
@@ -315,6 +350,8 @@ export function setWorkspaceRule(key, { kind, match, label = null, tenantIds } =
       n = stored.length;
     }
     row.workspaceRules = stored;
+    // Every workspace the rule sends to is owed its history; the worker skips what it already has (lib/pending-history.mjs).
+    requestHistory(row, ruleRequestIds(row, tenantIds), new Date().toISOString());
     writeIndex(index);
     return { index: n, rule };
   });
@@ -330,6 +367,7 @@ export function removeWorkspaceRule(key, n, deps = {}) {
     const found = Number.isInteger(position) ? rulesOf(row).find((r) => r.index === position) : null;
     if (found == null) throw new UserError(`There is no rule ${n}. Run /beezi:settings rules to list them.`);
     row.workspaceRules.splice(position - 1, 1);
+    requestHistory(row, removalRequestIds(row), new Date().toISOString());
     writeIndex(index);
     return found;
   });

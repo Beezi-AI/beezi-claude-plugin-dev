@@ -4,6 +4,7 @@ import { runHook, importHookModule } from '../lib/hook-runner.mjs';
 import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 import { maybeSpawnCostStateSync } from '../lib/cost-state-trigger.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
+import { maybeStartPendingHistory } from '../lib/history-trigger.mjs';
 
 const input = readHookInput();
 if (!input) process.exit(0);
@@ -35,19 +36,28 @@ runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
   if (failure == null) {
     maybeSpawnCostStateSync();
     maybeSpawnCoworkLive();
+    // Awaited: the runner exits once this callback resolves, which could cut off the spawn.
+    await maybeStartPendingHistory();
   }
-  let additionalContext = null;
+  let joinedPrompt = null;
+  let workspacePrompt = null;
   let targetsNotice = null;
-  let joinedNotice = null;
+  let historyNotice = null;
+  try {
+    if (prompt != null) joinedPrompt = await prompt.buildJoinedPrompt(input);
+  } catch { /* the ask is best-effort; the session still starts */ }
   try {
     // Re-binds on every source with the tenants runSessionStart just refreshed; asks only on startup or clear.
-    if (prompt != null) additionalContext = await prompt.buildWorkspacePrompt(input);
+    if (prompt != null) workspacePrompt = await prompt.buildWorkspacePrompt(input);
+  } catch { /* the ask is best-effort; the session still starts */ }
+  // The joined re-pick comes first, so the current-folder question sees its answers.
+  const additionalContext = [joinedPrompt, workspacePrompt].filter(Boolean).join('\n\n') || null;
+  try {
     if (prompt != null && input.source !== 'compact') targetsNotice = await prompt.buildTargetsNotice(input);
-    // Built only when the status line will be written, since building it marks the join announced.
-    if (prompt != null && input.source !== 'compact' && failure == null) joinedNotice = await prompt.buildJoinedNotice();
+    if (prompt != null && failure == null) historyNotice = await prompt.buildHistoryNotice(input);
   } catch { /* the ask is best-effort; the session still starts */ }
   if (targetsNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${targetsNotice}` : targetsNotice;
-  if (joinedNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${joinedNotice}` : joinedNotice;
+  if (historyNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${historyNotice}` : historyNotice;
   if (failure != null) {
     write({ systemMessage: null, additionalContext });
     throw failure;

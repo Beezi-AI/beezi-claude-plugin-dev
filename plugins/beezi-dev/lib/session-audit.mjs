@@ -27,7 +27,7 @@ import { ENDPOINTS } from './config.mjs';
 import { readLastCostState as _readLastCostState, toCostStateItem } from './cost-state.mjs';
 import { listAnalyticsSessions } from './analytics-sessions.mjs';
 import { nonRegressingSnapshot, sameCumulativeUsage } from './cowork-snapshot.mjs';
-import { acquireLock, releaseLock } from './single-instance-lock.mjs';
+import { acquireOwnedLock } from './single-instance-lock.mjs';
 import { readSessionShell as _readSessionShell } from './transcript-shell.mjs';
 import { sessionNameFrom as _sessionNameFrom } from './session-name.mjs';
 import { loadRepoMap as _loadRepoMap, resolveRemoteOffline } from './repo-map.mjs';
@@ -63,6 +63,9 @@ const AUDIT_TIMEOUT_MS = 60_000;
 
 // Repeatable history sync (/beezi:sync) rather than the one-time pull driven by /beezi:login.
 export const SYNC_MODE = 'sync';
+
+// Refreshes the session-audit lock well inside LOCK_STALE_MS so a long history run is never broken into.
+const AUDIT_LOCK_HEARTBEAT_MS = 60 * 1000;
 
 // A transcript touched this recently is probably an OPEN session in another window: its hooks are
 // mid-flight between checkpoints, and backfilling it would re-segment the same lines on different
@@ -178,6 +181,16 @@ export function planWorkspaceRuns(row, { markWaiting = false } = {}) {
   return { scanned: entries.length, routes, counts, tenantIds };
 }
 
+// Sessions a run skipped for being open or just touched: the history worker waits for the ones older than its request.
+function noteRecent(result, entry) {
+  if (typeof entry.transcriptPath === 'string') result.recent.push({ sessionId: entry.sessionId, path: entry.transcriptPath });
+}
+
+// A one-workspace account's Don't-track sessions, from a planWorkspaceRuns plan.
+export function dontTrackSessionIds(plan) {
+  return new Set([...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId));
+}
+
 // Backfill every past session on this machine into Beezi via the chunked backfill route, then
 // seal the one-time pull. Timelines ride IN the chunk payload (the tracking-gated standalone
 // timeline route is unreachable for audit tenants); only rate-limit error reports remain a
@@ -185,12 +198,16 @@ export function planWorkspaceRuns(row, { markWaiting = false } = {}) {
 // stays fully retryable.
 export async function runAudit(deps = {}, options = {}) {
   if (options.account == null) return runAuditUnlocked(deps, options);
-  const lock = deps.acquireAuditLock == null ? acquireLock : deps.acquireAuditLock;
-  const unlock = deps.releaseAuditLock == null ? releaseLock : deps.releaseAuditLock;
-  const name = 'session-audit';
-  if (!lock(name)) return { ok: false, reason: 'busy', scanned: 0 };
+  const acquire = deps.acquireAuditLock == null ? acquireOwnedLock : deps.acquireAuditLock;
+  const lock = acquire('session-audit');
+  if (lock == null) return { ok: false, reason: 'busy', scanned: 0 };
+  const heartbeat = setInterval(() => { lock.refresh(); }, AUDIT_LOCK_HEARTBEAT_MS);
+  if (typeof heartbeat.unref === 'function') heartbeat.unref();
   try { return await runAuditUnlocked(deps, options); }
-  finally { unlock(name); }
+  finally {
+    clearInterval(heartbeat);
+    lock.release();
+  }
 }
 
 async function runAuditUnlocked(deps, options) {
@@ -226,6 +243,8 @@ async function runAuditUnlocked(deps, options) {
     scanned: 0,
     live: 0,
     active: 0,
+    // The live and active sessions above that this workspace would take: [{ sessionId, path }].
+    recent: [],
     liveTracked: 0,
     alreadyImported: 0,
     oversize: 0,
@@ -386,13 +405,23 @@ async function runAuditUnlocked(deps, options) {
   const activeCutoffMs = now() - ACTIVE_SESSION_WINDOW_MS;
   const sessionRoutes = options.sessionRoutes == null ? null : options.sessionRoutes;
   const excludedSessionIds = options.excludedSessionIds == null ? null : options.excludedSessionIds;
+  const routedHere = (entry) => {
+    if (sessionRoutes == null) return true;
+    const route = sessionRoutes.get(entry.sessionId);
+    return route != null && route.tenantIds.indexOf(tenantId) !== -1;
+  };
 
   const candidates = [];
   for (const entry of all) {
     const liveCowork = options.coworkLive === true && entry.source === 'claude-cowork';
     // Cowork sessions are never tracked by the hooks, so the post-link cutoff does not cover them.
     const trackedLive = entry.source !== 'claude-cowork' && linkCutoffMs != null && entry.mtimeMs >= linkCutoffMs;
-    if (!liveCowork && live && entry.sessionId === live) { result.live += 1; continue; }
+    if (!liveCowork && live && entry.sessionId === live) {
+      result.live += 1;
+      // The live skip precedes the route filter, so only a session routed here is one to wait on.
+      if (routedHere(entry)) noteRecent(result, entry);
+      continue;
+    }
     // One-workspace accounts only: a matched Don't-track rule. Anything not in the set flows through unchanged.
     if (excludedSessionIds != null && excludedSessionIds.has(entry.sessionId)) { result.excluded += 1; continue; }
     // Filtered before the ledger and the cost-state pass, so a later rule can still send it here.
@@ -405,7 +434,7 @@ async function runAuditUnlocked(deps, options) {
         continue;
       }
     }
-    if (!liveCowork && entry.mtimeMs > activeCutoffMs) { result.active += 1; continue; }
+    if (!liveCowork && entry.mtimeMs > activeCutoffMs) { result.active += 1; noteRecent(result, entry); continue; }
     if (trackedLive) { result.liveTracked += 1; continue; }
     // Session-keyed, so it goes stale the moment a session grows — coverage supersedes it in sync.
     if (!syncMode && !options.force && isImported(ledger, entry.sessionId)) { result.alreadyImported += 1; continue; }

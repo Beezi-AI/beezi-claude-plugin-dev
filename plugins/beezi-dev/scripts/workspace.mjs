@@ -36,6 +36,7 @@ import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
 import { fetchOauthKeyStatus } from '../lib/oauth-key-status.mjs';
 import { recordResolvedKeyData } from '../lib/plan-writeback.mjs';
 import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
+import { startHistoryWorker, takeDeferFlag } from '../lib/history-trigger.mjs';
 
 const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account <ref>]'
   + ' | rule add (--current | --repo <url> | --folder <path> | --outside) (<id|name|n>… | none) [--session <id>] [--account <ref>]'
@@ -50,6 +51,13 @@ const NOT_LINKED = 'Beezi: this machine is not linked. Run /beezi:login to link 
 const TARGET_FLAGS = ['--current', '--repo', '--folder', '--outside'];
 // Printed commands spell the script path out: tool output does not expand ${CLAUDE_PLUGIN_ROOT}.
 const SCRIPT = `node "${pluginRoot()}/scripts/workspace.mjs"`;
+
+const deferText = (flags) => (flags.deferUpload ? ' --defer-upload' : '');
+
+// Starts the history upload a write just requested, unless the calling flow uploads next.
+async function afterRuleWrite(key, flags) {
+  if (!flags.deferUpload) await startHistoryWorker(key);
+}
 
 function parseSessionFlag(argv) {
   const rest = [];
@@ -341,7 +349,7 @@ function findRule(row, ref) {
   return found;
 }
 
-async function ruleAdd(argv) {
+async function ruleAdd(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   let target = null;
@@ -369,10 +377,11 @@ async function ruleAdd(argv) {
   const n = (await setWorkspaceRule(row.key, { kind: key.kind, match: key.match, label: key.label, tenantIds })).index;
   console.log(ruleDone(row, key, tenantIds, false));
   await bindOpenSessions(await resolveAccount(row.key), [n], current, ctx);
+  await afterRuleWrite(row.key, flags);
   console.log(`rule=${n}`);
 }
 
-async function ruleSet(argv) {
+async function ruleSet(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length < 2) throw new UserError(USAGE);
@@ -384,10 +393,11 @@ async function ruleSet(argv) {
   await setWorkspaceRule(row.key, { kind: found.kind, match: found.match, label: found.label, tenantIds });
   console.log(ruleDone(row, found, tenantIds, true));
   await bindOpenSessions(await resolveAccount(row.key), [found.index], resolveSession(session), createRouteContext());
+  await afterRuleWrite(row.key, flags);
   console.log(`rule=${found.index}`);
 }
 
-async function ruleRemove(argv) {
+async function ruleRemove(argv, flags = { deferUpload: false }) {
   const { account, rest } = await parseAccountFlag(argv);
   if (rest.length !== 1) throw new UserError(USAGE);
   const row = await resolveAccount(account);
@@ -397,6 +407,7 @@ async function ruleRemove(argv) {
   } else {
     console.log(`✓ Removed the rule for ${placeOf(removed)}. New sessions there follow New folders (${newFoldersLabel(row)}).`);
   }
+  await afterRuleWrite(row.key, flags);
   console.log(`removed=${removed.index}`);
   // Sessions bound to the removed rule keep their state until something re-binds them: re-route each to whatever still applies.
   if (isSingleTenant(row)) {
@@ -411,7 +422,7 @@ async function ruleRemove(argv) {
 }
 
 // One rule per repo or folder that `routes` lists, all sending to the same workspaces.
-async function ruleAddAll(argv) {
+async function ruleAddAll(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length === 0) throw new UserError(USAGE);
@@ -434,15 +445,16 @@ async function ruleAddAll(argv) {
     console.log(`✓ Added ${n} rule${n === 1 ? '' : 's'}: ${where}.`);
     await bindOpenSessions(await resolveAccount(row.key), added, current, ctx);
   }
+  await afterRuleWrite(row.key, flags);
   console.log(`rules-added=${n}`);
 }
 
-async function rule(argv) {
+async function rule(argv, flags = { deferUpload: false }) {
   const [sub, ...rest] = argv;
-  if (sub === 'add') { await ruleAdd(rest); return; }
-  if (sub === 'set') { await ruleSet(rest); return; }
-  if (sub === 'remove') { await ruleRemove(rest); return; }
-  if (sub === 'add-all') { await ruleAddAll(rest); return; }
+  if (sub === 'add') { await ruleAdd(rest, flags); return; }
+  if (sub === 'set') { await ruleSet(rest, flags); return; }
+  if (sub === 'remove') { await ruleRemove(rest, flags); return; }
+  if (sub === 'add-all') { await ruleAddAll(rest, flags); return; }
   throw new UserError(USAGE);
 }
 
@@ -452,7 +464,7 @@ function ruleTargetFlag(place) {
 }
 
 // Past sessions waiting under New folders = Ask me, grouped by repo or folder, for the planning questions.
-async function routes(argv) {
+async function routes(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -474,9 +486,9 @@ async function routes(argv) {
         total += 1;
         console.log(`P${total}. ${labeled(g)}, ${sessionsCount(g.sessions)} account=${row.key} kind=${g.kind} match=${g.match}`);
         const where = ruleTargetFlag(g);
-        console.log(`P${total}-command=${SCRIPT} rule add ${where} --account ${row.key} <tenants>`);
+        console.log(`P${total}-command=${SCRIPT} rule add ${where} --account ${row.key}${deferText(flags)} <tenants>`);
       }
-      console.log(`all-command=${SCRIPT} rule add-all --account ${row.key} <tenants>`);
+      console.log(`all-command=${SCRIPT} rule add-all --account ${row.key}${deferText(flags)} <tenants>`);
     }
     const lost = groups.noDirectory;
     if (lost > 0) {
@@ -492,9 +504,9 @@ async function routes(argv) {
 const UNSAFE_LINE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 // Accounts that joined a workspace since their last re-pick here: every place to re-pick, with where it sends now (login Step 4a, /beezi:sync Step 1).
-async function joined(argv) {
+async function joined(argv, flags = { deferUpload: false }) {
   const [sub, ...after] = argv;
-  if (sub === 'add-all') { await joinedAddAll(after); return; }
+  if (sub === 'add-all') { await joinedAddAll(after, flags); return; }
   if (sub === 'done') { await joinedDone(after); return; }
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
@@ -522,16 +534,16 @@ async function joined(argv) {
       const now = placeNow(row, place, newIds);
       const where = now.pending ? 'no rule yet' : sendList(row, now.ids);
       console.log(`J${total}. ${labeled(place)}, ${sessionsCount(place.sessions)}, now: ${where} account=${row.key} kind=${place.kind} match=${place.match} now=${now.pending ? 'pending' : idList(now.ids)}`);
-      console.log(`J${total}-command=${SCRIPT} rule add ${ruleTargetFlag(place)} --account ${row.key} <tenants>`);
+      console.log(`J${total}-command=${SCRIPT} rule add ${ruleTargetFlag(place)} --account ${row.key}${deferText(flags)} <tenants>`);
     }
-    console.log(`add-all-command=${SCRIPT} joined add-all --account ${row.key}`);
+    console.log(`add-all-command=${SCRIPT} joined add-all --account ${row.key}${deferText(flags)}`);
     console.log(`done-command=${SCRIPT} joined done --account ${row.key}`);
   }
   console.log(`joined=${total}`);
 }
 
 // Adds the new workspaces to every listed place that already sends somewhere; Don't-track and no-rule-yet places stay as they are. Then marks the join reviewed.
-async function joinedAddAll(argv) {
+async function joinedAddAll(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -559,7 +571,10 @@ async function joinedAddAll(argv) {
   console.log(n === 0
     ? `✓ Nothing to add: no repo or folder sends anywhere yet. ${names} won't be asked about again.`
     : `✓ ${names} now ${newIds.length === 1 ? 'gets' : 'get'} analytics from ${n === 1 ? '1 repo or folder' : `${n} repos and folders`}.`);
-  if (n > 0) await bindOpenSessions(await resolveAccount(row.key), added, current, ctx);
+  if (n > 0) {
+    await bindOpenSessions(await resolveAccount(row.key), added, current, ctx);
+    await afterRuleWrite(row.key, flags);
+  }
   console.log(`rules-added=${n}`);
 }
 
@@ -574,7 +589,7 @@ async function joinedDone(argv) {
   console.log(`reviewed=${idList(newIds)}`);
 }
 
-async function newFolders(argv) {
+async function newFolders(argv, flags = { deferUpload: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   const row = await resolveAccount(account);
@@ -609,6 +624,7 @@ async function newFolders(argv) {
       if (before.targets.indexOf(id) === -1) await checkIn(fresh, id);
     }
   }
+  await afterRuleWrite(row.key, flags);
   console.log(`new-folders=${mode}`);
 }
 
@@ -627,12 +643,14 @@ async function read(argv) {
 }
 
 async function main() {
-  const [cmd, ...argv] = process.argv.slice(2);
+  const { deferUpload, argv: args } = takeDeferFlag(process.argv.slice(2));
+  const flags = { deferUpload };
+  const [cmd, ...argv] = args;
   if (cmd === 'rules') { await rules(argv); return; }
-  if (cmd === 'rule') { await rule(argv); return; }
-  if (cmd === 'routes') { await routes(argv); return; }
-  if (cmd === 'joined') { await joined(argv); return; }
-  if (cmd === 'new-folders') { await newFolders(argv); return; }
+  if (cmd === 'rule') { await rule(argv, flags); return; }
+  if (cmd === 'routes') { await routes(argv, flags); return; }
+  if (cmd === 'joined') { await joined(argv, flags); return; }
+  if (cmd === 'new-folders') { await newFolders(argv, flags); return; }
   if (cmd === 'read') { await read(argv); return; }
   throw new UserError(cmd == null ? USAGE : `Unknown command "${cmd}". ${USAGE}`);
 }

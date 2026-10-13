@@ -17,7 +17,7 @@ the last). A dismissed question runs nothing.
 
 First, new workspaces. Run EXACTLY (add `--account <key>` when the user named an account):
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs joined`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs joined --defer-upload`
 
 Its output is for you only. For an account that joined a workspace since it was last reviewed on this
 machine, it lists every repo and folder with where its analytics go now. Its lines:
@@ -37,16 +37,18 @@ machine, it lists every repo and folder with where its analytics go now. Its lin
 - `done-command=<command>` — records that the new workspaces were reviewed;
 - `joined=<total>` — the number of `J` lines, always last.
 
+Run the printed commands unchanged; whatever they route gets its history uploaded.
+
 `joined=0` → nothing to ask; go to "Then, repos and folders with no rule" below.
 
 For each account with `J` lines (with several accounts, end every question text with " (<email>)"),
 using that account's `W.` lines and commands:
 
 More than 4 `J` lines → first ask (single-select) "You joined <names>. Where should analytics for these
-<N> repos and folders go?" (`<N>` = that account's number of `J` lines) with the options "Add <names> to all <N>"
-(description "Repos you don't track, and ones with no rule yet, stay as they are"), "Choose per repo"
-("One question per repo or folder") and "Leave them as they are" ("Nothing changes, and you're not
-asked about <names> again").
+<N> repos and folders go? Their past sessions will be sent there too." (`<N>` = that account's number of
+`J` lines) with the options "Add <names> to all <N>" (description "Repos you don't track, and ones with
+no rule yet, stay as they are"), "Choose per repo" ("One question per repo or folder") and "Leave them
+as they are" ("Nothing changes, and you're not asked about <names> again").
 
 - "Add <names> to all <N>" → run the `add-all-command=` text EXACTLY ONCE.
 - "Choose per repo" → the per-repo questions below.
@@ -62,11 +64,11 @@ use the question counter to look up a `J<i>-command`. `<short>` is the `J` line'
 `<label>` the text in the parentheses after it, and `<where>` the text after `now: ` up to
 ` account=`. The question and its last option follow the line's `kind=`:
 
-| `kind=`   | Question                                                                                   | Last option               |
-| --------- | ------------------------------------------------------------------------------------------ | ------------------------- |
-| `repo`    | "(i of N) Now: <where>. Where should analytics for <short> go?"                            | "Don't track this repo"   |
-| `folder`  | "(i of N) Now: <where>. Where should analytics for <label> (and everything inside it) go?" | "Don't track this folder" |
-| `outside` | "(i of N) Now: <where>. Where should analytics for sessions outside a project folder go?"  | "Don't track these"       |
+| `kind=`   | Question                                                                                                                               | Last option               |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `repo`    | "(i of N) Now: <where>. Where should analytics for <short> go? Their past sessions will be sent there too."                            | "Don't track this repo"   |
+| `folder`  | "(i of N) Now: <where>. Where should analytics for <label> (and everything inside it) go? Their past sessions will be sent there too." | "Don't track this folder" |
+| `outside` | "(i of N) Now: <where>. Where should analytics for sessions outside a project folder go? Their past sessions will be sent there too."  | "Don't track these"       |
 
 Options: one per `W.` line — label = the workspace name (the text after `W. ` up to ` account=`),
 description = the line's `role=` value (or "Beezi workspace" when empty), with ", new" added for a
@@ -85,7 +87,7 @@ answered (not skipped or dismissed), run the `done-command=` text EXACTLY ONCE; 
 Then, repos and folders with no rule. Run EXACTLY (add `--account <key>` when the user named an
 account):
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs routes`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs routes --defer-upload`
 
 Its output is for you only, except the one line named below. It lists, per account in several
 workspaces set to "Ask me" for new folders, the repos and folders whose past sessions have no rule

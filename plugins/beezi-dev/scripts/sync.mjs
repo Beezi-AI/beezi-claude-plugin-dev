@@ -1,10 +1,11 @@
-import { parseArgs, runAudit, planWorkspaceRuns, SYNC_MODE } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, listAccounts, getAccount, describeAccount, AccountStatus } from '../lib/accounts.mjs';
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 import { usesRules } from '../lib/workspace-rules.mjs';
+import { startHistoryWorker } from '../lib/history-trigger.mjs';
 
 // /beezi:sync — uploads every past session this machine still has on disk, skipping whatever Beezi
 // already holds. Unlike the one-time import at the end of /beezi:login, this is repeatable: it asks
@@ -254,9 +255,7 @@ async function main() {
       if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
       if (usesRules(row)) {
         const plan = planWorkspaceRuns(row);
-        const excludedSessionIds = new Set(
-          [...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId),
-        );
+        const excludedSessionIds = dontTrackSessionIds(plan);
         await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null);
       } else {
         await syncOne(row.key, { ...options, tenantId: null }, null);
@@ -283,6 +282,8 @@ async function main() {
       await syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null);
     }
   }
+  // Pending history (rules gained a workspace) gets its own coverage-based pass once this sync let go of the lock.
+  if (!options.dryRun) for (const row of rows) await startHistoryWorker(row.key);
 }
 
 main().then(() => {
