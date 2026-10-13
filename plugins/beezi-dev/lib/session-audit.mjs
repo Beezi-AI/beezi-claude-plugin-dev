@@ -686,7 +686,9 @@ async function runAuditUnlocked(deps, options) {
 
   // computeDelta counts lines already consumed, and the server reports to_line 1-based inclusive, so
   // a coverage of N maps straight onto a start cursor of N — the next window opens at line N+1.
+  // Backfill reads from line 0; only a live workspace with no link time keeps the local cursor.
   const startCursorFor = (sessionId) => {
+    if (!syncMode) return liveMode && linkCutoffMs == null ? null : 0;
     if (coverage == null) return null;
     const covered = coverage.get(sessionId);
     return covered == null ? 0 : covered;
