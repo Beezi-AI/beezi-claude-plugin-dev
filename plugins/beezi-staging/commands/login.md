@@ -61,7 +61,7 @@ that verbatim — do not tell the user they have been logged out.
 Step 1w — new folders (after a successful Step 1 link, or when Step 1 reported the machine was
 already linked). Run EXACTLY, substituting only `<key>` with the key from Step 1:
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders --account <key>`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders --account <key> --defer-upload`
 
 Its output is for you only. Its last line is
 `new-folders=<ask|send|none> set=<yes|no> multi=yes account=<key>` for an account in several
@@ -75,8 +75,8 @@ with the options "Ask me (recommended)" (description "Beezi asks once per repo o
 session starts there"), "Send to…" ("Pick the workspaces that get them") and "Don't send"
 ("Nothing from a repo or folder with no rule is uploaded").
 
-- "Ask me (recommended)" → run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders ask --account <key>`
-- "Don't send" → run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders none --account <key>`
+- "Ask me (recommended)" → run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders ask --account <key> --defer-upload`
+- "Don't send" → run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders none --account <key> --defer-upload`
 - "Send to…" → ask (`multiSelect: true`) "Which workspaces should get analytics for repos and
   folders with no rule?", one option per `W.` line: label = the workspace name (the text after
   `W. ` up to ` account=`), description = the line's `role=` value, or "Beezi workspace" when it
@@ -84,7 +84,7 @@ session starts there"), "Send to…" ("Pick the workspaces that get them") and "
   (5 → 3 + 2), each ending in " (j of k)". Nothing chosen → run nothing. Otherwise run EXACTLY,
   with the chosen lines' `tenant=` values joined by commas:
 
-  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <ids> --account <key>`
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <ids> --account <key> --defer-upload`
 
 Write the command's first line verbatim. A dismissal runs nothing (the next /beezi:login asks
 again).
@@ -105,7 +105,7 @@ without the "(i of N) " prefix, with the same options built from this output's `
 run EXACTLY, with `<ids>` = the chosen `tenant=` values joined by commas, or `none` when the last
 option was chosen (it wins over the others):
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current --account <key> <ids>`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current --account <key> --defer-upload <ids>`
 
 and write its first line verbatim. Nothing chosen or a dismissal runs nothing. Then continue to
 Step 2.
@@ -279,7 +279,7 @@ Step 4a — new workspaces, then repos and folders with no rule.
 
 First, new workspaces. Run EXACTLY, substituting only `<key>` with the key from Step 1:
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs joined --account <key>`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs joined --account <key> --defer-upload`
 
 Its output is for you only. For an account that joined a workspace since it was last reviewed on this
 machine, it lists every repo and folder with where its analytics go now. Its lines:
@@ -302,10 +302,10 @@ machine, it lists every repo and folder with where its analytics go now. Its lin
 `joined=0` → nothing to ask; go to "Then, repos and folders with no rule" below.
 
 More than 4 `J` lines → first ask (single-select) "You joined <names>. Where should analytics for these
-<N> repos and folders go?" (`<N>` = the number of `J` lines) with the options "Add <names> to all <N>"
-(description "Repos you don't track, and ones with no rule yet, stay as they are"), "Choose per repo"
-("One question per repo or folder") and "Leave them as they are" ("Nothing changes, and you're not
-asked about <names> again").
+<N> repos and folders go? Their past sessions will be sent there too." (`<N>` = the number of `J` lines)
+with the options "Add <names> to all <N>" (description "Repos you don't track, and ones with no rule
+yet, stay as they are"), "Choose per repo" ("One question per repo or folder") and "Leave them as they
+are" ("Nothing changes, and you're not asked about <names> again").
 
 - "Add <names> to all <N>" → run the `add-all-command=` text EXACTLY ONCE.
 - "Choose per repo" → the per-repo questions below.
@@ -319,11 +319,11 @@ from 1, `N` = their number). `<short>` is the `J` line's text after `J<i>. ` up 
 `<label>` the text in the parentheses after it, and `<where>` the text after `now: ` up to
 ` account=`. The question and its last option follow the line's `kind=`:
 
-| `kind=`   | Question                                                                                   | Last option               |
-| --------- | ------------------------------------------------------------------------------------------ | ------------------------- |
-| `repo`    | "(i of N) Now: <where>. Where should analytics for <short> go?"                            | "Don't track this repo"   |
-| `folder`  | "(i of N) Now: <where>. Where should analytics for <label> (and everything inside it) go?" | "Don't track this folder" |
-| `outside` | "(i of N) Now: <where>. Where should analytics for sessions outside a project folder go?"  | "Don't track these"       |
+| `kind=`   | Question                                                                                                                               | Last option               |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `repo`    | "(i of N) Now: <where>. Where should analytics for <short> go? Their past sessions will be sent there too."                            | "Don't track this repo"   |
+| `folder`  | "(i of N) Now: <where>. Where should analytics for <label> (and everything inside it) go? Their past sessions will be sent there too." | "Don't track this folder" |
+| `outside` | "(i of N) Now: <where>. Where should analytics for sessions outside a project folder go? Their past sessions will be sent there too."  | "Don't track these"       |
 
 Options: one per `W.` line — label = the workspace name (the text after `W. ` up to ` account=`),
 description = the line's `role=` value (or "Beezi workspace" when empty), with ", new" added for a
@@ -342,7 +342,7 @@ answered (not skipped or dismissed), run the `done-command=` text EXACTLY ONCE; 
 Then, repos and folders with no rule. Run EXACTLY, substituting only `<key>` with the key
 from Step 1:
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs routes --account <key>`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs routes --account <key> --defer-upload`
 
 Its output is for you only, except the one line named below. It lists repos and folders whose
 past sessions have no rule yet (only for an account in several workspaces set to "Ask me" for new

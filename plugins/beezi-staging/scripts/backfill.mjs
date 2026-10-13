@@ -1,10 +1,11 @@
-import { parseArgs, runAudit, planWorkspaceRuns, SYNC_MODE } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf, joinedAfterLink } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { usesRules } from '../lib/workspace-rules.mjs';
 import { readTrackingState } from '../lib/tracking.mjs';
+import { startHistoryWorker } from '../lib/history-trigger.mjs';
 
 // The login flow's final step: uploads this machine's past sessions into Beezi. There is no
 // slash command for it — /beezi:login runs it after the link and plan capture, and re-running
@@ -343,6 +344,11 @@ function routeSummary(row, plan) {
   return clauses.length === 0 ? null : `Beezi (${describeAccount(row)}): ${clauses.join('; ')}.`;
 }
 
+// Pending history (rules gained a workspace) gets its own coverage-based pass once this upload let go of the lock.
+async function startAfterBackfill(account, argv) {
+  if (!parseArgs(argv).dryRun) await startHistoryWorker(account);
+}
+
 async function main() {
   const { account, rest } = await parseAccountFlag(process.argv.slice(2));
   if (account == null) fail('Beezi: backfill needs --account <key|email|n>. /beezi:login passes it automatically.');
@@ -354,15 +360,16 @@ async function main() {
     // 64KB of every transcript just to report "already uploaded" right after.
     const tracking = readTrackingState(row.key);
     const sealed = usesRules(row) && tracking != null && tracking.backfillCompleted === true;
+    let status;
     if (usesRules(row) && !sealed) {
       const plan = planWorkspaceRuns(row);
-      const excludedSessionIds = new Set(
-        [...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId),
-      );
-      if (await backfillOne(account, null, argv, null, excludedSessionIds, describeAccount(row)) !== 0) process.exit(1);
+      const excludedSessionIds = dontTrackSessionIds(plan);
+      status = await backfillOne(account, null, argv, null, excludedSessionIds, describeAccount(row));
     } else {
-      if (await backfillOne(account, null, argv, null) !== 0) process.exit(1);
+      status = await backfillOne(account, null, argv, null);
     }
+    await startAfterBackfill(account, argv);
+    if (status !== 0) process.exit(1);
     return;
   }
   // --tenant is an override: those workspaces get every past session, unrouted.
@@ -392,6 +399,7 @@ async function main() {
       status = 1;
     }
   }
+  await startAfterBackfill(account, argv);
   if (status !== 0) process.exit(status);
 }
 

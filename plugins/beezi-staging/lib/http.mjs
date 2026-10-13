@@ -4,6 +4,7 @@
 import { machineHeaders } from './machine-identity.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { resolveAbortController } from './abort-compat.mjs';
+import { gzipJson } from './gzip-body.mjs';
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
@@ -19,6 +20,8 @@ export function authHeaders(session) {
 export async function postJson(url, session, body, deps = {}) {
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const timeoutMs = deps.timeoutMs == null ? DEFAULT_TIMEOUT_MS : deps.timeoutMs;
+  // Compressed before the timer starts, so gzip time never counts against the request timeout.
+  const gzipped = deps.gzip === true ? await gzipJson(body) : null;
   const AbortControllerImpl = resolveAbortController();
   const controller = new AbortControllerImpl();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -28,8 +31,9 @@ export async function postJson(url, session, body, deps = {}) {
       headers: {
         ...authHeaders(session),
         'Content-Type': 'application/json',
+        ...(gzipped == null ? {} : { 'Content-Encoding': 'gzip' }),
       },
-      body: JSON.stringify(body),
+      body: gzipped == null ? JSON.stringify(body) : gzipped,
       signal: controller.signal,
     });
   } finally {

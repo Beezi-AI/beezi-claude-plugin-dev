@@ -2,7 +2,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   isMultiTenant,
-  joinTenantNames,
   newTenantsOf,
   readSessionWorkspace,
   resolveTargets,
@@ -10,6 +9,7 @@ import {
   tenantById,
 } from './workspace.mjs';
 import { bindSessionRoutes, createRouteContext, routeKeyForDir, shortLabel, usesRules } from './workspace-rules.mjs';
+import { resultLine } from './pending-history.mjs';
 
 const GROUP_SIZE = 4;
 // Only a new session or /clear asks; resume and compact never do.
@@ -32,7 +32,7 @@ async function linkedRows(deps) {
 
 // Only rows with a usable login (runSessionStart's "linked" test): one whose credentials are gone is neither asked nor told.
 async function withUsableLogin(rows, deps) {
-  const { sessionFor } = await import('./sessions.mjs');
+  const sessionFor = deps.sessionFor == null ? (await import('./sessions.mjs')).sessionFor : deps.sessionFor;
   const live = await Promise.all(rows.map((row) => sessionFor(row.key, deps).catch(() => null)));
   return rows.filter((row, i) => live[i] != null);
 }
@@ -231,18 +231,58 @@ export async function buildTargetsNotice(input, deps = {}) {
   return lines.length === 0 ? null : lines.join('\n');
 }
 
-// SessionStart: one line per account with workspaces joined since the last notice here, which are then marked announced; null when none.
-export async function buildJoinedNotice() {
-  const accounts = await import('./accounts.mjs');
-  const rows = (await accounts.listAccounts()).filter((a) => a.status === accounts.AccountStatus.LINKED);
+// The current-folder question (buildWorkspacePrompt) may follow: asked per account only while this folder still has no rule.
+function hereGateText(rows, root, sessionId) {
+  const commands = rows.map((row) => `\`node "${root}/scripts/workspace.mjs" rules --session ${sessionId} --account ${row.key}\``).join(', then ');
+  return [
+    `If a separate question about where this session's own folder goes follows, first run EXACTLY ${commands} (its output is for you only).`,
+    'For each of these accounts whose `here:` line does not show `rule=none`, leave out that account\'s part of that question and its command: the answer above already set where this folder goes.',
+    'Then go on to that question if anything is left of it; otherwise continue with the user\'s request.',
+  ];
+}
+
+function joinedPromptText(rows, root, sessionId) {
+  const who = rows.length === 1 ? `${emailOf(rows[0])} joined ${names(rows[0], newTenantsOf(rows[0]))}` : 'these Beezi accounts joined new workspaces';
+  const commands = rows.map((row) => `\`node "${root}/scripts/workspace.mjs" joined --account ${row.key}\``).join(', then ');
+  // Without a session id no current-folder question follows (buildWorkspacePrompt needs one).
+  const after = sessionId == null ? ['Then continue with the user\'s request.'] : hereGateText(rows, root, sessionId);
+  return [
+    `Beezi: ${who}.`,
+    'Only if the AskUserQuestion tool is available to you in this session, do the following before anything else; otherwise skip it entirely and never mention it.',
+    `Run EXACTLY ${commands}.`,
+    `Then read "${root}/commands/sync.md" and follow its Step 1 from "Its output is for you only. For an account that joined" up to the paragraph that begins "Then, repos and folders with no rule. Run", for that output only, with three changes:`,
+    '(1) always ask the first single-select question ("You joined …") first, even with 4 or fewer J lines, and add a last option "Later" (description "Ask me again in my next session") that runs nothing;',
+    '(2) leave out the "Add … to all" option when every J line ends in now=pending or now=none;',
+    '(3) stop after that part: run neither routes nor sync.mjs, because the upload starts by itself.',
+    ...after,
+  ].join(' ');
+}
+
+// SessionStart: the joined re-pick, asked on startup or clear until the join is reviewed; null when nothing is new.
+export async function buildJoinedPrompt(input, deps = {}) {
+  if (input == null) return null;
+  if (input.source != null && ASK_SOURCES.indexOf(input.source) === -1) return null;
+  const fresh = (await linkedRows(deps)).filter((row) => newTenantsOf(row).length > 0);
+  if (fresh.length === 0) return null;
+  const rows = await withUsableLogin(fresh, deps);
+  const sessionId = typeof input.session_id === 'string' && input.session_id !== '' ? input.session_id : null;
+  return rows.length === 0 ? null : joinedPromptText(rows, pluginRoot(deps), sessionId);
+}
+
+// SessionStart: one user-only line per finished history upload, shown once on startup or clear.
+export async function buildHistoryNotice(input, deps = {}) {
+  if (input == null) return null;
+  if (input.source != null && ASK_SOURCES.indexOf(input.source) === -1) return null;
+  const rows = await linkedRows(deps);
+  const waiting = rows.filter((row) => Array.isArray(row.historyResults) && row.historyResults.length > 0);
+  if (waiting.length === 0) return null;
+  const take = deps.takeHistoryResults == null ? (await import('./accounts.mjs')).takeHistoryResults : deps.takeHistoryResults;
   const lines = [];
-  for (const row of rows) {
-    const announced = Array.isArray(row.joinNoticedTenantIds) ? row.joinNoticedTenantIds : [];
-    const ids = newTenantsOf(row).filter((id) => announced.indexOf(id) === -1);
-    if (ids.length === 0) continue;
-    const prefix = rows.length > 1 ? `Beezi (${row.email ? row.email : row.key})` : 'Beezi';
-    lines.push(`${prefix}: you joined ${joinTenantNames(row, ids)}. Run /beezi:sync to choose which repos send analytics there.`);
-    try { await accounts.markJoinNoticed(row.key, ids); } catch { /* announced again next session */ }
+  for (const row of waiting) {
+    let taken = [];
+    try { taken = await take(row.key); } catch { continue; }
+    const prefix = rows.length > 1 ? `Beezi (${emailOf(row)})` : 'Beezi';
+    for (const result of taken) lines.push(resultLine(result, { prefix, nameOf: (id) => nameOf(row, id), syncName: '/beezi:sync' }));
   }
   return lines.length === 0 ? null : lines.join('\n');
 }
