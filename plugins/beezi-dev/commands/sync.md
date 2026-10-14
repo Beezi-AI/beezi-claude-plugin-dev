@@ -30,11 +30,12 @@ machine, it lists every repo and folder with where its analytics go now. Its lin
   — one repo or folder (a `J` line). `<where>` is where its analytics go today: workspace names, `not
   tracked`, or `no rule yet`. `J<i>. outside a project, <k> sessions, now: <where> … kind=outside match=outside`
   is one too: sessions in the home folder, `/` or a temp folder;
-- `J<i>-command=<command>` — right after its `J` line: the rule command for it, ending in a literal
-  `<tenants>`. It is not a `J` line;
+- `J<i>-command=<command>` — right after its `J` line: the command that adds one new workspace to it,
+  ending in a literal `<tenant>`. It is not a `J` line;
 - `add-all-command=<command>` — adds the new workspaces to every listed repo and folder that already
   sends somewhere;
-- `done-command=<command>` — records that the new workspaces were reviewed;
+- `done-command=<command>` — records that the new workspaces were reviewed, and keeps unpicked repos
+  and folders sending where they send now;
 - `joined=<total>` — the number of `J` lines, always last.
 
 Run the printed commands unchanged; whatever they route gets its history uploaded.
@@ -47,42 +48,35 @@ using that account's `W.` lines and commands:
 More than 4 `J` lines → first ask (single-select) "You joined <names>. Where should analytics for these
 <N> repos and folders go? Their past sessions will be sent there too." (`<N>` = that account's number of
 `J` lines) with the options "Add <names> to all <N>" (description "Repos you don't track, and ones with
-no rule yet, stay as they are"), "Choose per repo" ("One question per repo or folder") and "Leave them
-as they are" ("Nothing changes, and you're not asked about <names> again").
+no rule yet, stay as they are"), "Choose repos" ("Pick which repos and folders go to each new
+workspace") and "Leave them as they are" ("Nothing changes, and you're not asked about <names> again").
 
 - "Add <names> to all <N>" → run the `add-all-command=` text EXACTLY ONCE.
-- "Choose per repo" → the per-repo questions below.
+- "Choose repos" → the per-workspace questions below.
 - "Leave them as they are" → run the `done-command=` text EXACTLY ONCE.
 - A dismissal → nothing; the next /beezi:sync asks again.
 
-4 or fewer `J` lines → the per-repo questions.
+4 or fewer `J` lines → the per-workspace questions.
 
-Per-repo questions — one `multiSelect: true` question per `J` line, numbered across that account's `J`
-lines (`i` from 1, `N` = their number). This question counter restarts for each account; the printed
-`J` numbers are global across accounts. Preserve each printed `J` number to match its command; never
-use the question counter to look up a `J<i>-command`. `<short>` is the `J` line's text after `J<i>. ` up to ` (` or `,`,
-`<label>` the text in the parentheses after it, and `<where>` the text after `now: ` up to
-` account=`. The question and its last option follow the line's `kind=`:
+Per-workspace questions — for each `W.` line with `new=yes` of that account, in order, ask the
+`multiSelect: true` question "Which repos and folders should also send analytics to <name>? Their past
+sessions will be sent there too." `<name>` is the `W.` line's text after `W. ` up to ` account=`, and
+`<tenant>` its `tenant=` value. Options: one per `J` line of that account, in order — label = `<short>`
+(the `J` line's text after `J<i>. ` up to ` (` or `,`), description = "Now: <where>" (`<where>` = the text after `now: ` up to ` account=`),
+or "No rule yet" when `<where>` is `no rule yet`; then "None of these" LAST (description "Nothing from
+these goes to <name>"). So a question lists at most 3 places plus "None of these": more `J` lines → split
+them in order into questions of at most 3 places, each ending in " (part j of k)"; that workspace's answer
+is all of its parts together. Choosing "None of these" (alone or with places) means no pick from that
+question.
+At most 4 questions per AskUserQuestion call: more → further calls, one after
+another. The printed `J` numbers are global across accounts: preserve each to match its command.
 
-| `kind=`   | Question                                                                                                                               | Last option               |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `repo`    | "(i of N) Now: <where>. Where should analytics for <short> go? Their past sessions will be sent there too."                            | "Don't track this repo"   |
-| `folder`  | "(i of N) Now: <where>. Where should analytics for <label> (and everything inside it) go? Their past sessions will be sent there too." | "Don't track this folder" |
-| `outside` | "(i of N) Now: <where>. Where should analytics for sessions outside a project folder go? Their past sessions will be sent there too."  | "Don't track these"       |
-
-Options: one per `W.` line — label = the workspace name (the text after `W. ` up to ` account=`),
-description = the line's `role=` value (or "Beezi workspace" when empty), with ", new" added for a
-`new=yes` line — then the last option, description "Nothing from <short> is uploaded" ("Nothing from
-sessions outside a project folder is uploaded" for `outside`). More than 4 options → split them evenly
-into questions of at most 4 (5 → 3 + 2), the last option in the last one, each ending in " (part j of
-k)"; the `J` line's answer is all of its parts together.
-
-For each `J` line with an answer, run its `J<i>-command=` text EXACTLY ONCE, changing nothing except
-the final `<tenants>`: the chosen `tenant=` values joined by commas (e.g. `t1,t2`), or `none` when the
-last option was chosen (it wins over the others). Never rebuild the command or re-quote its path
-yourself. A dismissed question runs nothing for its line. After the last `J` question has been
-answered (not skipped or dismissed), run the `done-command=` text EXACTLY ONCE; otherwise run no
-`done-command`, and the next login or sync asks again. Write each command's first line verbatim.
+For each new workspace, for each `J` line picked for it, run that line's `J<i>-command=` text EXACTLY
+ONCE, changing nothing except the final `<tenant>`: that workspace's `tenant=` value (e.g. `t1`). Never
+rebuild the command or re-quote its path yourself. A dismissed question runs nothing for its lines.
+After every new workspace's questions have been answered ("None of these" is an answer; skipped or
+dismissed is not), run the `done-command=` text EXACTLY ONCE; otherwise run no `done-command`, and the
+next login or sync asks again. Write each command's first line verbatim.
 
 Then, repos and folders with no rule. Run EXACTLY (add `--account <key>` when the user named an
 account):

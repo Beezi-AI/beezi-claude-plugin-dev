@@ -213,6 +213,11 @@ export function dontTrackSessionIds(plan) {
   return new Set([...plan.routes].filter(([, route]) => route.source === 'rule' && route.tenantIds.length === 0).map(([sessionId]) => sessionId));
 }
 
+// A memoized git and repo-root map; one per process lets every workspace's run reuse the same git answers.
+export function createRunCache() {
+  return { git: memoizeGit(git), gitRoots: new Map() };
+}
+
 // Backfill every past session on this machine into Beezi via the chunked backfill route, then
 // seal the one-time pull. Timelines ride IN the chunk payload (the tracking-gated standalone
 // timeline route is unreachable for audit tenants); only rate-limit error reports remain a
@@ -835,8 +840,8 @@ async function runAuditUnlocked(deps, options) {
     return true;
   };
 
-  // Run-wide memoized git shared by every checkpoint of this run; built per run, so nothing outlives it.
-  const runCache = { git: memoizeGit(git), gitRoots: new Map() };
+  // Run-wide memoized git shared by every checkpoint; a caller looping workspaces passes one for all of them.
+  const runCache = deps.runCache == null ? createRunCache() : deps.runCache;
 
   // The installation binding each checkpoint used to attempt, once per run; a Cowork-only run reaches no checkpoint, so it never binds.
   const reachesCheckpoint = candidates.some((entry) => {

@@ -1,4 +1,4 @@
-import { runAudit as _runAudit, planWorkspaceRuns as _planWorkspaceRuns, dontTrackSessionIds, SYNC_MODE } from './session-audit.mjs';
+import { runAudit as _runAudit, planWorkspaceRuns as _planWorkspaceRuns, createRunCache as _createRunCache, dontTrackSessionIds, SYNC_MODE } from './session-audit.mjs';
 import { BackfillHalt } from './audit-flush.mjs';
 import { isMultiTenant } from './workspace.mjs';
 import { usesRules } from './workspace-rules.mjs';
@@ -64,13 +64,15 @@ export async function runPendingHistory(key, deps = {}) {
   const entries = pendingHistoryOf(row);
   if (entries.length === 0) return [];
   await accounts.notePendingAttempt(key, entries.map((e) => e.tenantId), new Date(plannedAtMs).toISOString());
+  // One git cache for every workspace's run, so each session's git correlation runs once.
+  const runCache = (deps.createRunCache == null ? _createRunCache : deps.createRunCache)();
   const done = [];
   let busy = false;
   for (const { entry, options } of plannedRuns(row, entries, planRuns)) {
     let run = { outcome: busy ? RunOutcome.BUSY : RunOutcome.CLEAN, sent: 0, skipped: 0 };
     if (!busy && options != null) {
       // A throwing run settles as failed (classifyRun's null) rather than leaving the entry unsettled.
-      const result = await runAudit({}, { ...options, account: key, mode: SYNC_MODE }).catch(() => null);
+      const result = await runAudit({ runCache }, { ...options, account: key, mode: SYNC_MODE }).catch(() => null);
       const recent = result != null && Array.isArray(result.recent) ? result.recent.map((r) => startedAtMs(r, readShell)) : [];
       run = { outcome: classifyRun(result, waitingOnRecent(recent, entry.requestedAt)), sent: result == null ? 0 : result.sessionsImported || 0, skipped: 0 };
       busy = run.outcome === RunOutcome.BUSY;

@@ -360,6 +360,22 @@ export function placeNow(row, place, newIds) {
   return before.length === 1 ? { ids: before, pending: false } : { ids: [], pending: true };
 }
 
+// Under Ask me, the rules that keep rule-less places (a rule naming only left workspaces counts as none) sending where they send now; pending places get none.
+export function keepCurrentRules(row, places, newIds) {
+  if (newIds.length === 0 || newFoldersOf(row).mode !== 'ask') return [];
+  const members = (tenantsOf(row) || []).map((t) => t.id);
+  const live = (r) => r.tenantIds.length === 0 || r.tenantIds.some((id) => members.indexOf(id) !== -1);
+  const stored = rulesOf(row);
+  const out = [];
+  for (const place of places) {
+    if (stored.some((r) => r.kind === place.kind && r.match === place.match && live(r))) continue;
+    const now = placeNow(row, place, newIds);
+    if (now.pending || now.ids.length === 0) continue;
+    out.push({ kind: place.kind, match: place.match, label: place.label, tenantIds: now.ids });
+  }
+  return out;
+}
+
 const cell = (text) => String(text).replace(/\|/g, '\\|');
 
 function workspaceNames(row, ids) {
