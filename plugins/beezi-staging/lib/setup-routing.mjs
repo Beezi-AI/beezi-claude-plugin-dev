@@ -99,15 +99,12 @@ export function parsePlaces(text, letter) {
   });
 }
 
-// A J place (it has a `where`) is a joined question, so it carries the consent sentence.
 export function placeQuestion(place, i, n) {
-  const joined = place.where !== null;
-  const prefix = `(${i} of ${n}) ${joined ? `Now: ${place.where}. ` : ''}`;
   const folder = place.label !== null ? place.label : place.match;
   let subject = place.short;
   if (place.kind === 'outside') subject = 'sessions outside a project folder';
   if (place.kind === 'folder') subject = `${folder} (and everything inside it)`;
-  return `${prefix}Where should analytics for ${subject} go?${joined ? CONSENT : ''}`;
+  return `(${i} of ${n}) Where should analytics for ${subject} go?`;
 }
 
 export function workspaceOptions(workspaces) {
@@ -173,6 +170,25 @@ function joinedNames(text, workspaces) {
   return workspaces.filter((w) => w.isNew).map((w) => w.name).join(', ');
 }
 
+// One multi-select per screen of up to 4 places; each picked place extends to this tenant via `joined pick`. False when a screen is dismissed.
+async function askReposForTenant(ctx, key, tenant, places) {
+  const name = tenant.name ? tenant.name : tenant.tenant;
+  const parts = Math.ceil(places.length / 4);
+  for (let i = 0; i < places.length; i += 4) {
+    const batch = places.slice(i, i + 4);
+    const part = parts > 1 ? ` (part ${i / 4 + 1} of ${parts})` : '';
+    const options = batch.map((p) => ({ label: p.short, description: p.where === 'no rule yet' ? 'No rule yet' : `Now: ${p.where}` }));
+    const picked = await ctx.ask.chooseMany(`Which repos and folders should also send analytics to ${name}?${CONSENT}${part}`, options);
+    if (picked === null) return false;
+    for (let j = 0; j < picked.length; j += 1) {
+      const place = batch[picked[j]];
+      const target = place.kind === 'outside' ? ['--outside'] : [`--${place.kind}`, place.match];
+      await runAndReport(ctx, ['joined', 'pick'].concat(target, ['--account', key, tenant.tenant, DEFER]));
+    }
+  }
+  return true;
+}
+
 export async function reviewJoined(ctx, key) {
   const listing = await ctx.run('workspace.mjs', ['joined', '--account', key]);
   if (listing.code !== 0) {
@@ -182,19 +198,21 @@ export async function reviewJoined(ctx, key) {
   const places = parsePlaces(listing.stdout, 'J');
   if (places.length === 0) return;
   const workspaces = parseWorkspaces(listing.stdout);
+  const newTenants = workspaces.filter((w) => w.isNew);
   if (places.length > 4) {
     const names = joinedNames(listing.stdout, workspaces);
     const n = places.length;
     const choice = await ctx.ask.choose(`You joined ${names}. Where should analytics for these ${n} repos and folders go?${CONSENT}`, [
       { label: `Add ${names} to all ${n}`, description: "Repos you don't track, and ones with no rule yet, stay as they are" },
-      { label: 'Choose per repo', description: 'One question per repo or folder' },
+      { label: 'Choose repos', description: 'Pick which repos and folders go to each new workspace' },
       { label: 'Leave them as they are', description: `Nothing changes, and you're not asked about ${names} again` },
     ]);
-    if (choice === 0) await runAndReport(ctx, ['joined', 'add-all', '--account', key, DEFER]);
-    if (choice === 2) await runAndReport(ctx, ['joined', 'done', '--account', key]);
+    if (choice === 0) { await runAndReport(ctx, ['joined', 'add-all', '--account', key, DEFER]); return; }
+    if (choice === 2) { await runAndReport(ctx, ['joined', 'done', '--account', key, DEFER]); return; }
     if (choice !== 1) return;
   }
-  if (await askPerPlace(ctx, key, places, workspaces)) await runAndReport(ctx, ['joined', 'done', '--account', key]);
+  for (let i = 0; i < newTenants.length; i += 1) if (!(await askReposForTenant(ctx, key, newTenants[i], places))) return;
+  await runAndReport(ctx, ['joined', 'done', '--account', key, DEFER]);
 }
 
 export async function reviewRoutes(ctx, key) {

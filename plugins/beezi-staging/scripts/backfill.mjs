@@ -1,4 +1,4 @@
-import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, SYNC_MODE } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, createRunCache, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf, joinedAfterLink } from '../lib/workspace.mjs';
@@ -28,7 +28,7 @@ function failed(message) {
 const DEFERRED_LINE = '  Your one-time history upload stays open until those repos and folders have a rule — run /beezi:login or /beezi:sync to choose.';
 
 // One workspace's run; returns the exit status instead of exiting mid-loop.
-async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessionIds = null, excludedLabel = null) {
+async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessionIds = null, excludedLabel = null, runCache = null) {
   const options = parseArgs(argv);
   options.account = account;
   options.tenantId = tenantId;
@@ -38,6 +38,7 @@ async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessi
 
   const result = await runAudit(
     {
+      runCache,
       // "read", not "sent": `processed` counts candidates PARSED, and a parsed session may still
       // produce nothing to upload. Calling it "sent" is what made the final totals look like they
       // had lost sessions when the arithmetic was simply against a different number.
@@ -268,14 +269,14 @@ async function backfillOne(account, tenantId, argv, sessionRoutes, excludedSessi
 // A workspace joined after this machine linked the account got nothing live before the re-pick, so its
 // history resumes from what it already has (sync's coverage check). One that takes no uploads on
 // demand (audit-only) gets the one-time import instead, which has no link cutoff there.
-async function backfillJoinedOne(account, tenantId, argv, sessionRoutes) {
+async function backfillJoinedOne(account, tenantId, argv, sessionRoutes, runCache = null) {
   const options = { ...parseArgs(argv), account, tenantId, sessionRoutes, mode: SYNC_MODE, liveOnly: true };
   const result = await runAudit(
-    { onProgress: ({ processed, total }) => { console.log(`Beezi: ${processed}/${total} sessions read…`); } },
+    { runCache, onProgress: ({ processed, total }) => { console.log(`Beezi: ${processed}/${total} sessions read…`); } },
     options,
   );
   if (result.reason === 'audit-only' || result.halt === BackfillHalt.NOT_ALLOWED || result.halt === BackfillHalt.ALREADY_COMPLETED) {
-    return backfillOne(account, tenantId, argv, sessionRoutes);
+    return backfillOne(account, tenantId, argv, sessionRoutes, null, null, runCache);
   }
   // A stop the next run will not clear prints backfillOne's own ✗ line; a busy run gets the sync line below.
   if (result.reason === 'no-account') {
@@ -387,13 +388,17 @@ async function main() {
     routes = plan.routes;
   }
   const joinedIds = joinedAfterLink(row);
+  // One git cache for every workspace's run, so each session's git correlation runs once.
+  const runCache = createRunCache();
   let status = 0;
   for (const tenantId of tenantIds) {
     console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
     // One workspace's exception must not stop the rest.
     try {
-      const run = joinedIds.indexOf(tenantId) === -1 ? backfillOne : backfillJoinedOne;
-      if (await run(account, tenantId, argv, routes) !== 0) status = 1;
+      const run = joinedIds.indexOf(tenantId) === -1
+        ? backfillOne(account, tenantId, argv, routes, null, null, runCache)
+        : backfillJoinedOne(account, tenantId, argv, routes, runCache);
+      if (await run !== 0) status = 1;
     } catch (error) {
       console.error(`✗ ${friendlyMessage(error)}`);
       status = 1;

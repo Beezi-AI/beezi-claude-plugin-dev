@@ -251,7 +251,7 @@ function joinedPromptText(rows, root, sessionId) {
     'Only if the AskUserQuestion tool is available to you in this session, do the following before anything else; otherwise skip it entirely and never mention it.',
     `Run EXACTLY ${commands}.`,
     `Then read "${root}/commands/sync.md" and follow its Step 1 from "Its output is for you only. For an account that joined" up to the paragraph that begins "Then, repos and folders with no rule. Run", for that output only, with three changes:`,
-    '(1) always ask the first single-select question ("You joined …") first, even with 4 or fewer J lines, and add a last option "Later" (description "Ask me again in my next session") that runs nothing;',
+    '(1) always ask the first single-select question ("You joined …") first, even with 4 or fewer J lines, and add a last option "Later" (description "Ask me again in my next session") that runs nothing; on "Choose repos", ask for each new workspace the multi-select "Which repos and folders should also send analytics to <name>?" (worded as in sync.md) with the J lines as options, at most 3 per question and ending in "None of these" as in sync.md ("None of these" picks nothing), and for each picked one run its `joined pick` J-command with that workspace\'s tenant id;',
     '(2) leave out the "Add … to all" option when every J line ends in now=pending or now=none;',
     '(3) stop after that part: run neither routes nor sync.mjs, because the upload starts by itself.',
     ...after,

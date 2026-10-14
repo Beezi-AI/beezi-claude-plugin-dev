@@ -1,4 +1,4 @@
-import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, SYNC_MODE } from '../lib/session-audit.mjs';
+import { parseArgs, runAudit, planWorkspaceRuns, dontTrackSessionIds, createRunCache, SYNC_MODE } from '../lib/session-audit.mjs';
 import { BackfillHalt } from '../lib/audit-flush.mjs';
 import { parseAccountFlag, listAccounts, getAccount, describeAccount, AccountStatus } from '../lib/accounts.mjs';
 import { parseTenantFlags, isMultiTenant, tenantById, newFoldersOf } from '../lib/workspace.mjs';
@@ -23,13 +23,14 @@ function fail(message) {
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 // One account's run. Per-account problems print and return so the accounts after it still run.
-async function syncOne(account, options, label) {
+async function syncOne(account, options, label, runCache = null) {
   options.account = account;
   options.mode = SYNC_MODE;
   const prefix = label == null ? 'Beezi' : `Beezi (${label})`;
 
   const result = await runAudit(
     {
+      runCache,
       onProgress: ({ processed, total }) => {
         console.log(`${prefix}: ${processed}/${total} sessions read…`);
       },
@@ -251,14 +252,16 @@ async function main() {
   // One run per account × routed workspace.
   for (const row of rows) {
     const override = parseTenantFlags(rest, row).tenantIds;
+    // One git cache for every workspace's run of this account, as in backfill.
+    const runCache = createRunCache();
     if (!isMultiTenant(row)) {
       if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
       if (usesRules(row)) {
         const plan = planWorkspaceRuns(row);
         const excludedSessionIds = dontTrackSessionIds(plan);
-        await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null);
+        await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null, runCache);
       } else {
-        await syncOne(row.key, { ...options, tenantId: null }, null);
+        await syncOne(row.key, { ...options, tenantId: null }, null, runCache);
       }
       continue;
     }
@@ -266,7 +269,7 @@ async function main() {
     if (override.length > 0) {
       for (const tenantId of override) {
         console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
-        await syncOne(row.key, { ...options, tenantId }, null);
+        await syncOne(row.key, { ...options, tenantId }, null, runCache);
       }
       continue;
     }
@@ -279,7 +282,7 @@ async function main() {
     if (summary != null) console.log(`\n${summary}`);
     for (const tenantId of plan.tenantIds) {
       console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
-      await syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null);
+      await syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null, runCache);
     }
   }
   // Pending history (rules gained a workspace) gets its own coverage-based pass once this sync let go of the lock.
