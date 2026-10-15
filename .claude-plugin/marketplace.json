@@ -19,10 +19,11 @@
     {
       "name": "beezi-staging",
       "source": "./plugins/beezi-staging",
-      "description": "Reports Claude Code session token analytics for Beezi task branches and gives you a personal usage summary on demand. — staging environment build.",
-      "version": "0.37.9-staging.5789",
+      "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — staging environment build.",
+      "version": "0.37.9-staging.5813",
       "author": {
-        "name": "Beezi"
+        "name": "Beezi",
+        "url": "https://beezi.ai"
       },
       "license": "Apache-2.0"
     }
