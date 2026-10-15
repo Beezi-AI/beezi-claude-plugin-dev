@@ -8,10 +8,11 @@
     {
       "name": "beezi-dev",
       "source": "./plugins/beezi-dev",
-      "description": "Reports Claude Code session token analytics for Beezi task branches and gives you a personal usage summary on demand. — dev environment build.",
-      "version": "0.37.9-dev.5782",
+      "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — dev environment build.",
+      "version": "0.37.9-dev.5812",
       "author": {
-        "name": "Beezi"
+        "name": "Beezi",
+        "url": "https://beezi.ai"
       },
       "license": "Apache-2.0"
     },
