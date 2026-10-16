@@ -1,6 +1,6 @@
 {
   "name": "beezi-dev",
-  "version": "0.37.9-dev.5812",
+  "version": "0.37.10-dev.5839",
   "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — dev environment build.",
   "author": {
     "name": "Beezi",
