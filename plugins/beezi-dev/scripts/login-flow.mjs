@@ -2,12 +2,10 @@ import path from 'path';
 import { spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getAccount, parseAccountFlag } from '../lib/accounts.mjs';
-import { currentSessionWorkspace, isMultiTenant, newFoldersOf, readSessionWorkspace, roleLabel, tenantsOf } from '../lib/workspace.mjs';
+import { currentSessionWorkspace, isMultiTenant, newFoldersOf, roleLabel, tenantsOf } from '../lib/workspace.mjs';
 import { createRouteContext, routeForDir, routeKeyForDir } from '../lib/workspace-rules.mjs';
 import { placeOfDir } from '../lib/route-describe.mjs';
-import { firstRecordedCwd, listAllTranscripts } from '../lib/transcript-index.mjs';
-import { resolveSessionId } from '../lib/permission-mode-store.mjs';
-import { isImported, loadLedger } from '../lib/audit-ledger.mjs';
+import { pastSessions } from '../lib/past-sessions.mjs';
 import { paymentQuestion, parseKeyStatus } from '../lib/setup-plan.mjs';
 import { lastLine } from '../lib/setup-routing.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
@@ -25,9 +23,6 @@ const CAPTURE_STATUSES = ['no_key', 'not_linked'];
 const DEFER = { deferUpload: true };
 // The setup question previews this many workspaces; a typed answer may still name the others.
 const PREVIEW_WORKSPACES = 3;
-// The history upload's own skips, as in workspace-rules.mjs: transcripts over 64 MB and ones written in the last 30 minutes.
-const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
-const ACTIVE_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
 function runScript(script, args) {
   const result = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, script)].concat(args), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -85,40 +80,6 @@ function hereNeedsRule(row) {
   const dir = hereDir();
   const ctx = createRouteContext();
   return routeKeyForDir(dir, ctx) != null && routeForDir(row, dir, ctx) == null;
-}
-
-const placeId = (key) => `${key.kind}\n${key.match}`;
-
-// Past sessions the history upload would send (not live, active, oversized or imported) and the distinct places they ran in,
-// deduped by kind+match and less `hereKey`'s place; one with no directory counts in sessions only.
-export function countPastSessions(entries, { liveSessionId = null, now = Date.now(), imported, readState, readCwd, keyOf, hereKey = null }) {
-  const places = new Set();
-  let sessions = 0;
-  for (const entry of entries || []) {
-    if (entry == null || entry.sessionId == null || (liveSessionId != null && entry.sessionId === liveSessionId)) continue;
-    if (now - entry.mtimeMs < ACTIVE_SESSION_WINDOW_MS || entry.size > MAX_TRANSCRIPT_BYTES || imported(entry.sessionId)) continue;
-    sessions += 1;
-    const state = readState(entry.sessionId);
-    const dir = state != null && typeof state.cwd === 'string' && state.cwd !== '' ? state.cwd : readCwd(entry.transcriptPath);
-    const key = dir == null ? null : keyOf(dir);
-    if (key != null) places.add(placeId(key));
-  }
-  if (hereKey != null) places.delete(placeId(hereKey));
-  return { sessions, places: places.size };
-}
-
-// A session imported into any of the account's workspaces is not uploaded again.
-function pastSessions(row, hereKey) {
-  const ctx = createRouteContext();
-  const ledgers = tenantsOf(row).map((t) => loadLedger(row.key, row.clientId == null ? null : row.clientId, t.id));
-  return countPastSessions(listAllTranscripts(), {
-    liveSessionId: resolveSessionId(),
-    imported: (sessionId) => ledgers.some((ledger) => isImported(ledger, sessionId)),
-    readState: readSessionWorkspace,
-    readCwd: firstRecordedCwd,
-    keyOf: (dir) => routeKeyForDir(dir, ctx),
-    hereKey,
-  });
 }
 
 const plural = (n, one, many) => (n === 1 ? `1 ${one}` : `${n} ${many}`);

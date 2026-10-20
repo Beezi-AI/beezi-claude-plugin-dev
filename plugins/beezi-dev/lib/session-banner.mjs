@@ -33,16 +33,6 @@ export function liveOffNote(row, tracking, route) {
   return null;
 }
 
-// "Last 7 days: 42 sessions, usage worth $31.40 at API prices. More with /beezi:analytics"; "Last 7 days in Acme (dev@acme.io): …".
-export function weeklyText(weekly, label = null) {
-  const count = `${weekly.sessions} session${weekly.sessions === 1 ? '' : 's'}`;
-  const worth = typeof weekly.usageValueUsd === 'number' && Number.isFinite(weekly.usageValueUsd)
-    ? `, usage worth $${weekly.usageValueUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} at API prices`
-    : '';
-  const where = weekly.workspace == null ? '' : ` in ${weekly.workspace}`;
-  return `Last 7 days${where}${label == null ? '' : ` (${label})`}: ${count}${worth}. More with /beezi:analytics`;
-}
-
 function placeName(place) {
   return place.kind === 'outside' ? 'Sessions outside a project' : place.short;
 }
@@ -53,7 +43,7 @@ function routeWithNote(row, route, tracking) {
   return off == null ? routeText(row, route) : `${routeText(row, route)}, but ${off}.`;
 }
 
-function oneAccount(row, { state, place, trackingByKey, asking, weekly, unconnected }) {
+function oneAccount(row, { state, place, trackingByKey, asking, unconnected }) {
   const workspaces = workspacesText(row);
   const lines = [`Beezi ✓ ${accountLabel(row)}${workspaces == null ? '' : `, ${workspaces}`}`];
   let last = `Change with ${RULES}`;
@@ -73,12 +63,11 @@ function oneAccount(row, { state, place, trackingByKey, asking, weekly, unconnec
       lines.push(`  ${where} ${routeWithNote(row, route, trackingByKey.get(row.key))}`);
     }
   }
-  if (weekly != null) lines.push(`  ${weeklyText(weekly)}`);
   lines.push(`  ${last}`);
   return lines.join('\n');
 }
 
-function severalAccounts(rows, { state, place, trackingByKey, asking, weekly, unconnected }) {
+function severalAccounts(rows, { state, place, trackingByKey, asking, unconnected }) {
   const labels = rows.map(accountLabel);
   const lines = [];
   let last = `Change with ${RULES}`;
@@ -99,20 +88,15 @@ function severalAccounts(rows, { state, place, trackingByKey, asking, weekly, un
     });
     if (pending) last = asking ? 'Beezi asks you now.' : `Choose with ${RULES}`;
   }
-  if (weekly != null) {
-    const row = rows.find((r) => r.key === weekly.key);
-    if (row != null) lines.push(`  ${weeklyText(weekly, accountLabel(row))}`);
-  }
   lines.push(`  ${last}`);
   return lines.join('\n');
 }
 
 // The session-start banner for the signed-in accounts, or null when none is signed in.
-// `place` is placeOfDir(cwd) (null: unknown cwd), `weekly` { key, sessions, usageValueUsd } or null,
+// `place` is placeOfDir(cwd) (null: unknown cwd),
 // `asking` whether this start asks about a place with no rule, `unconnected` the keys of accounts whose platform workspace has this repo unconnected.
-// `weekly.workspace` names the read workspace of a multi-workspace account.
-export function buildBanner({ sessions, state = null, place = null, trackingByKey = new Map(), asking = false, weekly = null, unconnected = new Set() }) {
+export function buildBanner({ sessions, state = null, place = null, trackingByKey = new Map(), asking = false, unconnected = new Set() }) {
   if (!Array.isArray(sessions) || sessions.length === 0) return null;
-  const opts = { state, place, trackingByKey, asking, weekly, unconnected };
+  const opts = { state, place, trackingByKey, asking, unconnected };
   return sessions.length === 1 ? oneAccount(sessions[0], opts) : severalAccounts(sessions, opts);
 }

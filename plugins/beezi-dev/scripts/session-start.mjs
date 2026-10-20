@@ -5,7 +5,6 @@ import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 import { maybeSpawnCostStateSync } from '../lib/cost-state-trigger.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 import { maybeStartPendingHistory } from '../lib/history-trigger.mjs';
-import { maybeSpawnWeeklyUsage } from '../lib/weekly-usage.mjs';
 
 const input = readHookInput();
 if (!input) process.exit(0);
@@ -39,7 +38,6 @@ runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
     maybeSpawnCoworkLive();
     // Awaited: the runner exits once this callback resolves, which could cut off the spawn.
     await maybeStartPendingHistory();
-    await maybeSpawnWeeklyUsage(input);
   }
   let joinedPrompt = null;
   let workspacePrompt = null;

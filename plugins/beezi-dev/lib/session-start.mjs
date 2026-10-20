@@ -53,7 +53,6 @@ import { checkForUpdate as _checkForUpdate } from './update-check.mjs';
 import { readSessionWorkspace, resolveReadTenant, expandTargets, isMultiTenant, tenantById, tenantsOf } from './workspace.mjs';
 import { placeOfDir, routeOfSession } from './route-describe.mjs';
 import { buildBanner, liveOffNote } from './session-banner.mjs';
-import { readWeeklyUsage, shouldShowWeekly, markWeeklyShown, cacheForTenant, weeklyAccountKey, weeklyTenantId } from './weekly-usage.mjs';
 
 // Only a new session or /clear asks about a place with no rule (workspace-prompt's ASK_SOURCES).
 const ASK_SOURCES = ['startup', 'clear'];
@@ -176,26 +175,12 @@ async function announceRepo(cwd, session, fetchImpl, gitImpl) {
 }
 
 // The banner for the signed-in accounts; `noted` the keys whose route line already says live tracking is off,
-// `covered` the unconnected keys its route line speaks for. The weekly line rides weeklyAccountKey's account when it
-// is signed in, for the workspace it reads from, and is stamped shown.
-function sessionBanner(input, sessions, { entries, workspaceState, trackingByKey, defaultKey, unconnected, deps }) {
-  const nowMs = deps.now == null ? Date.now() : deps.now();
-  const weeklyKey = weeklyAccountKey(entries, defaultKey);
-  const weeklyRow = sessions.find((s) => s.key === weeklyKey);
-  const tenantId = weeklyRow == null ? null : weeklyTenantId(weeklyRow, workspaceState);
-  const cache = weeklyRow == null ? null : cacheForTenant(readWeeklyUsage(weeklyRow.key), tenantId);
-  const tenant = tenantId == null ? null : tenantById(weeklyRow, tenantId);
-  const weekly = shouldShowWeekly(cache, nowMs)
-    ? {
-      key: weeklyRow.key, sessions: cache.sessions, usageValueUsd: cache.usageValueUsd,
-      workspace: tenantId == null ? null : ((tenant && tenant.name) || tenantId),
-    }
-    : null;
+// `covered` the unconnected keys its route line speaks for.
+function sessionBanner(input, sessions, { workspaceState, trackingByKey, unconnected }) {
   // The hook's own cwd only: an unknown one gets no route line.
   const place = typeof input.cwd === 'string' && input.cwd !== '' ? placeOfDir(input.cwd) : null;
   const asking = input.source == null || ASK_SOURCES.indexOf(input.source) !== -1;
-  const text = buildBanner({ sessions, state: workspaceState, place, trackingByKey, asking, weekly, unconnected });
-  if (text != null && weekly != null) markWeeklyShown(weeklyRow.key, cache, nowMs);
+  const text = buildBanner({ sessions, state: workspaceState, place, trackingByKey, asking, unconnected });
   const shown = text != null && place != null;
   const noted = new Set(!shown ? [] : sessions
     .filter((s) => !unconnected.has(s.key) && liveOffNote(s, trackingByKey.get(s.key), routeOfSession(s, workspaceState, place)) != null)
@@ -378,7 +363,7 @@ export async function runSessionStart(input, deps = {}) {
   // Built after the pre-warm so placeOfDir reads the warmed repo map.
   let banner = { text: null, noted: new Set(), covered: new Set() };
   if (input.source !== 'compact') {
-    try { banner = sessionBanner(input, sessions, { entries, workspaceState, trackingByKey, defaultKey, unconnected, deps }); } catch { /* best-effort */ }
+    try { banner = sessionBanner(input, sessions, { workspaceState, trackingByKey, unconnected }); } catch { /* best-effort */ }
   }
   // The banner's route line already says an unconnected repo tracks nothing.
   const repoLines = announcements.filter((a) => a != null && !(a.connected === false && banner.covered.has(a.key))).map((a) => a.line);

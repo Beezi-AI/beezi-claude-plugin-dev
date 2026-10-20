@@ -32,6 +32,7 @@ import {
 import { canonicalRemote } from '../lib/git.mjs';
 import { normPath, pathHasPrefix } from '../lib/repo-map.mjs';
 import { listAllTranscripts } from '../lib/transcript-index.mjs';
+import { pastSessions } from '../lib/past-sessions.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
 import { sessionFor } from '../lib/sessions.mjs';
 import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
@@ -48,7 +49,7 @@ const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account 
   + ' | rule add-all (<id|name|n>… | none) [--session <id>] [--account <ref>]'
   + ' | routes [--session <id>] [--account <ref>]'
   + ' | joined [add-all | done | pick (--repo <url> | --folder <path> | --outside) <id|name|n>] [--session <id>] [--account <ref>]'
-  + ' | new-folders [ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
+  + ' | new-folders [--history | ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
   + ' | read <id|name|n> [--session <id>] [--account <ref>]'
   + ' | places [--session <id>] [--account <ref>]'
   + ' | undo [--session <id>]';
@@ -677,7 +678,8 @@ async function joinedDone(argv, flags = { deferUpload: false }) {
 }
 
 export async function newFolders(argv, flags = { deferUpload: false }) {
-  const { session, rest: afterSession } = parseSessionFlag(argv);
+  const history = argv.indexOf('--history') !== -1;
+  const { session, rest: afterSession } = parseSessionFlag(argv.filter((arg) => arg !== '--history'));
   const { account, rest } = await parseAccountFlag(afterSession);
   const row = await resolveAccount(account);
   if (rest.length === 0) {
@@ -689,12 +691,13 @@ export async function newFolders(argv, flags = { deferUpload: false }) {
     const newFoldersNow = newFoldersOf(row);
     console.log(`New folders${several ? ` (${accountLabel(row)})` : ''}: ${newFoldersLabel(row)}`);
     printWorkspaces(row);
+    if (history) printHistory(row);
     console.log(`new-folders=${newFoldersNow.mode} set=${newFoldersNow.set ? 'yes' : 'no'} multi=yes account=${row.key}`);
     return;
   }
   requireMulti(row);
   const mode = String(rest[0]).toLowerCase();
-  if ((mode !== 'ask' && mode !== 'send' && mode !== 'none') || (mode !== 'send' && rest.length > 1)) throw new UserError(USAGE);
+  if ((mode !== 'ask' && mode !== 'send' && mode !== 'none') || (mode !== 'send' && rest.length > 1) || history) throw new UserError(USAGE);
   const tenantIds = mode === 'send' ? selection(row, rest.slice(1)) : [];
   if (mode === 'send' && tenantIds.length === 0) throw new UserError('Send needs at least one workspace; use none to send nowhere.');
   const current = resolveSession(session);
@@ -709,6 +712,14 @@ export async function newFolders(argv, flags = { deferUpload: false }) {
   await followNewFolders(fresh, current, prior);
   await afterRuleWrite(row.key, flags);
   console.log(`new-folders=${mode}`);
+}
+
+// The setup wizard's preview: past sessions the upload would send and the places they come from. A count that fails prints
+// nothing, so the question still stands without numbers.
+function printHistory(row) {
+  let counts = null;
+  try { counts = pastSessions(row); } catch { counts = null; }
+  if (counts != null) console.log(`history=${counts.sessions} places=${counts.places}`);
 }
 
 // A session here with no rule follows the new New folders now: its held reports go out and workspaces it newly sends to check in.

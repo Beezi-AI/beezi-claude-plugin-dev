@@ -269,11 +269,6 @@ export function ruleUndoFile() {
   return path.join(beeziHome(), 'rule-undo.json');
 }
 
-// The account's last 7-day usage summary, fetched in the background for the session-start banner.
-export function weeklyUsageFile(key) {
-  return path.join(accountDir(key), 'weekly-usage.json');
-}
-
 // When the diagnostics worker may next attempt delivery: { version, attempts, nextAttemptAt }.
 // Root-level like the consent record — an expiring backoff would turn a rate-limited machine
 // into a machine that retries every minute forever.
