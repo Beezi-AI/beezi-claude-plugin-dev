@@ -260,6 +260,16 @@ export function telemetryConsentFile() {
   return path.join(beeziHome(), 'telemetry.json');
 }
 
+// Whether the status line ends with the Beezi badge: { version, enabled }. Root-level, one per machine.
+export function statuslineBadgeFile() {
+  return path.join(beeziHome(), 'statusline-badge.json');
+}
+
+// The last rule or New folders change, so /beezi:settings undo can put it back.
+export function ruleUndoFile() {
+  return path.join(beeziHome(), 'rule-undo.json');
+}
+
 // When the diagnostics worker may next attempt delivery: { version, attempts, nextAttemptAt }.
 // Root-level like the consent record — an expiring backoff would turn a rate-limited machine
 // into a machine that retries every minute forever.

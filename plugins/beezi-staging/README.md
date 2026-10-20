@@ -73,7 +73,10 @@ Local state lives in `~/.beezi/`.
 
 The one-line installers finish by running `node scripts/setup.mjs` in your terminal. It asks the same questions
 as `/beezi:login` (account, new folders, plan, new workspaces and repos with no rule), uploads your past sessions,
-then offers crash reports and the status line, all without a Claude Code session. Each step runs the plugin's own
+then offers crash reports and the status line, all without a Claude Code session. For an account in several
+workspaces whose New folders was never set, it asks one question, "Where should analytics from this machine go?":
+pick a workspace to send everything there (each option says how many past sessions and repos or folders that
+uploads), or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
 script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
 earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
 run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
@@ -91,7 +94,9 @@ as the fallback where keys cannot be read; `NO_COLOR` turns the colours off.
   - `/beezi:settings statusline on|off` — wrap (or unwrap) your status line so Beezi records the plan-usage numbers Claude Code already computes for it; your status line keeps rendering unchanged.
 
   Accounts in one workspace have no rules or New folders setting: their one workspace receives everything.
+- `/beezi:status` — one read-only screen: each linked account's sign-in and workspaces, where this repo's or folder's analytics go, this machine's Claude plan, whether the status line (and its optional Beezi badge) and crash reports are on, and the plugin version with whether a newer one is out.
 - `/beezi:about` — the installed version, the newest published version (always fetched fresh from the marketplace manifest; the last cached reading stands in when offline), when Claude Code last updated the plugin on this machine and when it was first installed (read from Claude Code's own `~/.claude/plugins/installed_plugins.json`; unknown for a copy loaded from a local folder), and — when a newer version is out — the `/plugin` and `claude plugin …` steps to update, the same commands the SessionStart update notice names.
+- `/beezi:release-notes` — what changed in the installed version (with a line when a newer one is out) and the three before it; `/beezi:release-notes all` lists every version and `/beezi:release-notes 0.37.9` shows one. Read from the plugin's `RELEASE_NOTES.md`.
 - `/beezi:logout` — log one account (or all of them) out of this machine: asks the portal to drop that machine row and revoke that account's OAuth client, then deletes its credentials and its local state. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally. If the account that was the default goes and others remain, it asks which one becomes the default.
 
 ## Multiple accounts

@@ -1,6 +1,6 @@
 {
   "name": "beezi-staging",
-  "version": "0.37.9-staging.5815",
+  "version": "0.39.0-staging.5880",
   "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — staging environment build.",
   "author": {
     "name": "Beezi",

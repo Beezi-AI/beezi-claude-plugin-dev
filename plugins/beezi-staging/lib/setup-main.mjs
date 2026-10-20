@@ -6,7 +6,7 @@ import { friendlyMessage } from './friendly-error.mjs';
 import { finaleLines } from './setup-finale.mjs';
 import { createPrompt, openTerminal } from './setup-prompt.mjs';
 import { createRunner } from './setup-runner.mjs';
-import { canReadKeys, colorEnabled, createStyle, paint } from './setup-style.mjs';
+import { canReadKeys, colorEnabled, createStyle, formatLine, paint } from './setup-style.mjs';
 import { runSetup } from './setup-wizard.mjs';
 
 export const SESSION_KEYS = ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'];
@@ -43,7 +43,9 @@ export function realDeps(root) {
 export function setupMain(deps) {
   const output = deps.output;
   const style = createStyle({ enabled: colorEnabled({ stream: output, env: deps.env }) });
-  const print = (line) => { output.write(`${paint(style, line)}\n`); };
+  // Wrapped to the width on a terminal; a log keeps each line whole.
+  const format = (line) => (output.isTTY ? formatLine(style, line, output.columns || 80) : paint(style, line));
+  const print = (line) => { output.write(`${format(line)}\n`); };
   const input = deps.openTerminal();
   if (input === null) {
     print(NO_TERMINAL);
@@ -53,8 +55,10 @@ export function setupMain(deps) {
   deps.onExit(() => deps.removeDir(cwd));
   // Shows the cursor again on process exit.
   if (output.isTTY) deps.onExit(() => { output.write(SHOW_CURSOR); });
-  // Shared by SIGINT and Ctrl+C inside an arrow-key menu.
+  let run = null;
+  // Shared by SIGINT and Ctrl+C inside an arrow-key menu; a drawn activity line is cleared first.
   const stop = () => {
+    if (run !== null) run.clearActivity();
     print('');
     print(STOPPED);
     deps.exit(130);
@@ -64,10 +68,12 @@ export function setupMain(deps) {
   const ask = deps.createPrompt({ input, output, style, interactive, onInterrupt: stop });
   // The settings env block over the shell's, as Claude Code gives its hooks.
   const env = Object.assign({}, deps.env, deps.settingsEnv());
-  const run = deps.createRunner({
-    root: deps.root, cwd, env, sessionKeys: SESSION_KEYS, paint: (line) => paint(style, line),
+  run = deps.createRunner({
+    root: deps.root, cwd, env, sessionKeys: SESSION_KEYS, paint: format,
+    output, activity: output.isTTY === true && deps.env.TERM !== 'dumb',
   });
-  return deps.runSetup({ run, ask, print })
+  const progress = (label) => { run.setLabel(label); };
+  return deps.runSetup({ run, ask, print, progress })
     .catch((error) => {
       print(`✗ ${friendlyMessage(error)}`);
       return 1;

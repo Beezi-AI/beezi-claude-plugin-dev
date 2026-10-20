@@ -3,7 +3,6 @@ import { fileURLToPath } from 'url';
 import {
   isMultiTenant,
   newTenantsOf,
-  readSessionWorkspace,
   resolveTargets,
   roleLabel,
   tenantById,
@@ -57,14 +56,6 @@ function names(row, ids) {
   return list.length < 2 ? list.join('') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
 }
 
-// How the targets notice names a place: a folder's ~ path, a repo's name, or sessions outside a project.
-function noticePlace(key) {
-  if (key == null) return 'this folder';
-  if (key.kind === 'outside') return 'sessions outside a project';
-  if (key.kind === 'folder' && key.label) return key.label;
-  return shortLabel(key) || 'this folder';
-}
-
 // Splits n items into ceil(n/4) groups whose sizes differ by at most one (5 → 3+2).
 function chunkEvenly(items) {
   const count = Math.ceil(items.length / GROUP_SIZE);
@@ -84,16 +75,18 @@ function placeOf(key) {
     return {
       question: 'Where should analytics for sessions outside a project folder go?',
       dontTrack: 'Don\'t track these',
-      nothing: 'Nothing from sessions outside a project folder is uploaded',
+      nothing: 'Not tracked: nothing from sessions outside a project folder is sent',
     };
   }
   const short = shortLabel(key);
-  // A folder rule covers everything under it, so its question names the whole path and says so.
-  const asked = key != null && key.kind === 'folder' ? `${key.label} (and everything inside it)` : short;
+  // This session's own directory, named as the one you're in; a folder rule covers everything under it, so its question names the whole path and says so.
+  const asked = key != null && key.kind === 'folder'
+    ? `${key.label}, the folder you're in (and everything inside it),`
+    : `${short}, the repo you're in,`;
   return {
     question: `Where should analytics for ${asked} go?`,
-    dontTrack: key != null && key.kind === 'repo' ? 'Don\'t track this repo' : 'Don\'t track this folder',
-    nothing: `Nothing from ${short} is uploaded`,
+    dontTrack: `Don't track ${short}`,
+    nothing: `Not tracked: nothing from ${short} is sent`,
   };
 }
 
@@ -194,41 +187,6 @@ export async function buildWorkspacePrompt(input, deps = {}) {
     sessionId: input.session_id, root, several: marked.several,
   }));
   return promptText(asks);
-}
-
-// SessionStart: one line per multi-workspace account that is not waiting for an answer, or null.
-export async function buildTargetsNotice(input, deps = {}) {
-  if (input == null || typeof input.session_id !== 'string' || input.session_id === '') return null;
-  const rows = await linkedRows(deps);
-  const state = readSessionWorkspace(input.session_id);
-  // A no-rules one-workspace row can never produce a line here (resolveTargets gives 'single'), so
-  // skip its credential read.
-  const shown = await withUsableLogin(rows.filter((row) => isMultiTenant(row) || usesRules(row)), deps);
-  const ctx = createRouteContext();
-  let here;
-  const hereKey = () => {
-    if (here === undefined) here = routeKeyForDir(state != null && state.cwd != null ? state.cwd : inputCwd(input), ctx);
-    return here;
-  };
-  const lines = shown
-    .map((row) => ({ row, resolved: resolveTargets(row, state) }))
-    .filter((r) => (r.resolved.multi && !r.resolved.pendingAsk) || (r.resolved.source === 'rule' && r.resolved.targets.length === 0))
-    .map(({ row, resolved }) => {
-      const prefix = rows.length > 1 ? `Beezi (${emailOf(row)})` : 'Beezi';
-      const key = resolved.rule != null ? resolved.rule : hereKey();
-      const where = noticePlace(key);
-      let text;
-      if (resolved.source === 'rule' && resolved.targets.length === 0) {
-        text = `${where} ${key != null && key.kind === 'outside' ? 'are' : 'is'} not tracked (your rule).`;
-      } else if (resolved.source === 'none') {
-        text = `analytics from ${where} are not uploaded (new folders: don't send).`;
-      } else {
-        const fallback = resolved.source === 'new-folders' ? ' (new folder default)' : '';
-        text = `analytics from ${where} go to ${names(row, resolved.targets)}${fallback}.`;
-      }
-      return `${prefix}: ${text} Change with /beezi:settings.`;
-    });
-  return lines.length === 0 ? null : lines.join('\n');
 }
 
 // The current-folder question (buildWorkspacePrompt) may follow: asked per account only while this folder still has no rule.
