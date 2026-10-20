@@ -6,7 +6,7 @@ const DONT_TRACK = {
 const NEW_FOLDER_OPTIONS = [
   { label: 'Ask me (recommended)', description: 'Beezi asks once per repo or folder, when a session starts there' },
   { label: 'Send to…', description: 'Pick the workspaces that get them' },
-  { label: "Don't send", description: 'Nothing from a repo or folder with no rule is uploaded' },
+  { label: "Don't send", description: 'Nothing from a repo or folder with no rule is sent' },
 ];
 const LABEL_END = /\), \d+ sessions?\b/;
 const PLAIN_PLACE = /^(.*?), \d+ sessions?\b/;
@@ -116,8 +116,8 @@ export function workspaceOptions(workspaces) {
 
 export function placeOptions(place, workspaces) {
   const nothing = place.kind === 'outside'
-    ? 'Nothing from sessions outside a project folder is uploaded'
-    : `Nothing from ${place.short} is uploaded`;
+    ? 'Not tracked: nothing from sessions outside a project folder is sent'
+    : `Not tracked: nothing from ${place.short} is sent`;
   return workspaceOptions(workspaces).concat([{ label: DONT_TRACK[place.kind], description: nothing }]);
 }
 

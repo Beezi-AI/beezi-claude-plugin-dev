@@ -5,6 +5,7 @@ import { DIAGNOSTIC_SOURCES } from '../lib/telemetry-codes.mjs';
 import { maybeSpawnCostStateSync } from '../lib/cost-state-trigger.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 import { maybeStartPendingHistory } from '../lib/history-trigger.mjs';
+import { maybeSpawnWeeklyUsage } from '../lib/weekly-usage.mjs';
 
 const input = readHookInput();
 if (!input) process.exit(0);
@@ -38,10 +39,10 @@ runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
     maybeSpawnCoworkLive();
     // Awaited: the runner exits once this callback resolves, which could cut off the spawn.
     await maybeStartPendingHistory();
+    await maybeSpawnWeeklyUsage(input);
   }
   let joinedPrompt = null;
   let workspacePrompt = null;
-  let targetsNotice = null;
   let historyNotice = null;
   try {
     if (prompt != null) joinedPrompt = await prompt.buildJoinedPrompt(input);
@@ -53,10 +54,8 @@ runHook(DIAGNOSTIC_SOURCES.SESSION_START, async () => {
   // The joined re-pick comes first, so the current-folder question sees its answers.
   const additionalContext = [joinedPrompt, workspacePrompt].filter(Boolean).join('\n\n') || null;
   try {
-    if (prompt != null && input.source !== 'compact') targetsNotice = await prompt.buildTargetsNotice(input);
     if (prompt != null && failure == null) historyNotice = await prompt.buildHistoryNotice(input);
   } catch { /* the ask is best-effort; the session still starts */ }
-  if (targetsNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${targetsNotice}` : targetsNotice;
   if (historyNotice != null) systemMessage = systemMessage ? `${systemMessage}\n${historyNotice}` : historyNotice;
   if (failure != null) {
     write({ systemMessage: null, additionalContext });
