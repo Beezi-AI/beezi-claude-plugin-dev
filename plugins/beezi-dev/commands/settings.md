@@ -1,7 +1,7 @@
 ---
 description: Show and change Beezi settings: rules, new folders, account and plan, crash reports, status line
 argument-hint: "[show | rules [show | add | remove <n>] | new-folders [show] | account [show] | refresh | undo | telemetry [show | on|off|correlate|anonymous] | statusline [on|off | badge on|off]]"
-allowed-tools: Bash(node:*), AskUserQuestion
+allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/key-resolve.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/settings.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/statusline-install.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/telemetry.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs:*), AskUserQuestion
 ---
 
 Do NOT read, open, or inspect any files. Never echo any token.
