@@ -9,10 +9,12 @@ import { badgeEnabled } from '../lib/statusline-badge.mjs';
 import { liveOffNote } from '../lib/session-banner.mjs';
 import { readTrackingState } from '../lib/tracking.mjs';
 import { aboutPlugin } from '../lib/about.mjs';
+import { updateCommands } from '../lib/update-check.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 
-// /beezi:status — one read-only screen: sign-in, workspaces, where this folder goes, plan, machine, plugin version.
+// /beezi:status — one read-only screen: sign-in, workspaces, where this folder goes, plan, machine, plugin version
+// and how to update it.
 
 const LABEL_WIDTH = 14;
 const PLACE_LABELS = { repo: 'This repo', folder: 'This folder', outside: 'Here' };
@@ -94,15 +96,59 @@ function placeField(row, dir, ctx, tracking) {
   return field(PLACE_LABELS[place.kind] || 'Here', `${where} ${routeText(row, route)}${off == null ? '' : `, but ${off}`}`);
 }
 
+// `YYYY-MM-DD HH:MM UTC` — fixed, so the output reads the same on every machine and locale.
+function formatTime(iso) {
+  const ms = Date.parse(typeof iso === 'string' ? iso : '');
+  if (Number.isNaN(ms)) return null;
+  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
 export function pluginText(info) {
   if (info == null || info.local == null) return 'unknown (could not read its version)';
   const version = info.local.version;
-  if (info.status === 'update' && info.latest != null) {
-    return `${version}. ${info.latest.version} is out: run /plugin to update, then restart.`;
+  const latest = info.latest;
+  if (info.status === 'update' && latest != null) {
+    const seen = latest.stale ? ` (could not check now; last seen ${formatTime(latest.checkedAt) || 'earlier'})` : '';
+    return `${version}. Update available: ${latest.version}${seen}`;
   }
-  const checked = info.latest != null && !info.latest.stale;
-  if (checked && (info.status === 'current' || info.status === 'ahead')) return `${version}, the newest`;
-  return `${version} (could not check for updates)`;
+  if (latest == null || latest.stale) return `${version} (could not check for updates)`;
+  if (info.status === 'current') return `${version}, the newest`;
+  if (info.status === 'ahead') return `${version}, newer than the published ${latest.version}`;
+  return `${version} (could not compare it with the published ${latest.version})`;
+}
+
+function updatedText(install) {
+  if (install == null) return 'unknown — loaded from a local folder, not a marketplace';
+  const updated = formatTime(install.lastUpdated);
+  const installed = formatTime(install.installedAt);
+  if (updated == null) return installed == null ? 'unknown' : `unknown (first installed ${installed})`;
+  return installed == null ? updated : `${updated} (first installed ${installed})`;
+}
+
+// The Plugin line, then when this machine last updated it and from which marketplace.
+export function pluginLines(info) {
+  const lines = [field('Plugin', pluginText(info))];
+  if (info == null || info.local == null) return lines;
+  lines.push(field('Updated here', updatedText(info.install)));
+  if (info.marketplace) {
+    const flag = info.autoUpdate === true ? ' (auto-update on)' : (info.autoUpdate === false ? ' (auto-update off)' : '');
+    lines.push(field('Marketplace', `${info.marketplace}${flag}`));
+  }
+  return lines;
+}
+
+// How to update, only when a newer version is out: the same /plugin and terminal steps as the SessionStart notice.
+export function updateSteps(info) {
+  if (info == null || info.local == null || info.status !== 'update' || info.latest == null) return [];
+  const where = info.marketplace ? ` from the ${info.marketplace} marketplace` : '';
+  const lines = [`To update to ${info.latest.version}:`, `  - In Claude Code: run /plugin and update ${info.local.name}${where}.`];
+  const commands = updateCommands(info.local.name, info.marketplace);
+  if (commands != null) lines.push('  - Or from a terminal:', `      ${commands[0]}`, `      ${commands[1]}`);
+  lines.push('  Then restart Claude Code to apply it.');
+  if (info.autoUpdate === true) {
+    lines.push('  Auto-update is on for this marketplace, so Claude Code also installs it on its own at startup.');
+  }
+  return lines;
 }
 
 function machineLines(view) {
@@ -111,7 +157,7 @@ function machineLines(view) {
   return [
     field('Claude plan', m.plan),
     field('This machine', `status line ${statusline}, crash reports ${m.crash === 'off' ? 'off' : 'on'}`),
-    field('Plugin', pluginText(view.plugin)),
+    ...pluginLines(view.plugin),
   ];
 }
 
@@ -127,7 +173,10 @@ export function formatStatus(view) {
     if (here != null) out.push(here);
   });
   if (several) out.push('');
-  out.push(...machineLines(view), '', 'Change settings with /beezi:settings');
+  out.push(...machineLines(view), '');
+  const steps = updateSteps(view.plugin);
+  if (steps.length > 0) out.push(...steps, '');
+  out.push('Change settings with /beezi:settings');
   return `${out.join('\n')}\n`;
 }
 
