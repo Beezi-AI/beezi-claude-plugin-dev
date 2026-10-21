@@ -194,9 +194,9 @@ Then by the rest of the arguments:
     rule; description "Pick a different repo or folder"; see Typed target, below;
   - "Change a rule" — there is an `R<n>.` line;
   - "Remove a rule" — there is an `R<n>.` line;
-  - "Done" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
+  - "Close" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
 
-  "Done" or a dismissal stops.
+  "Close" or a dismissal stops.
 
   Previews: an option about <here> ("Add a rule for <here>", "Change where <here> goes", "Add a
   rule just for <here>") has the account's `<here-card>` block as its preview (the section's text
@@ -279,9 +279,9 @@ apply, in this order:
   `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --repo '<value>' none --account <key>`
 
 - "Remove a rule" — there is an `R<n>.` line. Use the Remove flow, above.
-- "Done" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
+- "Close" — only when fewer than 4 options come before it (otherwise a dismissal is the way out).
 
-"Done" or a dismissal stops. After any command, write its first line verbatim (an error line too;
+"Close" or a dismissal stops. After any command, write its first line verbatim (an error line too;
 it ends with " Undo: /beezi:settings undo" when there is a change to undo).
 
 ### Picker

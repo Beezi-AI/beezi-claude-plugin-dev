@@ -1,5 +1,12 @@
 # Beezi plugin release notes
 
+## 0.39.1 (2026-10-21) — `/beezi:about` is now part of `/beezi:status`
+
+### Improved
+- **Updates in `/beezi:status`** — it now also shows when the plugin was last updated on this machine, its marketplace and auto-update setting, and the steps to update when a newer version is out.
+- **`/beezi:about` removed** — everything it showed is in `/beezi:status`.
+- **Clearer way out** — the settings menus end with Close instead of Done.
+
 ## 0.39.0 (2026-10-20) — Release notes in Claude Code, and a one-question terminal setup
 
 ### New

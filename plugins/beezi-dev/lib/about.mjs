@@ -3,11 +3,12 @@ import { fileURLToPath } from 'url';
 import { readJson } from './fs-store.mjs';
 import { claudeHome } from './paths.mjs';
 import { compareVersions } from './version-compare.mjs';
-import { fetchLatest, updateCommands } from './update-check.mjs';
+import { fetchLatest } from './update-check.mjs';
 
-// /beezi:about — what is installed, whether a newer build is published, when this machine last
-// updated it, and how to update. Every fact is best-effort: a missing or unfamiliar file reads as
-// "unknown", never as an error, because none of it is needed for the plugin to work.
+// What /beezi:status and /beezi:release-notes show about the plugin: what is installed, whether a
+// newer build is published, and when this machine last updated it. Every fact is best-effort: a
+// missing or unfamiliar file reads as "unknown", never as an error, because none of it is needed
+// for the plugin to work.
 
 const PLUGIN_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -115,74 +116,4 @@ export async function aboutPlugin(deps = {}) {
       : { version: record.latestVersion, checkedAt: record.checkedAt, stale: latest.stale },
     status: versionStatus(local, record),
   };
-}
-
-// `YYYY-MM-DD HH:MM UTC` — fixed, so the output reads the same on every machine and locale.
-function formatTime(iso) {
-  const ms = Date.parse(typeof iso === 'string' ? iso : '');
-  if (Number.isNaN(ms)) return null;
-  return `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
-}
-
-function latestLine(info) {
-  if (info.latest == null) return 'unknown — could not reach the update server';
-  const at = formatTime(info.latest.checkedAt);
-  if (info.latest.stale) {
-    return `${info.latest.version} (could not check now; last seen ${at == null ? 'earlier' : at})`;
-  }
-  return at == null ? info.latest.version : `${info.latest.version} (checked ${at})`;
-}
-
-function lastUpdatedLine(info) {
-  if (info.install == null) return 'unknown — not installed from a marketplace (loaded from a local folder)';
-  const updated = formatTime(info.install.lastUpdated);
-  const installed = formatTime(info.install.installedAt);
-  if (updated == null) return installed == null ? 'unknown' : `unknown (first installed ${installed})`;
-  return installed == null ? updated : `${updated} (first installed ${installed})`;
-}
-
-function updateSteps(info) {
-  const lines = [`Update available: ${info.local.version} → ${info.latest.version}. To update:`];
-  const where = info.marketplace ? ` from the ${info.marketplace} marketplace` : '';
-  lines.push(`  - In Claude Code: run /plugin and update ${info.local.name}${where}.`);
-  const commands = updateCommands(info.local.name, info.marketplace);
-  if (commands != null) {
-    lines.push('  - Or from a terminal:');
-    lines.push(`      ${commands[0]}`);
-    lines.push(`      ${commands[1]}`);
-  }
-  lines.push('  Then restart Claude Code to apply it.');
-  if (info.autoUpdate === true) {
-    lines.push('  Auto-update is on for this marketplace, so Claude Code also installs it on its own at startup.');
-  }
-  return lines;
-}
-
-export function formatAbout(info) {
-  if (info == null || info.local == null) {
-    return "✗ Beezi: could not read this plugin's version (.claude-plugin/plugin.json).\n";
-  }
-  const lines = [
-    `Beezi plugin — ${info.local.name}`,
-    `  Installed version: ${info.local.version}`,
-    `  Latest published:  ${latestLine(info)}`,
-    `  Last updated here: ${lastUpdatedLine(info)}`,
-  ];
-  if (info.marketplace) {
-    const flag = info.autoUpdate === true ? ' (auto-update on)' : (info.autoUpdate === false ? ' (auto-update off)' : '');
-    lines.push(`  Marketplace:       ${info.marketplace}${flag}`);
-  }
-  lines.push('');
-  if (info.status === 'update') {
-    updateSteps(info).forEach((line) => lines.push(line));
-  } else if (info.status === 'current') {
-    lines.push('You have the newest version.');
-  } else if (info.status === 'ahead') {
-    lines.push(`This build (${info.local.version}) is newer than the published ${info.latest.version}.`);
-  } else if (info.status === 'unknown') {
-    lines.push(`Could not compare ${info.local.version} with the published ${info.latest.version}.`);
-  } else {
-    lines.push('Could not check for a newer version. Run /beezi:about again later.');
-  }
-  return `${lines.join('\n')}\n`;
 }
