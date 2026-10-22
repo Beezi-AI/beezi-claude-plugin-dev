@@ -5,6 +5,8 @@ const DONT_TRACK = {
 };
 const SETUP_QUESTION = 'Where should analytics from this machine go?';
 const PER_REPO = { label: 'Let me choose per repo', description: 'Beezi asks about each repo and folder with history next, and new ones when a session starts there' };
+export const SEVERAL = { label: 'Several workspaces…', description: 'Pick two or more; everything goes to each of them' };
+export const SEVERAL_QUESTION = 'Which workspaces should get analytics from this machine?';
 const LABEL_END = /\), \d+ sessions?\b/;
 const PLAIN_PLACE = /^(.*?), \d+ sessions?\b/;
 const NO_FOLDER = /^\d+ other past sessions? ha(?:s|ve) no recorded folder and (?:is|are) not sent\.$/;
@@ -118,8 +120,10 @@ export function placeOptions(place, workspaces) {
   return workspaceOptions(workspaces).concat([{ label: DONT_TRACK[place.kind], description: nothing }]);
 }
 
+// Index workspaces.length is the Don't track option, valid only on its own.
 export function tenantsArg(picked, workspaces) {
-  if (picked.indexOf(workspaces.length) !== -1) return 'none';
+  if (picked.length === 1 && picked[0] === workspaces.length) return 'none';
+  if (picked.indexOf(workspaces.length) !== -1) throw new Error('Don\'t track was combined with a workspace');
   return picked.map((i) => workspaces[i].tenant).join(',');
 }
 
@@ -141,7 +145,7 @@ export function parseHistory(text) {
   return found ? { sessions: Number(found[1]), places: Number(found[2]) } : null;
 }
 
-// One option per workspace, each sending everything there, then the per-repo option.
+// One option per workspace, each sending everything there, then the several-workspaces and per-repo options.
 export function setupOptions(workspaces, history) {
   const sessions = history === null ? '' : plural(history.sessions, 'past session', 'past sessions');
   let description = 'Everything goes here, starting with new repos and folders';
@@ -150,7 +154,7 @@ export function setupOptions(workspaces, history) {
       ? `Everything goes here: new repos and folders, and ${history.places} with history (${sessions})`
       : `Everything goes here: new repos and folders, and ${sessions}`;
   }
-  return workspaces.map((w) => ({ label: w.name, description })).concat([PER_REPO]);
+  return workspaces.map((w) => ({ label: w.name, description })).concat([SEVERAL, PER_REPO]);
 }
 
 export async function askNewFolders(ctx, key) {
@@ -164,15 +168,21 @@ export async function askNewFolders(ctx, key) {
   const workspaces = parseWorkspaces(listing.stdout);
   const choice = await ctx.ask.choose(SETUP_QUESTION, setupOptions(workspaces, parseHistory(listing.stdout)), { defaultIndex: 0 });
   if (choice === null) return;
-  if (choice === workspaces.length) await runAndReport(ctx, ['new-folders', 'ask', '--account', key, DEFER]);
-  else await runAndReport(ctx, ['new-folders', 'send', workspaces[choice].tenant, '--account', key, DEFER]);
+  if (choice === workspaces.length + 1) {
+    await runAndReport(ctx, ['new-folders', 'ask', '--account', key, DEFER]);
+    return;
+  }
+  const picked = choice === workspaces.length ? await ctx.ask.chooseMany(SEVERAL_QUESTION, workspaceOptions(workspaces)) : [choice];
+  if (picked === null || picked.length === 0) return;
+  await runAndReport(ctx, ['new-folders', 'send', tenantsArg(picked, workspaces), '--account', key, DEFER]);
 }
 
 // One question per place; true when the last place got an answer.
 async function askPerPlace(ctx, key, places, workspaces) {
   let lastAnswered = false;
   for (let i = 0; i < places.length; i += 1) {
-    const picked = await ctx.ask.chooseMany(placeQuestion(places[i], i + 1, places.length), placeOptions(places[i], workspaces));
+    const question = placeQuestion(places[i], i + 1, places.length);
+    const picked = await ctx.ask.chooseMany(question, placeOptions(places[i], workspaces), { exclusive: [workspaces.length] });
     lastAnswered = picked !== null && picked.length > 0;
     if (lastAnswered) await runAndReport(ctx, ruleArgv(places[i], key, tenantsArg(picked, workspaces)));
   }

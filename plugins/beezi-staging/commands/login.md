@@ -104,22 +104,35 @@ The `<setup account="<key>">` block is for you only: one `W. <workspace> account
 role=<role>` line per workspace, then `sessions=<N> places=<M>` (past sessions the history upload
 would send, and the other repos and folders they ran in), or a `✗` line when they could not be
 counted (write it verbatim). After it come one `<preview tenant="<id>">` block for each of the
-first 3 workspaces and a `<preview tenant="choose">` block.
+first 2 workspaces, a `<preview tenant="several">` block and a `<preview tenant="choose">` block.
 
 Ask ONE single-select question, "Where should analytics from this machine go?", with one option per
-`<preview tenant="<id>">` block, in order — label = the name on the `W.` line with that `tenant=`
-(the text after `W. ` up to ` account=`), description = its `role=` value, or "Beezi workspace"
-when it is empty, preview = the block's lines between its tags, exactly — then a last option "Let
-me choose per repo" (description "One question per repo or folder", preview = the `choose`
-block's lines). A typed answer (the question's own "Other") that names a `W.` line's workspace
-(ignoring case) is that workspace; one that names none is a dismissal.
+`<preview tenant="<id>">` block other than `several` and `choose`, in order — label = the name on
+the `W.` line with that `tenant=` (the text after `W. ` up to ` account=`), description = its
+`role=` value, or "Beezi workspace" when it is empty, preview = the block's lines between its tags,
+exactly — then "Several workspaces…" (description "Pick two or more; everything goes to each of
+them", preview = the `several` block's lines), then a last option "Let me choose per repo"
+(description "One question per repo or folder", preview = the `choose` block's lines). That makes
+at most 4 options. A typed answer (the question's own "Other") names one or more `W.` lines'
+workspaces, comma-separated, ignoring case: when every name matches a `W.` line it is those
+workspaces; when any name matches none it is a dismissal.
 
-- a workspace → run EXACTLY, with that `W.` line's `tenant=` value:
+- a workspace, or the workspaces of a typed answer → run EXACTLY, with `<tenants>` = their `W.`
+  lines' `tenant=` values joined by commas:
 
-  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <tenant> --account <key> --defer-upload`
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <tenants> --account <key> --defer-upload`
 
   write its first line verbatim, then carry on with `--from plan` (this folder now follows New
   folders, so there is no question about it).
+- "Several workspaces…" → ask one `multiSelect: true` question, "Which workspaces should get
+  analytics from this machine?", with one option per `W.` line of the `<setup>` block: label = its
+  name, description = its `role=` value, or "Beezi workspace" when it is empty. With more than 4
+  workspaces, split them evenly into questions of at most 4 options, each ending in " (j of k)";
+  the answer is all parts together. A dismissed part adds nothing, and the other parts' picks still
+  count. A typed answer (Other) in a part names workspaces as the first question's typed answer
+  does, ignoring case; when any name matches no `W.` line, that part adds nothing. One or more
+  chosen → the workspace bullet above with their `tenant=` values (one is fine). Nothing chosen,
+  with every part dismissed or empty → as a dismissal of the first question.
 - "Let me choose per repo" → run EXACTLY
   `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders ask --account <key> --defer-upload`,
   write its first line verbatim, then carry on with `--from here`.
@@ -146,8 +159,12 @@ root or folder. Ask one `multiSelect: true` question about it, by its `kind=`:
 Options: one per `W.` line of this block, built as Step 4a builds them for a `P` line, then the
 last option, description "Not tracked: nothing from <short> is sent" ("Not tracked: nothing from
 sessions outside a project folder is sent" for `outside`); more than 4 split as Step 4a splits
-them. Then run EXACTLY, with `<ids>` = the chosen `tenant=` values joined by commas, or `none`
-when the last option was chosen (it wins over the others):
+them. If the answer has the last option together with any workspace, across all of its parts, run
+nothing yet: ask the same question again once (every part), starting with
+`"Don't track" can't be combined with a workspace — pick one or the other.` A second mixed answer is a dismissal: run
+nothing; the next /beezi:login asks again. Then run EXACTLY, with `<ids>` = the chosen
+`tenant=` values joined by commas, or `none` when the last option was chosen, only when it is the
+whole answer:
 
 `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current --account <key> --defer-upload <ids>`
 
@@ -364,16 +381,18 @@ value. Options: one per `J` line, in order — label = `<short>` (the `J` line's
 or "No rule yet" when `<where>` is `no rule yet`; then "None of these" LAST (description "Nothing from
 these goes to <name>"). So a question lists at most 3 places plus "None of these": more `J` lines → split
 them in order into questions of at most 3 places, each ending in " (part j of k)"; that workspace's answer
-is all of its parts together. Choosing "None of these" (alone or with places) means no pick from that
-question.
+is all of its parts together. "None of these" alone means no pick from that question. If it is chosen
+together with any place in the same question, ask that workspace's question again once (every part),
+starting with `"None of these" can't be combined with repos — pick one or the other.` A mixed answer is not an answer. A second
+mixed answer is a dismissal: no `J<i>-command` for that workspace and no `done-command`.
 At most 4 questions per AskUserQuestion call: more → further calls, one after
 another.
 
 For each new workspace, for each `J` line picked for it, run that line's `J<i>-command=` text EXACTLY
 ONCE, changing nothing except the final `<tenant>`: that workspace's `tenant=` value (e.g. `t1`). Never
 rebuild the command or re-quote its path yourself. A dismissed question runs nothing for its lines.
-After every new workspace's questions have been answered ("None of these" is an answer; skipped or
-dismissed is not), run the `done-command=` text EXACTLY ONCE; otherwise run no `done-command`, and the
+After every new workspace's questions have been answered ("None of these" alone is an answer; skipped,
+dismissed or mixed is not), run the `done-command=` text EXACTLY ONCE; otherwise run no `done-command`, and the
 next login or sync asks again. Write each command's first line verbatim. Then carry on with
 `--from routes`.
 
@@ -434,10 +453,13 @@ sessions outside a project folder is sent" for `outside`). More than 4 options �
 questions of at most 4 (5 → 3 + 2), the last option in the last one, each ending in
 " (part j of k)"; the `P` line's answer is all of its parts together.
 
+If a `P` line's answer has the last option together with any workspace, across all of its parts,
+run nothing for it yet: ask that `P` line's question again once (every part), starting with
+`"Don't track" can't be combined with a workspace — pick one or the other.` A second mixed answer is a dismissal.
 Then, for each `P` line with an answer, run its `P<i>-command=` text EXACTLY ONCE, changing
 nothing except the final `<tenants>`: the chosen `tenant=` values joined by commas (e.g.
-`t1,t2`), or `none` when the last option was chosen (it wins over the others). Never rebuild the
-command or re-quote its path yourself. A `P` line with nothing chosen, or a dismissed question,
+`t1,t2`), or `none` when the last option was chosen, only when it is the whole answer.
+Never rebuild the command or re-quote its path yourself. A `P` line with nothing chosen, or a dismissed question,
 runs nothing: its sessions are not sent this time, and the next /beezi:login or /beezi:sync asks
 again.
 

@@ -1,5 +1,14 @@
 # Beezi plugin release notes
 
+## 0.39.2 (2026-10-22) — Several workspaces at setup, and "Don't track" stands alone
+
+### Fixed
+- **"Don't track" stands alone** — picking it together with a workspace no longer drops the workspace silently: the setup asks again, and Beezi's questions in Claude Code ask once more.
+- **"None of these" stands alone** — choosing it with repos for a new workspace asks again instead of skipping the repos.
+
+### Improved
+- **Several workspaces** — "Where should analytics from this machine go?" has a "Several workspaces…" option that sends everything to each workspace you pick.
+
 ## 0.39.1 (2026-10-21) — `/beezi:about` is now part of `/beezi:status`
 
 ### Improved

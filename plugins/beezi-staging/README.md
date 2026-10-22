@@ -76,7 +76,7 @@ as `/beezi:login` (account, new folders, plan, new workspaces and repos with no 
 then offers crash reports and the status line, all without a Claude Code session. For an account in several
 workspaces whose New folders was never set, it asks one question, "Where should analytics from this machine go?":
 pick a workspace to send everything there (each option says how many past sessions and repos or folders that
-uploads), or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
+uploads), **Several workspaces…** to send everything to each of the ones you pick next, or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
 script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
 earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
 run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers

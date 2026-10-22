@@ -21,8 +21,8 @@ const USAGE = 'Usage: login-flow.mjs [--account <ref> --from <here|plan|joined|r
 const CAPTURE_STATUSES = ['no_key', 'not_linked'];
 // Writes made between calls leave the upload to login.md's backfill.
 const DEFER = { deferUpload: true };
-// The setup question previews this many workspaces; a typed answer may still name the others.
-const PREVIEW_WORKSPACES = 3;
+// The setup question previews this many workspaces, then Several workspaces… reaches every one.
+const PREVIEW_WORKSPACES = 2;
 
 function runScript(script, args) {
   const result = spawnSync(process.execPath, [path.join(SCRIPTS_DIR, script)].concat(args), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -99,18 +99,26 @@ function previewRows(here, places, values) {
   return columns(rows);
 }
 
-function sendPreview(name, here, counts) {
-  const to = `→ ${name}`;
-  const lines = [`Everything goes to ${name}:`, ''].concat(previewRows(here, counts.places, { newFolders: to, here: to, places: to }), ['']);
-  if (counts.sessions > 0) lines.push(`Then ${plural(counts.sessions, 'past session uploads', 'past sessions upload')} to ${name}.`);
+// `heading`, then every row `→ <target>` and the upload line naming `uploadTo`.
+function sendPreview(heading, target, uploadTo, here, counts) {
+  const to = `→ ${target}`;
+  const lines = [heading, ''].concat(previewRows(here, counts.places, { newFolders: to, here: to, places: to }), ['']);
+  if (counts.sessions > 0) lines.push(`Then ${plural(counts.sessions, 'past session uploads', 'past sessions upload')} to ${uploadTo}.`);
   lines.push('Change any of it in /beezi:settings.');
   return lines;
 }
+
+const workspacePreview = (name, here, counts) => sendPreview(`Everything goes to ${name}:`, name, name, here, counts);
+const severalPreview = (here, counts) => sendPreview('Everything goes to each workspace you pick next:', 'the ones you pick', 'each of them', here, counts);
 
 function choosePreview(here, counts) {
   const lines = ['Pick where each repo goes:', ''].concat(previewRows(here, counts.places, { newFolders: 'ask me', here: 'asked next', places: 'asked next' }));
   if (counts.sessions > 0) lines.push('', counts.sessions === 1 ? 'Then the past session uploads where you chose.' : 'Then past sessions upload where you chose.');
   return lines;
+}
+
+function printPreview(tenant, lines) {
+  console.log([`<preview tenant="${tenant}">`].concat(lines, ['</preview>']).join('\n'));
 }
 
 // login.md Step 1w's one question: the workspaces and counts, then a preview per answer.
@@ -129,10 +137,9 @@ function setupQuestion(row, { pastSessions: count, herePlace }) {
     console.log(`✗ ${friendlyMessage(error)}`);
   }
   console.log('</setup>');
-  for (const t of tenants.slice(0, PREVIEW_WORKSPACES)) {
-    console.log([`<preview tenant="${t.id}">`].concat(sendPreview(t.name ? t.name : t.id, here, counts), ['</preview>']).join('\n'));
-  }
-  console.log(['<preview tenant="choose">'].concat(choosePreview(here, counts), ['</preview>']).join('\n'));
+  for (const t of tenants.slice(0, PREVIEW_WORKSPACES)) printPreview(t.id, workspacePreview(t.name ? t.name : t.id, here, counts));
+  printPreview('several', severalPreview(here, counts));
+  printPreview('choose', choosePreview(here, counts));
 }
 
 // Step 2 and 3s: the capture, then the setup-token check; the question they call for, or null.
