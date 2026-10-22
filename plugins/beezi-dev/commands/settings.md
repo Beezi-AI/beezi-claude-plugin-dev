@@ -143,8 +143,12 @@ More than 4 options → split them evenly into questions of at most 4 (5 → 3 +
 in the last question, each question's text ending in " (part j of k)"; the answer is all of them
 together.
 
-`<ids>` = the chosen workspaces' `tenant=` values joined by commas (e.g. `t1,t2`), or `none` when
-the last option is chosen (it wins over the others). Nothing chosen → run nothing.
+If the answer has the last option together with any workspace, across all of its parts, ask the
+same question again once (every part), starting with
+`"Don't track" can't be combined with a workspace — pick one or the other.` A second mixed answer is a
+dismissal: run nothing. `<ids>` = the chosen workspaces' `tenant=` values joined by commas (e.g.
+`t1,t2`), or `none` when the last option is chosen, only when it is the whole answer. Nothing
+chosen → run nothing.
 
 ## Rules
 
