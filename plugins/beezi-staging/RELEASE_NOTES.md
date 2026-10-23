@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.40.0 (2026-10-23) — Enabled plugins in Beezi
+
+### New
+- **Enabled plugins** — once an hour Beezi records which Claude Code plugins are switched on for this machine (`enabledPlugins` in your user settings and in the project settings of folders you work in), with their versions. Only the plugin names, versions and the repo they are enabled for are sent. A project's plugins follow that folder's workspace rules, and nothing is sent for workspaces where live tracking is off.
+
 ## 0.39.2 (2026-10-22) — Several workspaces at setup, and "Don't track" stands alone
 
 ### Fixed
