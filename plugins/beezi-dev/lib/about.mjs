@@ -25,16 +25,25 @@ function claudePluginsDir(deps) {
   return path.join(deps.claudeHomeDir == null ? claudeHome() : deps.claudeHomeDir, 'plugins');
 }
 
-function samePath(a, b, platform) {
+export function samePath(a, b, platform) {
   if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false;
   const p = platform === 'win32' ? path.win32 : path.posix;
   const left = p.resolve(a), right = p.resolve(b);
   return platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
-function marketplaceOf(key) {
+export function marketplaceOf(key) {
   const at = key.lastIndexOf('@');
   return at === -1 ? null : key.slice(at + 1);
+}
+
+// The `plugins` map of installed_plugins.json ({ "<name>@<marketplace>": [entry, ...] }), or null
+// when the file is missing, unreadable or in a layout we do not trust.
+export function readInstalledPlugins(deps = {}) {
+  const raw = readJson(path.join(claudePluginsDir(deps), 'installed_plugins.json'), null);
+  if (raw == null || raw.version !== INSTALLED_FORMAT) return null;
+  if (raw.plugins == null || typeof raw.plugins !== 'object' || Array.isArray(raw.plugins)) return null;
+  return raw.plugins;
 }
 
 // This copy's install record: the entry whose installPath IS this plugin root, else an entry under
@@ -44,14 +53,13 @@ export function findInstall(local, deps = {}) {
   if (local == null) return null;
   const root = deps.pluginRoot == null ? PLUGIN_ROOT : deps.pluginRoot;
   const platform = deps.platform == null ? process.platform : deps.platform;
-  const raw = readJson(path.join(claudePluginsDir(deps), 'installed_plugins.json'), null);
-  if (raw == null || raw.version !== INSTALLED_FORMAT) return null;
-  if (raw.plugins == null || typeof raw.plugins !== 'object') return null;
+  const plugins = readInstalledPlugins(deps);
+  if (plugins == null) return null;
   let byVersion = null;
-  const keys = Object.keys(raw.plugins);
+  const keys = Object.keys(plugins);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
-    const entries = raw.plugins[key];
+    const entries = plugins[key];
     if (!Array.isArray(entries)) continue;
     for (let j = 0; j < entries.length; j++) {
       const entry = entries[j];

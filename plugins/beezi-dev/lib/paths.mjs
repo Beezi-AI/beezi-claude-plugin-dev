@@ -216,6 +216,19 @@ export function costStateSyncFile(key) {
   return path.join(key == null ? beeziHome() : accountDir(key), 'cost-state-sync.json');
 }
 
+// Project-scope enabled plugins the Stop hook saw, keyed by the folder holding the .claude
+// settings: { version, projects: { "<root>": { repo, project, local, seenAt } } }. Root-level like
+// the cost-state gate: the hourly sender reads it from a detached child that has no cwd of its own,
+// and pruneStale() would otherwise forget a project after a quiet fortnight.
+export function pluginProjectsFile() {
+  return path.join(beeziHome(), 'plugin-projects.json');
+}
+
+// When each workspace last took this account's plugin snapshot: { version, byTenant: { "<id>": { sentAt } } }.
+export function pluginsSyncStateFile(key) {
+  return path.join(accountDir(key), 'plugins-sync.json');
+}
+
 export function accountSyncStateFile(key) {
   return path.join(accountDir(key), 'account-sync.json');
 }

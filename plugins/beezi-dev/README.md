@@ -51,6 +51,16 @@ What it sends, per session and per repository/branch the session touched:
   first 12 characters, the last 4, and the length; for an Anthropic key the first 12 are the fixed
   key-type prefix (such as `sk-ant-oat01`). It lets Beezi tell which subscription pays for the
   usage. The credential itself cannot be rebuilt from it and is never sent.
+- **The Claude Code plugins enabled on this machine** — once an hour, the name, marketplace and
+  installed version of every plugin set to `true` in `enabledPlugins`: your user settings
+  (`~/.claude/settings.json`, `settings.local.json`), and the project settings
+  (`.claude/settings.json` as scope `project`, `.claude/settings.local.json` as scope `local`) of
+  folders you used Claude Code in during the last 30 days, with that folder's repository as above.
+  The Stop hook notes the project settings in `~/.beezi/plugin-projects.json`; the hourly background
+  worker sends the full list to `POST /me/claude-code/plugins`, empty when nothing is enabled, and
+  Beezi marks plugins that drop off the list as removed. A project's plugins go only to the
+  workspaces that folder's analytics go to, and never for a Don't track folder. Not sent to
+  workspaces without live tracking.
 - **Plugin diagnostics, only if you turn them on** with `/beezi:telemetry` — see
   [Plugin diagnostics](#plugin-diagnostics-beezitelemetry). They are off by default.
 
