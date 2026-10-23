@@ -1,0 +1,304 @@
+# beezi
+
+A Claude Code plugin that hooks into session lifecycle events (SessionStart, PostToolUse, SessionEnd) to collect and report token usage analytics for Beezi task branches. On session end it ships a summary — tokens consumed, tool calls made, and branch context — to the Beezi analytics endpoint so teams can track AI-assisted development cost and throughput per task.
+
+It also ships a personal analytics summary: the `analytics` skill (`skills/analytics/SKILL.md`) answers "how much did I spend this week?" in the terminal, covering your own last 7 or 30 days with an alert status and up to three recommendations. It is a thin launcher — the workflow, response format, and insight rules are served by `get_analytics_instructions`, so wording and rules change server-side without a plugin release. Data always covers the invoking user only, whatever their role or plan.
+
+The skill reaches the server over a `.mcp.json` stdio bridge (`scripts/mcp.mjs` → `lib/mcp-bridge.mjs`) that forwards MCP traffic authenticated with the default account's stored `/beezi:login` credentials — no separate MCP OAuth prompt. The bridge defaults to the production Beezi API; set `BEEZI_MCP_URL` to override.
+
+## Install
+
+```
+/plugin marketplace add <github-username>/<repo-name>
+# and
+/plugin install beezi@beezi
+```
+
+**Upgrading to 0.29.0: restart Claude Code once after the upgrade.** This release moves the
+credential store to a generation-based layout and changes how hooks load. The running session
+still holds the old modules in memory, so the first session started after the upgrade is the one
+that picks everything up; the plugin also prints this reminder once per machine. Nothing is lost
+if you do not — the machine stays linked either way — but authentication status and diagnostics
+only read correctly from a fresh session.
+
+## What this plugin sends, and where
+
+The plugin sends data to **one place: the Beezi API at `https://beezi-api-prod.azurewebsites.net`**.
+It sends nothing until you run `/beezi:login`, and nothing after `/beezi:logout`. The
+`/beezi:analytics` skill reaches the same API through the plugin's local MCP bridge
+(`scripts/mcp.mjs`).
+
+What it sends, per session and per repository/branch the session touched:
+
+- **Usage numbers** — input, output and cache token counts, per model and effort level; tool-call
+  counts by category (file, search, shell, MCP server name, skill name); active duration; start and
+  end times and your timezone; a working/waiting/idle timeline; lines added and removed per file
+  extension; and the line count of the `CLAUDE.md` the work ran under.
+  Past sessions carry the same numbers, but only after you say yes (see
+  [Past sessions](#past-sessions-only-after-you-say-yes)).
+- **Where the work happened** — the repository's `origin` remote with any credentials stripped, the
+  branch name and Beezi task id, and, for work outside a git repository, the folder name
+  (`local:<folder>`).
+- **The session name** that Claude Code shows in `/status`. Claude Code may derive it from your
+  first prompt.
+- **Claude API error events** — the error type and Claude Code's error message, such as a rate
+  limit or billing error.
+- **This machine and its Claude account** — the machine's hostname, your Claude account id and
+  email, the subscription type, and your plan's usage-limit levels.
+- **A fingerprint of each Claude credential set in this machine's environment** —
+  `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` when Claude Code runs
+  through a gateway, and `AWS_ACCESS_KEY_ID` when it runs on Amazon Bedrock. A fingerprint is the
+  first 12 characters, the last 4, and the length; for an Anthropic key the first 12 are the fixed
+  key-type prefix (such as `sk-ant-oat01`). It lets Beezi tell which subscription pays for the
+  usage. The credential itself cannot be rebuilt from it and is never sent.
+- **Plugin diagnostics, only if you turn them on** with `/beezi:telemetry` — see
+  [Plugin diagnostics](#plugin-diagnostics-beezitelemetry). They are off by default.
+
+**Anonymized workspaces.** Each workspace chooses which kinds of names it hides. For each kind it
+hides, everything sent to that workspace carries made-up names, such as `anon:repo:…`; the kinds it
+does not hide are sent as they are:
+
+- **Folders and repositories** — the repository remote and the `local:<folder>` name.
+- **Branches** — the branch name.
+- **Sessions** — the session name; subagent task descriptions and the text of Claude API errors are
+  left out.
+- **Computer names** — this machine's hostname.
+- **Accounts** — your Claude account email; the Claude organization name is left out. An email you
+  type to link a setup token to your account is hashed too.
+
+A made-up name is worked out on this machine from a key the workspace gives it, so the same repo or
+branch always gets the same one, and the real name is not sent once the workspace's setting is
+known. The first check at `/beezi:login` happens before that, so it still carries the hostname. A
+report waiting on this machine keeps every kind that was hidden when it was recorded, even if the
+workspace later turns one off. The session banner says which workspaces are anonymized, and `/beezi:settings account`
+shows the name this machine appears as when the workspace hides computer names.
+
+What it never sends: your prompts and Claude's replies, file contents, code, diffs, file paths,
+tool inputs or outputs, your Beezi or Claude sign-in tokens, and API keys.
+
+Two other network requests carry none of the data above:
+
+- **Sign-in**: `/beezi:login` opens your browser at Beezi's sign-in service, `https://clerk.beezi.ai`,
+  and the plugin exchanges the sign-in code there for its token. It registers this machine as a
+  sign-in client named "Beezi Claude Code plugin". `/beezi:logout` revokes that client.
+- **Update check**: the plugin reads this marketplace's public `marketplace.json` from
+  `https://raw.githubusercontent.com` to tell you when a newer version is out. That request sends
+  nothing but the fetch itself.
+
+Beezi stores your login token in the OS secret store (see [Credential storage](#credential-storage)).
+Local state lives in `~/.beezi/`.
+
+### Past sessions: only after you say yes
+
+Sessions from before this machine was linked to a workspace are never uploaded on their own. Before
+any upload, Beezi shows a summary per workspace: how many past sessions, their dates and folders,
+which names are sent as they are and which are hidden. It then asks **Upload** or **Not now**. It
+asks at `/beezi:login`, in terminal setup, at the start of a later session (after it has counted them
+in the background), and whenever you run `/beezi:sync`.
+
+- **Not now is remembered.** A question you dismiss counts as Not now. Beezi asks again only when
+  the workspace owner changes the past-sessions setting, or when a new rule or New folders sends a
+  folder to that workspace; then it asks only about that folder's sessions.
+- **The owner can turn the question off.** Login, setup and session start then ask nothing.
+  `/beezi:sync` still shows the summary and asks, and an upload you already accepted still finishes.
+- **Rules upload nothing.** Adding, changing or removing a rule only decides where analytics go.
+- **No answer uploads nothing.** Session start only asks Claude to run the question; Not now is
+  remembered only once the question was actually printed. A session that never shows the question
+  uploads nothing. Whether it remembers a decline depends on whether that session can ask, so the
+  next attended session may ask again.
+- **An upload hides what the question said was hidden.** Every kind the question listed as hidden
+  stays hidden for that upload, even if the workspace owner turns one off before it finishes.
+- **Declined sessions are not asked about again** at `/beezi:login`, in terminal setup or at session
+  start, but `/beezi:sync` still lists them.
+- **`/beezi:sync` offers have no link cutoff.** It offers every past session Beezi does not already
+  hold in full.
+- Sessions that run after the link are tracked live as before; the question never affects them.
+
+## Terminal setup
+
+The one-line installers finish by running `node scripts/setup.mjs` in your terminal. It asks the same questions
+as `/beezi:login` (account, new folders, plan, new workspaces and repos with no rule), shows the past-sessions
+summary for each workspace and asks whether to upload (Enter means No), then offers crash reports and the status
+line, all without a Claude Code session. For an account in several workspaces whose New folders was never set, it
+asks one question, "Where should analytics from this machine go?": pick a workspace to send everything there,
+starting with new repos and folders, or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
+script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
+earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
+run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
+as the fallback where keys cannot be read; `NO_COLOR` turns the colours off.
+
+## Commands
+
+- `/beezi:login` — link a Beezi account to this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores that account's credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). Run it again to add another account: the browser signs in as whichever Beezi account it is already signed in as, so sign out there (or use a private window) first. After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes by showing that account's past sessions and asking whether to upload them (see [Past sessions](#past-sessions-only-after-you-say-yes)) — re-running `/beezi:login` for an already-linked account is the way to refresh the plan.
+- `/beezi:settings` — one screen showing where this folder's analytics go, your rules, New folders, crash reports and the status line, then a menu to change them:
+  - `/beezi:settings rules` — for an account in several workspaces: a rule sends every session in one repo (matched by its `origin`, however it was cloned) or under one folder to the workspaces it names, or marks it not tracked. A repo rule wins first, then the folder rule with the longest matching path. Sessions in the home folder, `/` or a temp folder share one "outside a project" rule. While New folders is **Ask me**, the first session in a repo or folder with no rule asks once where its analytics go, and the answer becomes its rule; that session's data waits on this machine until it is answered. `/beezi:settings rules add` adds a rule for the current folder and `/beezi:settings rules remove <n>` removes one. A new or changed rule applies at once to open sessions there. A remote that uses an SSH host alias from `~/.ssh/config` (e.g. `git@github-work:org/repo`) is keyed by the alias, so its repo rule does not match the same repo's other clones.
+  - `/beezi:settings new-folders` — for an account in several workspaces, where analytics go for a repo or folder with no rule: **Ask me** (the default), **Send to** the workspaces you pick, or **Don't send**. `/beezi:login` asks once.
+  - `/beezi:settings account` — refresh your Claude plan, or pick which linked account is the default. Only `/beezi:analytics` and `/beezi:settings refresh` read from the default; session tracking goes to **every** linked account. To remove an account, use `/beezi:logout`.
+  - `/beezi:settings refresh` — re-capture this machine's Claude subscription plan (see Plan resolution below).
+  - `/beezi:settings telemetry <mode>` — plugin diagnostics (see below).
+  - `/beezi:settings statusline on|off` — wrap (or unwrap) your status line so Beezi records the plan-usage numbers Claude Code already computes for it; your status line keeps rendering unchanged.
+
+  Accounts in one workspace have no rules or New folders setting: their one workspace receives everything.
+- `/beezi:status` — one read-only screen: each linked account's sign-in and workspaces, where this repo's or folder's analytics go, this machine's Claude plan, whether the status line (and its optional Beezi badge) and crash reports are on, and the plugin: the installed version and the newest published one (always fetched fresh from the marketplace manifest; the last cached reading stands in when offline), when Claude Code last updated it on this machine and when it was first installed (read from Claude Code's own `~/.claude/plugins/installed_plugins.json`; unknown for a copy loaded from a local folder), its marketplace and auto-update setting, and — when a newer version is out — the `/plugin` and `claude plugin …` steps to update, the same commands the SessionStart update notice names. It replaces `/beezi:about` (removed in 0.39.1).
+- `/beezi:release-notes` — what changed in the installed version (with a line when a newer one is out) and the three before it; `/beezi:release-notes all` lists every version and `/beezi:release-notes 0.37.9` shows one. Read from the plugin's `RELEASE_NOTES.md`.
+- `/beezi:logout` — log one account (or all of them) out of this machine: asks the portal to drop that machine row and revoke that account's OAuth client, then deletes its credentials and its local state. Falls back to revoking directly at the auth server when the portal is unreachable; always logs out locally. If the account that was the default goes and others remain, it asks which one becomes the default.
+
+## Multiple accounts
+
+After upgrading to 0.31.0, restart Claude Code once so every hook uses the new account layout.
+
+Every write — session reports, timelines, error reports, usage snapshots, the account check-in,
+the history backfill and `/beezi:sync` — goes to **each** linked account, gated by that account's
+own tracking mode. For an account in several workspaces, the backfill and `/beezi:sync` route
+each past session by its own repo or folder — its rule, else the New folders setting — never by
+the session running the command; under **Ask me** both first ask about repos and folders with past
+sessions and no rule yet. Either way, nothing is uploaded until you answer Upload. `--tenant` on either is an override that sends every past session to the
+named workspaces. Reads go to one: the **default** account alone serves `/beezi:analytics` and
+`/beezi:settings refresh`. For an account in several workspaces a read uses one workspace — the
+one `/beezi:analytics 7d <workspace>` picked for this session, else the first one this session
+sends to, else the first New folders **Send to** workspace, else the account's first one. Plugin diagnostics remain machine-level and use the authorization-free delivery route.
+
+Per-account state lives under `~/.beezi/accounts/<key>/` — the credential store, the tracking
+mode, the audit ledger, the retry queue and the auth markers — with `~/.beezi/accounts.json` as
+the non-secret index naming the linked accounts and the default. Linking two users of the same
+workspace on one machine sends its usage to that workspace twice, so link only one of them. Nothing has to
+be done to upgrade — the existing single-account credential store and its root-level state migrate
+into the first account slot automatically on first run.
+
+## Plugin diagnostics (`/beezi:settings telemetry`)
+
+Off until you turn it on, per machine. When on, the plugin records structured facts about **its
+own** failures — plugin and Claude Code versions, OS, which plugin file failed, and the
+authentication state at the time. Never your code, prompts, file paths, or repository names.
+
+Delivery does not require authorization. Reports go to a public ingestion route with no
+`Authorization`, no `Cookie`, no hostname and no OAuth-client header, from a small detached worker
+triggered by hook startup and completion, handled crashes, authentication state changes, MCP
+startup failures and login failures. That is deliberate: an OAuth failure is exactly the failure a
+token cannot report.
+
+Account correlation is a **separate** opt-in. With it, a random installation UUID is minted, bound
+to your account the next time authenticated activity succeeds, and attached to later reports so
+support can find yours. It is stored outside the credential store, survives refresh failures and
+reauthorization, and is discarded when the last account is logged out.
+
+- `/beezi:settings telemetry correlate` — **recommended**: diagnostics on, with the installation ID
+  attached so support can find your report.
+- `/beezi:settings telemetry on` — the same diagnostics, anonymous, with no installation ID.
+- `/beezi:settings telemetry off` — everything off; pending reports and the installation ID are deleted.
+- `/beezi:settings telemetry anonymous` — drop the installation ID and the reports carrying it, keeping
+  anonymous diagnostics on.
+
+The one-time prompt offers all three, and recommends `correlate`. Recommending is all it does:
+nothing is collected until you answer, and `on` stays a first-class answer.
+
+Pending reports live in `~/.beezi/telemetry/`, are capped at 200 events, and expire locally after
+14 days.
+
+## History backfill
+
+The upload of past sessions, run only after you answer Upload (see [Past sessions](#past-sessions-only-after-you-say-yes)). It uploads exactly the sessions the summary counted. It scans every transcript under `~/.claude/projects/`, re-parses each one with the same code path the live hooks use (main transcript + subagents), and ships them in chunks of up to 50 reports to `/sessions/sync`, or to the backfill endpoint (`/sessions/backfill`) on audit workspaces; the server absorbs duplicates through its own upsert keys. An accepted upload never finalizes (seals) the pull. A workspace that an earlier plugin version already finalized is refused with a clear message — on audit workspaces it suggests upgrading the plan instead. A durable ledger at `~/.beezi/accounts/<key>/audit-ledger.json` means only sessions the server never judged are retried, and the ledger is bound to the login that wrote it; sessions an interrupted upload left behind are offered again. For an account in several workspaces, each past session goes only to the workspaces its own repo or folder routes to (see `/beezi:settings rules`); while New folders is **Ask me** and repos or folders with past sessions still have no rule, the next `/beezi:login` or `/beezi:sync` asks about them again.
+
+- **Claude's own cost record (0.30.0+; sent with segments since 0.33.1).** Claude Code writes its own whole-session cost accounting into the last records of a transcript. It is Claude's authoritative number (higher than anything the transcript can be tallied to: advisor iterations and retried API attempts never reach it). When a past session has one of those blocks, the backfill and `/beezi:sync` still run the **full segment path** for it and send the block **in the same chunk**: the server lets the block supersede only the segment-derived cost and tokens, and keeps everything the block cannot carry — billing and plan, the per-repository/branch split, subagents, operations (tools, MCP, skills, plugins), effort and mode breakdowns, and the timeline — from the segments. A block sent next to segments omits `repo_urls` (the server unions them, and the segments already name the repository), and a block with unknown-model cost is never sent next to segments (it does not supersede their tally server-side, so both would count). The block goes up **alone** only when the segment path has nothing to give: every line is already on the server (it then overlays the stored segments), or the transcript cannot be segmented (no working directory, unreadable, emit failure) — only then is the session limited to cost, token counts and a shell read off the transcript's head and tail (span, name, and the repository its first working directory resolves to, without shelling out to git). Sync asks `/sessions/coverage` about every Claude Code session; one an earlier version uploaded as a block alone has no line coverage, so it resumes from line 0 and gains its billing, operations and timeline. Before 0.33.1 a block replaced the segments outright, which is why sessions uploaded by those versions show **Unknown billing** until they are repaired. **The hourly background worker repairs some of them on its own** (since 0.32.3) (after its cost-record scan and Cowork sync): it takes the sessions this login's ledger records as accepted with zero reports, keeps only the ones this machine uploaded after a yes or tracked live, asks `/sessions/coverage` which of them the server holds no segments for, and runs exactly those through the `/beezi:sync` path — never any other history. It stops starting uploads a minute before the worker's 5-minute watchdog, so a large repair spreads over several hourly passes (a repaired session gains coverage and drops out). Once a pass leaves nothing it can fix, the account is stamped `segmentRepairAt` in its `cost-state-sync.json` and the repair never runs for it again; a refused workspace (`not-allowed`) is stamped too. Sessions imported before the link and never accepted at a question are left alone; `/beezi:sync` offers them, and repairs them once you answer Upload.
+- On workspaces with live tracking, the offer at `/beezi:login`, in terminal setup and at session start covers only transcripts from **before this machine was linked** (later work was already tracked live). `/beezi:sync` has no link cutoff: it offers every session the server does not already hold in full. Transcripts touched in the last 30 minutes are skipped as probably-open sessions.
+- On platform workspaces, only sessions whose repository is **connected to Beezi** can land; expect some to come back as "repository is not connected to Beezi". Analytics workspaces track every repo.
+- Plan and billing fields (`billing_source`, `subscription_plan`, `rate_limit_tier`) are read from the **current** environment, not from the historical session — an uploaded March session carries today's plan.
+- Session timelines travel inside the backfill chunks themselves, so backfilled sessions carry their activity timeline everywhere. Rate-limit events remain live-tracking-only — audit-mode datasets do not include them.
+- For manual runs, `node scripts/backfill.mjs --account <key>` without `--accept` counts each workspace's past sessions and prints the summary without sending anything. It still saves each workspace's offer, and remembers a workspace with nothing to offer as settled. The printed `upload-command=` (`--accept <workspace> --offer <token>`) then uploads exactly the sessions that offer counted; if the offer changed since it was printed, nothing is uploaded. `--since` and `--force` are no longer read.
+
+Analytics are otherwise tracked automatically via the session lifecycle hooks, and the history backfill only ever uploads sessions the hooks never saw. On audit-mode workspaces (no live tracking) the hooks stay silent by design: the server refuses live reports there, and the plugin caches that verdict in `~/.beezi/accounts/<key>/tracking.json` from the session-start `whoami`.
+
+## Plan resolution (which subscription this machine bills)
+
+Every report carries `subscription_plan` / `subscription_type` / `rate_limit_tier`, and they are read from **one** local file: `~/.beezi/billing.json`. Two very different things write it.
+
+- **The local capture** (`lib/billing-capture.mjs`, run by `/beezi:login`, `/beezi:settings refresh` and the SessionStart reconcile) asks Claude Code itself — `claude auth status` plus the non-secret account metadata in `~/.claude.json` — or takes the user's own answer when nothing observable exists.
+- **The server's key resolution** (`lib/key-resolution.mjs` for `/beezi:settings refresh`, `lib/oauth-key-status.mjs` for the SessionStart probe) asks Beezi what the *fingerprint* of this machine's `CLAUDE_CODE_OAUTH_TOKEN` has been attached to. Only the fingerprint (prefix, last 4, length) is ever sent; the token itself never leaves the machine.
+
+**On a setup-token machine the server wins, and the local capture is not consulted at all.** Claude Code 2.1.251 lets `CLAUDE_CODE_OAUTH_TOKEN` override the stored credential outright and writes nothing back to disk, so `~/.claude.json`'s `oauthAccount` keeps naming whichever account last signed in interactively. A local capture there does not read this machine's plan — it reads a previous login's leftovers. That is why `/beezi:settings refresh` asks the server **first** and only falls through to the local capture for machines the server says are not on a setup token. `lib/plan-writeback.mjs` is the one bridge back: whenever the server names a plan for this key — through `/beezi:settings refresh`, or through the cached SessionStart probe — it writes that plan into `billing.json` so the next report carries it. Best-effort throughout: a failed write is retried by the next session, never surfaced as an error.
+
+`billing.json` records where its plan came from in `planSource`:
+
+| `planSource`     | Meaning                                                                          |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `key_resolution` | the Beezi server's answer for this setup token's fingerprint (stamped with `keyFingerprint`, so it is never served under a different key) |
+| `claude_login`   | observed locally from `claude auth status` / `oauthAccount`                        |
+| `self_reported`  | what the user declared in `/beezi:login`                                           |
+| `unresolved`     | this machine signs in with a setup token and its plan is not knowable locally — nothing is reported rather than a leftover being reported as fact |
+
+A resolution the server does not have yet shows up as a SessionStart nudge pointing at `/beezi:settings refresh`, which is the same flow end to end: it reads the resolution, offers the plans and subscriptions the server listed, writes the answer back, and records it locally. Nothing about it needs the portal UI.
+
+**Switching auth modes, and key rotation.** A machine that captured its plan from an interactive login and later runs under `CLAUDE_CODE_OAUTH_TOKEN` is a different billing subject, but `anchorChanged` cannot see it: that check counts a mismatch only between anchors of the *same* source, and this is a cross-source pair (`email`/`account_uuid`/`user_id` on the record, `oauth_key` in force). `authModeSwitched` in `lib/billing-capture.mjs` covers exactly that gap — but only *asks* the question. The reset happens only once `claude auth status` positively confirms a setup token (`planSource: 'unresolved'`); a machine whose CLI is missing or slow falls through to the ordinary rules rather than stamping the previous login's plan onto the new key. Self-reported records are exempt throughout: the token may well belong to the account the user described. The transition is re-checked at most every 6h, and rotation (`oauth_key` → a different `oauth_key`) already fired through `anchorChanged` and still does.
+
+Once reset, the record carries `keyFingerprint` and nothing else that belonged to the old account. Two things then rely on it: `recordResolvedKeyData` stamps the server's answer with the key it was resolved for, and `shouldKeepExisting` refuses to let a local capture that could *not* see a key overwrite a record that belongs to one — which is what stops the weekly heartbeat, run while the token is invisible, from restoring the previous login's plan.
+
+**Moving back off a setup token (0.30.0+).** That guard has two escapes, and they exist because without them a key-scoped record was unreachable by every local action there is. `authModeReverted` opens the first on an automatic pass, once `claude auth status` positively answers for an interactive login; it excuses a plan the user *declared* (their testimony may still describe the token's account) but **not** a `key_resolution` plan, which is the portal's answer for a fingerprint rather than anything the user said — `plan-writeback.mjs` merges that answer onto whatever is on disk, so such a record keeps `selfReported: true` while its plan is the server's. The second escape is `force`: `/beezi:settings refresh` is the user asking for this record to be re-read, so it stands the guard down outright and a CLI that names a plan wins, declared records included. The cost is the honest limit stated in the code — on a machine whose token lives in a shell profile (invisible to all three env tiers) a forced refresh writes the previous login's plan — and the recovery is `/beezi:login`, which asks. The state it replaces had no recovery at all.
+
+**A key that inherited a subscription.** When the server reports `accountAnchored: true` alongside `planSource: 'reported'`, this key is bound to an account that some interactive sign-in established and nobody ever confirmed a plan for the key itself. The plan is still adopted — unpriced usage is worse — but the machine says so once per fingerprint (`~/.beezi/accounts/<key>/key-notice.json`), and `/beezi:settings refresh` repeats it every time it is run. It is a notice rather than a nudge because there is nothing the terminal can offer: `/link` refuses an account that carries its own identity, so re-pointing it is an admin's job.
+
+## Dependencies
+
+**Zero dependencies** — the plugin runs on Node built-ins alone (`package.json` declares no
+deps), so `/plugin install` works immediately with nothing to `npm install` or vendor, on
+every platform.
+
+## Credential storage
+
+Each linked account's `/beezi:login` token is stored in the OS secret store via its built-in
+CLI — no native module, no `npm install`:
+
+- **macOS** — the login keychain (`security add/find/delete-generic-password`).
+- **Linux** — the Secret Service / libsecret (`secret-tool`) when installed; otherwise the file fallback.
+- **Windows** — DPAPI (user-bound encryption via PowerShell); the ciphertext is kept in the file. (Credential Manager can store but not return a secret from the CLI, so DPAPI is used instead.)
+- **Fallback** — a `0600` file under `BEEZI_HOME/accounts/<key>/credentials/` (default `~/.beezi/`) whenever no store is available.
+
+## Development
+
+```bash
+npm test   # runs node --test (Node built-in runner, no jest); no install/build step
+```
+
+- ESM only: all source files are `.mjs`; `package.json` sets `"type": "module"`.
+- No build step, no dependencies.
+
+## Limitations & server contract
+
+- **Idempotency key**: the `segmentId` field (`"<session_id>:<fromLine>-<toLine>"`) is an idempotency key. Overlapping PostToolUse and SessionEnd hook processes can deliver the same segment more than once; the server MUST upsert on `segmentId`, not sum-on-insert.
+- **Transcript compaction**: if a transcript file is rewritten shorter than the persisted cursor (e.g. history compaction on the same session id), leading lines of the rewritten transcript may be skipped. This is a known limitation — no mitigation is applied client-side.
+- **Repo-root resolution**: a segment is billed to a repo when its lines resolve to a git repo root with an `origin` remote. Resolution is layered: `git rev-parse --show-toplevel` first, then a persisted known-root map (`~/.beezi/repo-map.json`, longest-prefix), then a filesystem walk-up (`.git` as dir **or** worktree file). Each transcript line's own recorded `cwd` is used as a signal when no file-path (`Read`/`Edit`/`Write`/`cd`) signal is present — this attributes signal-less lines (thinking / web-search / grep, and whole research subagents) and tracks `cd`s, instead of billing everything to the session's launch cwd. Origin is resolved via git, then a git-free `.git/config` parse (survives Windows *dubious-ownership*), then the map. A segment that still resolves to no repo (cwd genuinely outside any repo **and** no path signal), or to a repo with no reachable `origin`, is billed to a `local:<folder>` remote — only the folder's own name travels, never the path around it, and the `local:` prefix keeps it from ever canonicalizing onto a real remote server-side. The plugin never guesses a repo; it just refuses to throw the work away. The map is a self-healing hint: pre-warmed at SessionStart (launch cwd + a one-level child scan when the launch cwd is a multi-repo parent) and pruned of roots whose `.git` has vanished.
+- **Operation categories (`operations`)**: each segment carries a per-category `{ count, est_tokens }` breakdown (`file`, `search`, `internet`, `mcp`, `shell`, `skill`, `other`) derived from its `tool_use` blocks. `count` is exact. `est_tokens` is an **estimate** — the API bills tokens per assistant message, not per tool, so a tool's real cost (its result text) is approximated as the matched `tool_result` payload bytes ÷ 4. Cache tiering is ignored, and a `tool_use` whose `tool_result` lands in the next segment (repo/branch switch between call and result) contributes `count` but no `est_tokens`. Finer identity: `mcp.by_server` (`{ "<server>": count }` from the `mcp__<server>__<tool>` name), `skill.by_skill` (`{ "<skillId>": count }` from the `Skill` tool's `input.skill`), and a `plugins` cross-cut (`{ "<plugin>": { count, est_tokens } }`) grouping skill/MCP calls by the owning plugin — a skill id's namespace (`superpowers:tdd` → `superpowers`), `builtin` for a namespaceless skill, `unknown` for MCP (server→plugin is not in the transcript). `plugins` **overlaps** the `mcp`/`skill` category buckets, so it is a separate view — never summed alongside them.
+- **Subagent identity**: subagent segments (from `<sessionId>/subagents/agent-*.jsonl`) additionally carry `is_subagent: true`, `agent_id`, `agent_type` and `spawn_depth` (the latter two read from the sibling `agent-<id>.meta.json`, `null` when it is missing). Their token counts are the subagent's **real** per-message `usage` — the only exactly-attributable per-mode token total. `agent_type`/`spawn_depth` may be `null` on older Claude Code versions that omit the meta file.
+- **Session span vs. `duration_sec`**: `started_at`/`ended_at` mark when the session was *running*; `duration_sec` is the active clock inside it. They are derived from **different** line sets on purpose. Claude Code stamps lines when nobody is working — the `away_summary` recap (the last record in 107 of 231 local transcripts, sometimes an hour past the final turn), `--resume` bookkeeping, local slash-command echoes (`/clear` opened one session 236 minutes before its first prompt), injected `isMeta` context, `<synthetic>` placeholders, and the torn-down `Tool permission request failed: AbortError` result. Those set neither end of the span. They ARE still counted for `duration_sec`, because an attachment written mid-turn is real evidence the agent was working — filtering them there under-counted billed time by 2.7%. Line numbers are never filtered, so `segmentId` ranges stay stable and a live-reported session still upserts onto its row when the backfill re-reads it.
+- **Timeline states (`periods[*].state`)**: `working`, `planning`, `waiting_user`, `idle`, and `break`. **`break` is newer than the others — a client that does not know it must not drop the period or fail to render.** It marks a gap of at least 6h (`BREAK_GAP_SEC`), meaning the session was abandoned and later resumed rather than waited on; locally 16 such bands are 45% of all charted time, so charting them as `waiting_user` made a session look days long. The test is duration only, never a calendar-day boundary: a 23:50→00:20 pause is 30 minutes of stepping away and stays `waiting_user`. A gap ending at a subagent `<task-notification>` stays `idle` at any length — the main thread was blocked on its own agent, which is real work. `started_at`/`ended_at` still span the break; nothing is deleted. `waiting_user` also covers every wait the agent spends blocked on a **human decision**, even though the answer arrives as a `tool_result` rather than a turn-start and so used to fall through to `idle` or `planning`: a pending **`AskUserQuestion`**, an **`ExitPlanMode`** plan awaiting approval or rejection, and a **declined permission prompt** (the `The user doesn't want to proceed with this tool use` result, which any tool can return). Presenting a plan ends the planning — what follows is the human deciding — so this deliberately moves plan-approval waits out of `planning`. `planning` also covers **skill-plan windows** (a planning skill invoke through the last plan-document write — see **Plan events** below), where `waiting_user` outranks it identically. `idle` is then exactly what it claims: the gap between two AGENT activities with no human action in between. Across 228 local transcripts all 547 idle bands are agent-closed (subagent completions, tool results, assistant turns) and all 981 `waiting_user` bands are human-closed. Ordinary tool_results are unaffected — a 22-minute `Bash` build, or one that fails with `Exit code 128`, is still `idle`, not the human deciding. A decision left unanswered past `BREAK_GAP_SEC` is still a `break`.
+- **Waiting subtype (`periods[*].waiting_subtype`)**: present **only** on `waiting_user` periods, and only from plugins 0.25.0 and newer — an absent key means the timeline predates the field, which is deliberately NOT the same as `next_instruction`. One of `plan_approval` (an `ExitPlanMode` plan awaiting approval or rejection), `question_answer` (a pending `AskUserQuestion`), `command_approval` (a tool permission prompt on screen, whether the human went on to approve or decline it), or `next_instruction` (the turn ended and the agent is waiting for the human to say what is next). Every value names what was being waited ON, never the event that ended the wait. A waiting run SPLITS where the subtype changes, so two adjacent waits for different reasons are two periods — total waiting time is unchanged, but the period count is higher than it was before 0.25.0. `plan_approval`, `question_answer` and declined `command_approval` come from the transcript and so appear on backfilled sessions too; an APPROVED permission prompt leaves no transcript trace and is known only from the `PermissionRequest` hook, so it is present on live sessions and absent from older backfills. Charging approved prompts to the human moves time that earlier releases charted as `working` or `idle` into `waiting_user`.
+- **Plan events (`plan_events`)**: discrete `{ type: "plan_start" | "plan_ready", at }` markers, from **two detection mechanisms** sharing one event vocabulary. *Built-in plan mode*: `plan_start` when the plan permission mode is entered (the change line carries no timestamp, so the marker anchors to the next timestamped line), `plan_ready` at the `ExitPlanMode` tool_use. *Skill-based planning*: `plan_start` at a `Skill` tool_use whose id's last `:`-segment has a token starting with `plan`/`spec`/`brainstorm` (tokens starting with `execut`/`implement` disqualify — `executing-plans` consumes a plan, it doesn't produce one); `plan_ready` at the **last** write of a plan document before the cycle closes — a `.md` file (exactly, never `.mdx` or others) whose **basename** contains `design`/`spec`/`plan`, or sitting directly in a folder named **exactly** `plan(s)`/`spec(s)`/`design(s)` (never a substring match on the folder — sdd execution dirs like `.superpowers/sdd/<date>-<slug>-design/` hold `progress.md`/`task-N-report.md` artifacts and must read as implementation, not plan). A cycle closes at the first non-plan file edit after a plan write (implementation started), at the next planning or execution skill, when built-in plan mode starts, or at end of transcript; writes under a `.claude` directory (memory saves, scratchpads) are neutral — they neither advance nor close a cycle. A matching `.md` write with **no** preceding planning skill emits nothing; a planning skill with no plan document emits a lone `plan_start` and paints no band. Skill entries are suppressed while built-in plan mode is active (that window already emits its own pair). A cycle still open at end of transcript emits `plan_ready` at the last write so far, so on a live session the value slides later on each re-post until implementation begins — the server upserts by session, so this converges rather than drifts. Known false negatives: skills invoked via slash-command echo (not a `Skill` tool_use) and anything inside subagent transcripts are not detected.
+- **Reasoning effort (`models[*].by_effort`)**: each `models` entry carries an optional `by_effort` record — `{ "<effort>": { token_input, token_output, token_cache_read, token_cache_creation, requests } }` — read from the transcript's top-level per-message `effort` field (an **open vocabulary**: `medium`/`high`/`xhigh`/`max` today, new values may appear with Claude Code releases). Lines without the field (older Claude Code versions) land in the `"unknown"` bucket, so the buckets always partition the parent model tally. Servers must treat unknown effort keys as data, not reject them.
+
+- **Advisor calls (`usage.iterations`)**: an assistant turn's `usage` splits into `iterations` — one leg per API call the turn actually billed — and the top-level `input_tokens`/`output_tokens`/`cache_*` fields sum **only** the legs of type `message`. A leg of type `advisor_message` (the advisor tool's own uncached call) is excluded from them, so a reader that trusts top-level alone silently drops it: on one measured session that was 1,229,631 input and 29,140 output tokens, **$9.37 of a $57.20 session — 16% of its real cost**. Those legs are now tallied into `models` under the leg's own `model` (falling back to the parent's when absent) and into the parent line's effort bucket, each counting as one more `requests`. Consequences for the server: a session may now report a **model it never sees as a message model**, and advisor legs carry **zero cache tokens with large `token_input`** — priced at the full input rate, not the cache-read rate. Only `advisor_message` is folded in; any other future leg type is ignored, because a leg that already sits inside the top-level totals would otherwise be counted twice and over-report the user's spend.
+  - Not fixed here, and still known-wrong: `usage.cache_creation.{ephemeral_5m,ephemeral_1h}_input_tokens` is **partial** on advisor-carrying turns (7 of 267 records in the same session, 10,064 tokens short of `cache_creation_input_tokens`). The plugin only reads that object as a fallback when `cache_creation_input_tokens` is absent, but anything pricing the 5m/1h split must sum it from `iterations[].cache_creation` instead.
+
+- **Where the setup token is read from**: Claude Code documents two homes for `CLAUDE_CODE_OAUTH_TOKEN` — a shell export, and the `env` block of a settings file. Neither reaches a hook by inheritance: verified against the shipped Claude Code bundle 2.1.251, its child-environment builder does `delete d.CLAUDE_CODE_OAUTH_TOKEN` for **every** subprocess it spawns (hooks, stdio MCP servers, the Bash tool, LSP servers, plugin commands), with no platform branch — macOS behaves exactly like Windows. A settings-file value does land in Claude Code's own `process.env`, and is then scrubbed on the way out again. So the token has to be recovered rather than inherited, over a three-tier chain: `process.env` → the user settings file (`lib/claude-settings-env.mjs`, filling that one key from `~/.claude/settings.json` / `settings.local.json`, honouring `CLAUDE_CONFIG_DIR`) → the OS-level persistent environment (`lib/os-env-token.mjs` — Windows registry env, macOS `launchctl`). Every tier passes the same `keyFingerprint` gate, so a stub export identifies nothing and a real settings token replaces it. **User scope only** for the settings tier: project `env` values apply only after the folder is trusted, so reading them here could adopt a token Claude Code itself refused to use. The OS-environment tier may spawn subprocesses and is therefore a **separate** resolver (`oauthTokenEnvWithOsProbe`) that each caller opts into by name — `oauthTokenEnv` stays spawn-free, because it is reached through default parameters where a hidden spawn would be invisible at the call site. It runs only after the two cheap tiers came up empty, so a machine that already knows its token never probes. An injected `deps.env` is always trusted verbatim, so tests never touch a developer's own settings file or registry.
+- **Account identity is per subscription, and per session**: one Claude login can hold several subscriptions (a personal plan and a company org) under the **same** `accountUuid` and email; only `oauthAccount.organizationUuid` tells them apart. Session reports and usage snapshots therefore carry `account_org_uuid` / `account_org_name` next to `account_uuid` / `account_email`, and the account check-in carries `organizationUuid` / `organizationName` (part of its change hash, so an org switch re-syncs). The server keys accounts on `(accountUuid, organizationUuid)`. The stamp comes from the session's **live** login (`~/.claude.json`, honouring `CLAUDE_CONFIG_DIR`) ahead of the machine-wide `billing.json`, so a session that outlives an account switch keeps stamping the login it ran under — except on a record that belongs to a setup key, where `billing.json` still answers. Status-line rows record the account and organization they were observed under, and are drained under that identity. All of these keys are omitted, never nulled, when unknown.
+- **Account identity when `CLAUDE_CODE_OAUTH_TOKEN` is set**: a machine exporting a fingerprintable setup token (>= 20 chars) identifies **by that token alone**. The account check-in omits `accountUuid`, `email` and the organization and carries only the `keys` entry of kind `claude_oauth_token` (`prefix` / `last4` / `length`); each session report likewise omits `account_uuid` / `account_email` / `account_org_uuid` / `account_org_name` and carries `oauth_key_prefix` / `oauth_key_last4` / `oauth_key_length`. Rationale: a setup token is the auth method of CI runners and re-provisioned boxes, where `~/.claude.json`'s `oauthAccount` and `claude auth status --json` describe whatever login last touched the disk — and both are matched BEFORE the fingerprint server-side, so sending them alongside would not add a second opinion, it would let the stale one win outright. Identity only: the plan fields (`subscriptionType`, `rateLimitTier`) still come from the CLI + `oauthAccount` merge and still ride along. Suppression is at the payload boundary — the values stay in `billing.json`, so unsetting the token restores the previous behaviour. Anchor source is an open vocabulary: `oauth_key`, `email`, `account_uuid`, `user_id`.
+- **The fingerprint is never an identity claim**: it is low-entropy (`sk-ant-oat01` prefixes every setup token, so `last4` + `length` carry the whole identity) and unverifiable, so the server must never resolve an account *from* it. What it establishes is that the machine bills a subscription. The account comes from the **caller's own membership** — evidence the server already holds — and the credential row is then bound to it. Two consequences a server implementer must preserve: (a) a check-in that resolved its account from anything weaker than a vendor-issued `accountUuid` may **fill** an empty credential→account binding but must never **move** an existing one, or whoever wrote last captures every other reporter's sessions through the fingerprint arm; (b) the fallback finds an account, never creates one — minting one per key would forge a new human on every token rotation and merge everyone behind a shared org key into one person.
+- **The account row for a token-only user is created from the credential**: when the caller has no vendor account at all (a CI runner whose user never logged in from an ordinary machine), the check-in mints an account row with no `account_uuid` and no `email` and binds the setup-token credential to it — the fingerprint stays stored once, on `cli_agent_credentials`, and the account is identified by the FK that reaches it. Serialization rests on the credential row's own lock, so no unique index on the account side is involved. The first later check-in that reports a real `accountUuid` alongside the same fingerprint **absorbs** that anonymous row into the canonical one, carrying its links, credentials, sessions and errors — without that merge the same human would count as two seats forever.
+- **Accepted limits of token-only identity**: rotating the setup token mints a new credential and therefore a new account row; only a uuid-bearing check-in heals the split. A user belonging to several vendor accounts gets the most recently active one; no client-side signal can do better, since the usage cache's own `accountUuid` comes from the same stale file. Retrospective ingest (`/beezi:sync`) resolves against the binding *current at upload time*, so history from before a token changed hands lands on the token's current account.
+- **Usage snapshots are unaffected**: `account_uuid` there names the account the *rate-limit numbers* belong to, and that endpoint accepts no credential fingerprint, so it is never suppressed.
+
+## Cached Cowork sessions
+
+Beezi also reads Claude Desktop's local Cowork conversation cache on Windows and macOS. `/beezi:sync` imports cached sessions using Claude's final cumulative model usage, including auxiliary models, and starts a live host worker. Successful login and `SessionStart`/`Stop` also start it. After updating/reloading the plugin, run `/beezi:sync` once on the machine running Desktop to start live tracking without another Code session.
+
+The live worker continues independently while Claude Desktop is open, including while Cowork is idle. It checks cache metadata every 5 seconds and parses changed data at most once every 15 seconds. Completed-turn cumulative results are eligible immediately; there is no 30-minute delay on this live path. Updates normally arrive within one polling/scan interval after Desktop caches a completed result, plus network time. This is completed-turn tracking, not a streaming token meter: active partial messages are not reliable cost totals. Unchanged accepted snapshots are not resent; transient cache/auth/network failures retry with backoff from 15 seconds to 5 minutes.
+
+The worker checks Desktop process liveness every 30 seconds and exits after 2 minutes of confirmed app absence, 5 minutes of unavailable process checks, or when no eligible linked live-tracking account remains. It rechecks account eligibility before every new HTTP request; a request already sent can still finish. A heartbeat/ownership lease permits one worker and recovers stale crashed workers; a pass that hangs for 5 minutes exits the worker. The next host hook, login or `/beezi:sync` restarts it. Closing/reopening Desktop within the grace period preserves tracking; opening it later requires one of those start events. No OS service or startup installation is added. Diagnostics (state, stop reason, scan count and pending retry) are in `~/.beezi/cowork-live.json`, or the corresponding `BEEZI_HOME`.
+
+This requires a plugin process on the machine containing Desktop's cache. Remote Cowork hooks cannot read the host cache, Linux Desktop liveness is unsupported, and this checkout does not automatically update an already installed plugin. The existing hourly/manual historical import still defers recently active sessions; the live worker is the immediate path.
+
+Cowork records use the runtime session UUID to avoid duplicating a matching Claude Code session. Uploads use the existing session-sync cost-state contract, with `Cowork` as the session name. The API currently groups these under the existing Claude Code transport source; a separate Cowork dashboard category requires backend support. Stored fields are model token/cost counters and session timestamps, not prompts, responses, tool arguments, account identifiers from the cache, or local folder paths. Reported dollars are Claude's recorded cost estimates, not subscription charges.
+
+Repeated cumulative snapshots are upserted rather than added. The per-account audit ledger retains the last accepted snapshot so older or incomplete local caches cannot lower its counters; sync operations share a local lock. This cannot prevent an older snapshot from another machine overwriting a newer one on a server without revision checks.
+
+The reader is bounded and read-only. It follows LevelDB's manifest, validates checksums, reconstructs journal fragments, and decodes supported IndexedDB values. Unsupported/corrupt cache formats produce a sync warning and remain retryable. Claude can evict cache entries, and cloud sessions never opened on this machine may be absent; the cache is not a complete session archive.
+
+As with existing Claude Code history imports, locally cached history is sent to each eligible linked Beezi workspace. Switching Claude accounts can leave earlier accounts' cached sessions on the same OS profile; this reader does not infer a Beezi-to-Claude account mapping.

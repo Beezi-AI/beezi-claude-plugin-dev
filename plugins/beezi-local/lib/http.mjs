@@ -1,0 +1,85 @@
+// Bounded HTTP with a timeout: an authenticated POST of a JSON body, and an unauthenticated GET
+// returning parsed JSON. Both throw on network error or timeout (caller catches).
+// The timeout guards the hook's 10s budget — a hung server must not stall the turn.
+import os from 'os';
+import { machineHeaders } from './machine-identity.mjs';
+import { anonymizationFor, hasKind } from './anonymization.mjs';
+import { AnonKind, anonHost } from './anonymize.mjs';
+import { resolveFetch } from './fetch-compat.mjs';
+import { resolveAbortController } from './abort-compat.mjs';
+import { gzipJson } from './gzip-body.mjs';
+
+const DEFAULT_TIMEOUT_MS = 3000;
+export const HISTORY_CONSENT_HEADER = 'x-beezi-history-consent';
+export const HISTORY_CONSENT_VALUE = 'ask-first';
+
+// The raw hostname, its hash when the block hides hosts, or null (header omitted) when hosts has no key.
+function hostFor(block) {
+  if (!hasKind(block, AnonKind.HOSTS)) return os.hostname();
+  return block.key == null ? null : anonHost(block.key, os.hostname());
+}
+
+export function authHeaders(session) {
+  if (session == null || typeof session.token !== 'string' || !session.token) {
+    throw new TypeError('An authenticated account session is required.');
+  }
+  const tenantId = typeof session.tenantId === 'string' && session.tenantId !== '' ? session.tenantId : null;
+  const headers = {
+    Authorization: `Bearer ${session.token}`,
+    ...machineHeaders(session.clientId, { host: hostFor(anonymizationFor(session, tenantId)) }),
+    [HISTORY_CONSENT_HEADER]: HISTORY_CONSENT_VALUE,
+  };
+  if (tenantId != null) headers['X-Beezi-Tenant'] = tenantId;
+  return headers;
+}
+
+export async function postJson(url, session, body, deps = {}) {
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const timeoutMs = deps.timeoutMs == null ? DEFAULT_TIMEOUT_MS : deps.timeoutMs;
+  // Compressed before the timer starts, so gzip time never counts against the request timeout.
+  const gzipped = deps.gzip === true ? await gzipJson(body) : null;
+  const AbortControllerImpl = resolveAbortController();
+  const controller = new AbortControllerImpl();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        ...authHeaders(session),
+        'Content-Type': 'application/json',
+        ...(gzipped == null ? {} : { 'Content-Encoding': 'gzip' }),
+      },
+      body: gzipped == null ? JSON.stringify(body) : gzipped,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Bounded, UNAUTHENTICATED GET returning parsed JSON.
+//
+// Deliberately takes no token and sends no machineHeaders(): its only caller reads a PUBLIC
+// marketplace manifest from raw.githubusercontent.com, and this plugin's bearer token must never
+// leave the Beezi API host. The absent token parameter is the guarantee — do not add one.
+// Throws on network error, timeout, non-2xx, or a body that is not JSON; the caller catches.
+export async function getJson(url, deps = {}) {
+  const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
+  const timeoutMs = deps.timeoutMs == null ? DEFAULT_TIMEOUT_MS : deps.timeoutMs;
+  const AbortControllerImpl = resolveAbortController();
+  const controller = new AbortControllerImpl();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal,
+    });
+    if (res == null || res.status < 200 || res.status >= 300) {
+      throw new Error(`GET failed with status ${res == null ? 'none' : res.status}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}

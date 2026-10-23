@@ -26,6 +26,17 @@
         "url": "https://beezi.ai"
       },
       "license": "Apache-2.0"
+    },
+    {
+      "name": "beezi-local",
+      "source": "./plugins/beezi-local",
+      "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — local environment build.",
+      "version": "0.40.0-local.5961",
+      "author": {
+        "name": "Beezi",
+        "url": "https://beezi.ai"
+      },
+      "license": "Apache-2.0"
     }
   ]
 }

@@ -1,0 +1,272 @@
+import { parseAccountFlag, getDefaultKey, getAccount } from '../lib/accounts.mjs';
+import { anonymizationScope } from '../lib/anonymization.mjs';
+import { getAuthentication, INTERACTIVE_REFRESH_WAIT_MS } from '../lib/token.mjs';
+import { AUTH_STATES } from '../lib/auth-state.mjs';
+import {
+  fetchKeyResolution,
+  submitKeyPlan,
+  submitKeyLink,
+  formatLinkOutcome,
+} from '../lib/key-resolution.mjs';
+import {
+  recordResolvedKeyPlan,
+  recordResolvedKeyData,
+  resolvedKeyDataFrom,
+  submittedPlanFrom,
+} from '../lib/plan-writeback.mjs';
+import { hasOauthTokenIdentity } from '../lib/oauth-identity.mjs';
+import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
+import { reconcileBillingConfig } from '../lib/billing-capture.mjs';
+import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
+import { clearOauthKeyStatus } from '../lib/oauth-key-status.mjs';
+import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
+import { parseCommandTargets, parseCommandReadTenant, parseTenantFlags, tenantById, isMultiTenant, resolveTargets, currentSessionWorkspace } from '../lib/workspace.mjs';
+
+// Thin entrypoint for the interactive key-resolution flow in /beezi:settings refresh.
+//
+// `status` prints exactly ONE JSON object on stdout — on every path, including the failures (a
+// malformed flag such as a bad or repeated --tenant is a usage error and prints ✗ on stderr). The
+// model parses it and turns selectablePlans / subscriptions into AskUserQuestion options, so a
+// human sentence printed to stdout instead would break the parse; the sentence rides inside the
+// object's `message` instead. The two write subcommands are for a human to read and print one
+// line each.
+//
+// Nothing here ever prints the setup token. Only its fingerprint (prefix / last4 / length) exists
+// on this side of lib/key-resolution.mjs at all.
+//
+// Every path that ends with the server naming a plan for THIS key also writes that plan into
+// billing.json (lib/plan-writeback.mjs). Without it the resolution stayed portal-side and every
+// session report kept shipping whatever a previous interactive login left on disk. The write is
+// best-effort and never speaks: the sentence the user reads is about the resolution, not about a
+// local file, and a failed write is corrected by the next session start asking the portal again.
+
+// Two modes in one invocation is a malformed call, not a preference. The model generates these,
+// and last-wins would quietly perform one of the two writes it was asked for.
+function setMode(out, mode) {
+  if (out.mode != null && out.mode !== mode) {
+    throw new UserError('Pick one: status, --plan <plan>, or --target <email-or-account-id> — not several at once.');
+  }
+  out.mode = mode;
+}
+
+export function parseArgs(argv) {
+  const out = { mode: null, plan: null, target: null };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === 'status') setMode(out, 'status');
+    else if (arg === '--plan') { setMode(out, 'plan'); out.plan = argv[++i]; }
+    else if (arg === '--target') { setMode(out, 'link'); out.target = argv[++i]; }
+    else throw new UserError(`Unknown argument "${arg}". Usage: key-resolve.mjs status | --plan <plan> | --target <email-or-account-id>`);
+  }
+  if (out.mode == null) {
+    throw new UserError('Nothing to do. Usage: key-resolve.mjs status | --plan <plan> | --target <email-or-account-id>');
+  }
+  if (out.mode === 'plan' && (out.plan == null || out.plan === '')) throw new UserError('--plan needs a plan value.');
+  if (out.mode === 'link' && (out.target == null || out.target === '')) {
+    throw new UserError('--target needs an email address or an account id.');
+  }
+  return out;
+}
+
+// The env every call in this file is judged by, in the three places a setup token can live:
+//
+//   1. process.env — where it is in a session Claude Code did not scrub it out of.
+//   2. The `env` block of the user's Claude settings.
+//   3. The OS-level persistent environment.
+//
+// All three tiers live in ONE place — oauthTokenEnvWithOsProbe in lib/claude-settings-env.mjs,
+// which the SessionStart and checkpoint hooks use as well. A second copy of the chain here would
+// drift from theirs the first time either changed.
+//
+// Step 3 exists because of a verified fact about Claude Code (2.1.251): it deletes
+// CLAUDE_CODE_OAUTH_TOKEN from the environment of EVERY subprocess it spawns, this script
+// included, on every platform. So "process.env has no token" says nothing about whether the
+// machine has one — see lib/os-env-token.mjs for what the probe costs on each platform. Resolving
+// it in main() rather than inside runStatus is deliberate: /beezi:refresh is
+// several separate processes (status, then --plan or --target), and each of the three lib calls
+// re-derives the fingerprint from the env it is given, so a recovery that reached only `status`
+// would strand the user's answer on the very next invocation.
+
+// `checkIn` is false when the status workspace is not one this session sends to: no recovery write there.
+// `workspace` (multi-workspace accounts only) names the workspace read from on every answer.
+async function runStatus(token, env, auth, checkIn, workspace) {
+  const emit = (object) => console.log(JSON.stringify(workspace == null ? object : { ...object, workspace }));
+  if (!token) {
+    // `not_linked` is a verdict about the machine and the model turns it into "run /beezi:login".
+    // It may only be said when the store actually answered "there is nothing here". A store that
+    // was too busy to answer gets its own status, so the model stops proposing a login that
+    // cannot help — the misreport that had this user log in three times and reinstall.
+    const unlinked = auth == null || auth.authState === AUTH_STATES.UNLINKED;
+    emit(unlinked
+      ? {
+        ok: false,
+        status: 'not_linked',
+        message: 'Beezi: this machine is not linked. Run /beezi:login to link it.',
+      }
+      : {
+        ok: false,
+        status: 'auth_unavailable',
+        authState: auth.authState,
+        authReason: auth.reason,
+        message: 'Beezi: this machine is linked, but its saved login could not be read just now. '
+          + 'Nothing was removed — try /beezi:settings refresh again in a moment.',
+      });
+    return;
+  }
+  // Answered before any request, and with the SAME predicate the fingerprint uses, so the two
+  // cannot drift: "there is no key here" and "the portal did not answer" are opposite actions.
+  // `env` has already been through all three homes of the token (see main()), so reaching
+  // here means the machine genuinely has none — not merely that Claude Code scrubbed it out of
+  // this process, which by itself is true of every session.
+  if (!hasOauthTokenIdentity(env)) {
+    // The overwhelming majority of machines reaching this line have never heard of a setup token,
+    // and the command's own answer for them is the ordinary local capture that follows. So the
+    // message says what happens next in one plain sentence, and /beezi:refresh prints nothing for
+    // this status at all — a paragraph about CLAUDE_CODE_OAUTH_TOKEN, its scrubbing and where to
+    // re-home it was the loudest thing in the command for the users it least applied to.
+    //
+    // `hint` carries what that paragraph was for, unprinted. One home of the token stays invisible
+    // from here whatever we do: a plain `export CLAUDE_CODE_OAUTH_TOKEN=...` in a shell profile is
+    // the documented, most common way to set one, and Claude Code deletes the variable from every
+    // subprocess it spawns — this script included — so an exported token that the session is
+    // actively authenticating with reaches us as nothing at all. Those users are exactly the ones
+    // the local capture answers wrongly (it reads a previous login's leftovers), and this field is
+    // what a support conversation or a log has to explain it with.
+    emit({
+      ok: false,
+      status: 'no_key',
+      message: 'Beezi: this machine does not sign in with a Claude setup token — its plan is read from the Claude login instead.',
+      hint: 'A setup token exported in a shell profile is invisible to this plugin: Claude Code removes CLAUDE_CODE_OAUTH_TOKEN from every command it runs. Put it in the "env" block of ~/.claude/settings.json (or the OS user environment) if this machine uses one.',
+    });
+    return;
+  }
+  // Clean before asking. If billing.json still describes the interactive login this machine used to
+  // run under — or a key it no longer has — the reconcile's auth-mode/rotation detection resets it
+  // to hold only what belongs to the key in force. Reused rather than reimplemented: a second
+  // cleanup path here would be free to drift from the one the session-start hook runs.
+  // A record already scoped to this key is a no-op. Best-effort, like every other reconcile call.
+  try { reconcileBillingConfig({ env }, { via: 'refresh' }); } catch { /* best-effort */ }
+
+  let payload = await fetchKeyResolution(token, { env });
+
+  // A key the portal has never seen cannot be resolved: /key-resolution/plan and /link both refuse
+  // a fingerprint with no account behind it. Only the account check-in registers one, so run it and
+  // ask again rather than telling the user to come back next session — the whole point of them
+  // typing this command is that they want it settled now. `force` skips the unchanged-payload gate,
+  // which would otherwise send nothing at all on a machine whose payload has not moved.
+  if (payload != null && payload.status === 'unknown_key' && checkIn) {
+    try {
+      await syncAccountIfNeeded(token, { force: true, via: 'refresh' }, { env });
+      const reprobed = await fetchKeyResolution(token, { env });
+      if (reprobed != null) payload = reprobed;
+    } catch { /* best-effort — the unknown_key answer below is still honest */ }
+  }
+
+  if (payload == null) {
+    // "Could not ask", never "not resolved": a machine that cannot reach the portal must not be
+    // told its key is unresolved, because that is not what it observed.
+    emit({
+      ok: false,
+      status: 'unavailable',
+      message: 'Beezi: could not reach the server to read this key’s subscription. Check your connection and try again.',
+    });
+    return;
+  }
+  // `key` is dropped from the emitted object: the fingerprint has no consumer in the question the
+  // model is about to ask, and there is no reason to put last4 into model context on every call.
+  // It stays on the lib's return value for callers that do want it.
+  const { key, ...rest } = payload;
+  emit({ ok: true, ...rest });
+  // A key the portal already resolved is an authoritative answer for this machine, not just
+  // something to print: adopt it so the reports stop carrying the old login's plan without the user
+  // having to answer a question they are about to be told they do not need to answer. The whole
+  // payload, not just the plan — the type, tier and account email are equally unknowable locally.
+  const resolved = resolvedKeyDataFrom(payload);
+  if (resolved != null) recordResolvedKeyData(resolved);
+}
+
+// This session's send targets; [null] for one or unknown workspaces.
+function sessionTargets(row) {
+  return isMultiTenant(row) ? resolveTargets(row, currentSessionWorkspace()).targets : [null];
+}
+
+function tenantLabel(row, tenantId) {
+  const t = tenantById(row, tenantId);
+  return t != null && t.name ? t.name : tenantId;
+}
+
+async function main() {
+  const { account: selected, rest } = await parseAccountFlag(process.argv.slice(2));
+  const account = selected || await getDefaultKey();
+  const row = account ? await getAccount(account) : null;
+  const parsed = parseArgs(parseTenantFlags(rest, row).argv);
+  let tenantIds;
+  if (parsed.mode === 'status') {
+    // `status` reads one workspace: the session's read workspace, never a guess among several targets.
+    tenantIds = [parseCommandReadTenant(rest, row).tenantId];
+  } else {
+    // Key resolution is account-level, so a session that sends nowhere still finishes it in the read workspace.
+    try {
+      tenantIds = parseCommandTargets(rest, row).tenantIds;
+    } catch (error) {
+      if (error == null || error.workspaceRequired !== true) throw error;
+      tenantIds = [parseCommandReadTenant(rest, row).tenantId];
+    }
+  }
+  const auth = await getAuthentication({}, { account, waitMs: INTERACTIVE_REFRESH_WAIT_MS }).catch(() => null);
+  const tokenFor = (tenantId) => (auth != null && auth.authState === AUTH_STATES.READY ? { key: account, token: auth.accessToken, clientId: auth.clientId || (row && row.clientId), tenantId, ...anonymizationScope(row) } : null);
+  const env = oauthTokenEnvWithOsProbe(process.env);
+
+  if (parsed.mode === 'status') {
+    const workspace = isMultiTenant(row) ? tenantLabel(row, tenantIds[0]) : null;
+    await runStatus(tokenFor(tenantIds[0]), env, auth, sessionTargets(row).indexOf(tenantIds[0]) !== -1, workspace);
+    return;
+  }
+
+  // Submitted to every target workspace; local state is recorded on the first acceptance and refusals are reported after.
+  const several = tenantIds.length > 1;
+  const named = (tenantId, line) => (several ? `${tenantLabel(row, tenantId)}: ${line}` : line);
+  const failures = [];
+
+  if (parsed.mode === 'plan') {
+    let accepted = null;
+    for (const tenantId of tenantIds) {
+      const result = await submitKeyPlan(tokenFor(tenantId), parsed.plan, { env });
+      // The server's own wording where it gave one — the user is about to act on it.
+      if (!result.ok) { failures.push(named(tenantId, result.message)); continue; }
+      if (accepted == null) {
+        accepted = result;
+        recordResolvedKeyPlan(submittedPlanFrom(result));
+        // The cached verdict predates this answer and still says the key needs attention. Left in
+        // place it would nudge the user, for up to six hours, to do what they just did.
+        clearOauthKeyStatus(account);
+      }
+    }
+    if (accepted != null) console.log(`✓ Beezi: this key’s subscription is now recorded as ${accepted.subscriptionPlan}.`);
+    if (failures.length > 0) throw new UserError(failures.join('\n'));
+    return;
+  }
+
+  let linked = false;
+  for (const tenantId of tenantIds) {
+    const result = await submitKeyLink(tokenFor(tenantId), parsed.target, { env });
+    if (!result.ok) { failures.push(named(tenantId, result.message)); continue; }
+    if (!linked) {
+      linked = true;
+      // Only when the server named the plan of the subscription this key joined. A server that does not
+      // send one leaves submittedPlanFrom null and nothing is written — a link is not a plan, and
+      // inventing one would put a tier nobody stated into every report. The next session's adoption
+      // fills it from the resolution instead.
+      recordResolvedKeyPlan(submittedPlanFrom(result));
+      // Same reason as the plan path: the cached verdict is about the world before this link.
+      clearOauthKeyStatus(account);
+    }
+    console.log(named(tenantId, formatLinkOutcome(result)));
+  }
+  if (failures.length > 0) throw new UserError(failures.join('\n'));
+}
+
+main().catch((error) => {
+  console.error(`✗ ${friendlyMessage(error)}`);
+  process.exit(1);
+});
