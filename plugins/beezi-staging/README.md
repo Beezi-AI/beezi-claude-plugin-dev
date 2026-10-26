@@ -88,8 +88,10 @@ workspaces whose New folders was never set, it asks one question, "Where should 
 pick a workspace to send everything there (each option says how many past sessions and repos or folders that
 uploads), **Several workspaces…** to send everything to each of the ones you pick next, or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
 script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
-earlier session. It starts no Cowork worker; the next Claude Code session does. It needs a terminal; without one,
-run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
+earlier session. Steps also run without `CLAUDE_CODE_OAUTH_TOKEN`, as Claude Code runs its hooks, so they find a
+setup token only where a hook can (the settings `env` block, the OS environment) and setup registers the machine the
+same way its sessions report it; a token set only in the shell gets a warning on how to make it visible. It starts no
+Cowork worker; the next Claude Code session does. It needs a terminal; without one, run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
 as the fallback where keys cannot be read; `NO_COLOR` turns the colours off.
 
 ## Commands

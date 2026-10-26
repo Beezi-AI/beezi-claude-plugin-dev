@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.40.1 (2026-10-26) — Terminal setup sees what your sessions see
+
+### Fixed
+- **One subscription per machine** — a `CLAUDE_CODE_OAUTH_TOKEN` set only in your shell no longer reaches terminal setup, the same way Claude Code hides it from plugins, so setup no longer registers the machine under a second subscription. Setup prints a warning when it finds such a token, with how to make it visible.
+
 ## 0.40.0 (2026-10-23) — Enabled plugins in Beezi
 
 ### New
