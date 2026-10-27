@@ -181,14 +181,15 @@ workspaces get it; under "Ask me" or "Don't send" it is not sent this time). Add
 --tenant <id>[,<id>…]` only when the user asks to sync specific workspaces instead: that is an
 override that offers every past session to those workspaces, ignoring rules.
 
-For each block, in order: write its lines verbatim, except `question=`, `upload-command=` and
+For each block, in order: write its lines verbatim inside one plain fenced code block (```, no
+language), keeping every leading space and line break, except `question=`, `upload-command=` and
 `decline-command=`. Then ask ONE AskUserQuestion per block, up to 4 per call: question = the
-`question=` value; options `Upload` (description "Send these sessions to Beezi now") and `Not now`
-(description "Nothing is sent. /beezi:sync uploads them any time"). `Upload` → run the block's
+`question=` value; options `Upload now` (description "Send these sessions to Beezi now") and `Not now`
+(description "Nothing is sent. /beezi:sync uploads them any time"). `Upload now` → run the block's
 `upload-command=` text EXACTLY ONCE, with the Bash `timeout` set to 600000, and write its output
 verbatim. Anything else, a dismissal included → run its `decline-command=` text EXACTLY ONCE and
 write its line verbatim. This is the one question where a dismissal runs a command. Never run an
-upload without an `Upload` answer. With `offers=0`, write the printed lines verbatim and add nothing.
+upload without an `Upload now` answer. With `offers=0`, write the printed lines verbatim and add nothing.
 
 Outside the blocks, write verbatim only a `Note:` line, a line saying another sync is running, a
 `no … sessions found` line, the `✓ Beezi: nothing new to upload.` line (and the `… still open. Run

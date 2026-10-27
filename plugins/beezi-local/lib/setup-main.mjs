@@ -73,7 +73,7 @@ export function setupMain(deps) {
     output, activity: output.isTTY === true && deps.env.TERM !== 'dumb',
   });
   const progress = (label) => { run.setLabel(label); };
-  return deps.runSetup({ run, ask, print, progress })
+  return deps.runSetup({ run, ask, print, progress, style })
     .catch((error) => {
       print(`✗ ${friendlyMessage(error)}`);
       return 1;

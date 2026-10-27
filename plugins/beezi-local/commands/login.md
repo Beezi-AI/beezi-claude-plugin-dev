@@ -442,7 +442,7 @@ again.
 
 Write each command's first line verbatim, then go to Step 4b.
 
-Step 4b — past sessions. Run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --account <key>`, with the Bash `timeout` set to 600000. It uploads nothing. Each `<offer …>` block in its output is one workspace. For each block, in order: write its lines verbatim, except `question=`, `upload-command=` and `decline-command=`. Then ask ONE AskUserQuestion per block, up to 4 per call: question = the `question=` value; options `Upload` (description "Send these sessions to Beezi now") and `Not now` (description "Nothing is sent. /beezi:sync uploads them any time"). `Upload` → run the block's `upload-command=` text EXACTLY ONCE, with the Bash `timeout` set to 600000, and report its output verbatim (the result notes below). Anything else, a dismissal included → run its `decline-command=` text EXACTLY ONCE and write its line verbatim. This is the one question where a dismissal runs a command. Never run an upload without an `Upload` answer. `offers=0` → say nothing about past sessions.
+Step 4b — past sessions. Run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --account <key>`, with the Bash `timeout` set to 600000. It uploads nothing. Each `<offer …>` block in its output is one workspace. For each block, in order: write its lines verbatim inside one plain fenced code block (```, no language), keeping every leading space and line break, except `question=`, `upload-command=` and `decline-command=`. Then ask ONE AskUserQuestion per block, up to 4 per call: question = the `question=` value; options `Upload now` (description "Send these sessions to Beezi now") and `Not now` (description "Nothing is sent. /beezi:sync uploads them any time"). `Upload now` → run the block's `upload-command=` text EXACTLY ONCE, with the Bash `timeout` set to 600000, and report its output verbatim (the result notes below). Anything else, a dismissal included → run its `decline-command=` text EXACTLY ONCE and write its line verbatim. This is the one question where a dismissal runs a command. Never run an upload without an `Upload now` answer. `offers=0` → say nothing about past sessions.
 
 Outside the blocks, write verbatim only a `Note:` line, a line saying another sync is running, a
 `Beezi: could not count past sessions for …` line, the `one-time import has been used` line (and the
@@ -450,7 +450,7 @@ upgrade line under it), or a `✗` line: they say why something could not be cou
 `no past Claude Code sessions found` line, the `— … —` headers, the `… sessions read…` progress
 lines and `offers=`) is for you only; add nothing of your own. Never echo any token.
 
-Result notes, for an `Upload` command's output:
+Result notes, for an `Upload now` command's output:
 
 - `✓ Beezi: uploaded …` is the success line. `✓ Beezi: nothing new to upload…` means there was
   nothing left to send.

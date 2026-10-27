@@ -242,15 +242,15 @@ export async function buildHistoryNotice(input, deps = {}) {
 function historyOfferText(rows, root) {
   const commands = rows.map((row) => `\`node "${root}/scripts/history.mjs" offer --account ${row.key}\``).join(', then ');
   const options = optionList([
-    { label: 'Upload', description: 'Sends them to <workspace> in the background' },
+    { label: 'Upload now', description: 'Sends them to <workspace> in the background' },
     { label: 'Not now', description: 'Nothing is sent. /beezi:sync uploads them any time' },
   ]);
   return [
     ASK_GUARD,
     `Run EXACTLY ${commands}. If it prints \`offers=0\`, say nothing about this.`,
-    'For each `<offer>` block it prints, write its lines to the user verbatim, except the `question=`, `upload-command=` and `decline-command=` lines.',
+    'For each `<offer>` block it prints, write its lines to the user verbatim inside one plain fenced code block (```, no language), keeping every leading space and line break, except the `question=`, `upload-command=` and `decline-command=` lines.',
     `Then use the AskUserQuestion tool to ask one single-select question per block: that block's \`question=\` text, with the options ${options}, where <workspace> is the workspace named in that question.`,
-    'If the answer is "Upload", run that block\'s `upload-command=` EXACTLY and show the user only its first line.',
+    'If the answer is "Upload now", run that block\'s `upload-command=` EXACTLY and show the user only its first line.',
     'On any other answer, including a dismissed question, run that block\'s `decline-command=` EXACTLY and show nothing from it.',
     'Then continue with the user\'s request.',
   ].join(' ');

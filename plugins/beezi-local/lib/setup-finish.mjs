@@ -1,11 +1,14 @@
 import { usableAccounts } from './setup-account.mjs';
 import { lastLine, outputLines, report, token } from './setup-routing.mjs';
+import { offerLine } from './setup-style.mjs';
 
 export const DEFAULT_UNCHANGED = 'The default account is unchanged. /beezi:settings account switches it later.';
 export const CRASH_QUESTION = 'How should Beezi crash reports work?';
 export const STATUS_LINE_QUESTION = "Show Beezi in Claude Code's status line?";
 export const UPLOAD_LABEL = 'Uploading past sessions…';
 // backfill.mjs prints this once per batch; the wizard shows it on the activity line instead.
+export const UPLOAD_NOW = 'Upload now';
+export const OFFER_OPTIONS = [{ label: UPLOAD_NOW }, { label: 'Not now', description: 'run /beezi:sync any time' }];
 export const UPLOAD_PROGRESS = /^Beezi: (\d+)\/(\d+) sessions read…$/;
 const OFFER_OPEN = /^<offer account="[^"]*" tenant="([^"]*)" audit="(yes|no)">$/;
 const OFFER_CLOSE = '</offer>';
@@ -48,15 +51,14 @@ export function parseOffers(stdout) {
   return { offers, notes };
 }
 
-// login.md Step 4b in the terminal: a dry-run summary, then one (y/N) question per workspace. Only a yes uploads; a no or
-// no answer at all records the decline and prints its line.
+// Prints each summary line styled by shape, then one Upload now / Not now menu per workspace; only Upload now uploads.
 export async function offerHistory(ctx, key) {
   const summary = await ctx.run('backfill.mjs', ['--account', key]);
   const { offers, notes } = parseOffers(summary.stdout);
   notes.concat(outputLines(summary.stderr).filter((line) => line.trim() !== '')).forEach((line) => ctx.print(line.trimEnd()));
   for (const offer of offers) {
-    offer.lines.forEach((line) => ctx.print(line));
-    if (await ctx.ask.confirm(offer.question, false) === true) {
+    offer.lines.forEach((line) => ctx.print(offerLine(ctx.style, line)));
+    if (await ctx.ask.choose(offer.question, OFFER_OPTIONS, { defaultIndex: 0, escape: true }) === 0) {
       const shown = offer.token == null ? [] : ['--offer', offer.token];
       await ctx.run('backfill.mjs', ['--account', key, '--accept', offer.tenant].concat(shown), { stream: true, label: UPLOAD_LABEL, live: UPLOAD_PROGRESS });
     } else {

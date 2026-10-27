@@ -255,7 +255,7 @@ export function createPrompt(io) {
     return rows;
   }
 
-  function keyChoose(question, options, defaultIndex) {
+  function keyChoose(question, options, defaultIndex, escapable) {
     let cursor = defaultIndex === -1 ? 0 : defaultIndex;
     let run = '';
     const hint = defaultIndex === -1 ? HINT_SKIP : HINT_CHOOSE;
@@ -264,7 +264,7 @@ export function createPrompt(io) {
         finish(cursor, style.cyan(options[cursor].label));
         return false;
       }
-      if (key.name === 'escape' && defaultIndex === -1) {
+      if (key.name === 'escape' && escapable) {
         finish(null, style.dim('skipped'));
         return false;
       }
@@ -341,10 +341,12 @@ export function createPrompt(io) {
     });
   }
 
+  // opts.escape lets Esc answer null on a key menu that has a default.
   async function choose(question, options, opts) {
     if (closed) return null;
     const defaultIndex = opts && typeof opts.defaultIndex === 'number' ? opts.defaultIndex : -1;
-    if (fitsScreen(options.length + 2) && rawOn()) return keyChoose(question, options, defaultIndex);
+    const escapable = defaultIndex === -1 || Boolean(opts && opts.escape);
+    if (fitsScreen(options.length + 2) && rawOn()) return keyChoose(question, options, defaultIndex, escapable);
     showMenu(question, options, defaultIndex);
     const range = `1-${options.length}`;
     const query = defaultIndex === -1 ? `Choose ${range}, or press Enter to skip:` : `Choose ${range} [${defaultIndex + 1}]:`;

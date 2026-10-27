@@ -1,6 +1,6 @@
 {
   "name": "beezi-local",
-  "version": "0.40.0-local.5961",
+  "version": "0.40.0-local.6001",
   "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — local environment build.",
   "author": {
     "name": "Beezi",

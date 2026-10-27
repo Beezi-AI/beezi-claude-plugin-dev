@@ -29,11 +29,23 @@ export function createStyle(options) {
     boldGreen: wrap('1;32'),
     yellow: wrap('33'),
     red: wrap('31'),
+    magenta: wrap('35'),
     violet: (level, text) => (enabled ? `\x1b[38;5;${VIOLETS[level]}m${text}${RESET}` : text),
   };
 }
 
 const MAX_ROW = 100;
+const SGR = /\x1b\[[0-9;]*m/g;
+const OFFER_H1 = /^(Beezi found \d+ past .+ sessions?) (\(.+\))$/;
+const OFFER_H2 = /^ {2}in (.+?)( \+\d+ more)?$/;
+const OFFER_ITEM = /^ {4}([✓◆✕]) (.+)$/;
+const OFFER_HIDDEN = '  Hidden by your workspace';
+const OFFER_HIDDEN_NOTE = ' — Beezi gets made-up names';
+
+// Visible characters, with SGR colour codes not counted.
+function visible(text) {
+  return Array.from(text.replace(SGR, '')).length;
+}
 
 // The style a line's leading ✓, ⚠, ✗ or "Setup stopped" calls for, or null.
 function toneOf(body) {
@@ -53,10 +65,26 @@ export function paint(style, line) {
   return line;
 }
 
-// Rows of at most min(columns − 1, 100) characters, broken at spaces: later rows keep the line's indent plus 2; a word longer than a row stays whole.
+// Styles one K7-C past-sessions line by its exact shape (H1, H2, Sent, Hidden, Never sent, ✓/◆/✕ items); any other line comes back unchanged.
+export function offerLine(style, line) {
+  const head = OFFER_H1.exec(line);
+  if (head !== null) return `${style.bold(head[1])} ${style.dim(head[2])}`;
+  const item = OFFER_ITEM.exec(line);
+  if (item !== null && item[1] === '✓') return `    ${style.green('✓')} ${item[2]}`;
+  if (item !== null && item[1] === '◆') return `    ${style.magenta('◆')} ${item[2]}`;
+  if (item !== null) return `    ${style.dim('✕')} ${style.dim(item[2])}`;
+  if (line === '  Sent') return `  ${style.green('Sent')}`;
+  if (line === `${OFFER_HIDDEN}${OFFER_HIDDEN_NOTE}`) return `  ${style.magenta(OFFER_HIDDEN.trim())}${style.dim(OFFER_HIDDEN_NOTE)}`;
+  if (line === '  Never sent') return `  ${style.dim('Never sent')}`;
+  const folders = OFFER_H2.exec(line);
+  if (folders !== null) return `  ${style.dim('in')} ${folders[1]}${folders[2] === undefined ? '' : ` ${style.dim(folders[2].trim())}`}`;
+  return line;
+}
+
+// Rows of at most min(columns − 1, 100) visible characters, broken at spaces: later rows keep the line's indent plus 2; a word longer than a row stays whole.
 export function wrapLines(line, columns) {
   const room = Math.min(Math.max((columns || 80) - 1, 20), MAX_ROW);
-  if (Array.from(line).length <= room) return [line];
+  if (visible(line) <= room) return [line];
   const body = line.replace(/^\s+/, '');
   const lead = line.slice(0, line.length - body.length);
   const hang = `${lead}  `;
@@ -66,7 +94,7 @@ export function wrapLines(line, columns) {
     const prefix = rows.length === 0 ? lead : hang;
     if (row === '') {
       row = word;
-    } else if (Array.from(`${prefix}${row} ${word}`).length > room) {
+    } else if (visible(`${prefix}${row} ${word}`) > room) {
       rows.push(prefix + row);
       row = word;
     } else {

@@ -14,7 +14,7 @@ import { AnonKind } from './anonymize.mjs';
 export { OfferGate, offerTenantKey, isRemembered, offerGate } from './offer-gate.mjs';
 
 const SYNC_COMMAND = '/beezi:sync';
-const MAX_FOLDER_NAMES = 5;
+const MAX_FOLDER_NAMES = 3;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // K7 L3/L4 items in order, each with the kind that hides it.
 const KIND_ITEMS = [
@@ -48,32 +48,44 @@ function rangeText(firstMs, lastMs) {
   const withYear = new Date(firstMs).getFullYear() !== new Date(lastMs).getFullYear();
   const first = dayLabel(firstMs, withYear);
   const last = dayLabel(lastMs, withYear);
-  return first === last ? `on ${first}` : `from ${first} to ${last}`;
+  return first === last ? first : `${first} – ${last}`;
 }
 
-// Folders without a recorded name still count as sessions but are left out of the list and F; none named drops the clause.
-function folderText(folders) {
-  const names = folders.map((f) => f.name).filter((name) => typeof name === 'string' && name !== '');
-  if (names.length === 0) return '';
-  const shown = names.slice(0, MAX_FOLDER_NAMES);
-  const more = names.length - shown.length;
-  return ` in ${plural(names.length, 'folder')}: ${listText(more > 0 ? shown.concat(`${more} more`) : shown)}`;
+// Folders without a recorded name still count as sessions but are left out of H2 and F; none named drops both.
+function folderNames(folders) {
+  return folders.map((f) => f.name).filter((name) => typeof name === 'string' && name !== '');
 }
 
-// The K7 summary (L1–L5) and question for one workspace.
+// H2: up to three names, then +k more for the rest.
+function folderLine(names) {
+  const more = names.length - MAX_FOLDER_NAMES;
+  return `  in ${names.slice(0, MAX_FOLDER_NAMES).join(', ')}${more > 0 ? ` +${more} more` : ''}`;
+}
+
+// Hidden items two per line, the odd last one alone.
+function pairLines(items) {
+  const lines = [];
+  for (let i = 0; i < items.length; i += 2) lines.push(`    ◆ ${items.slice(i, i + 2).join(', ')}`);
+  return lines;
+}
+
+// The K7-C checklist: plain lines with their two- and four-space indents, then the question.
 export function offerLines({ count, firstMs, lastMs, folders, kinds, workspace }) {
   const hidden = KIND_ITEMS.filter(([kind]) => kinds.indexOf(kind) !== -1).map(([, item]) => item);
   const notHidden = KIND_ITEMS.filter(([kind]) => kinds.indexOf(kind) === -1).map(([, item]) => item);
-  const lines = [
-    `Beezi found ${plural(count, 'past Claude Code session')} ${rangeText(firstMs, lastMs)}${folderText(folders)}.`,
-    'Uploading sends dates, duration, models, tokens, cost, and tool, skill and MCP names for each session.',
-  ];
-  if (notHidden.length > 0) lines.push(`Sent as they are: ${listText(notHidden)}.`);
-  if (hidden.length > 0) lines.push(`Hidden by your workspace: ${listText(hidden)}. Beezi receives made-up names instead.`);
-  lines.push(kinds.indexOf(AnonKind.SESSIONS) === -1
-    ? 'Also sent as written: session titles (Claude Code uses your first message when a session has no title), error messages (up to 1,000 characters) and subagent task descriptions.'
-    : 'Session titles, error messages and task descriptions are not sent.');
-  const question = count === 1 ? `Upload this session to ${workspace}?` : `Upload these ${count} sessions to ${workspace}?`;
+  const names = folderNames(folders);
+  const span = names.length > 0 ? `${rangeText(firstMs, lastMs)}, ${plural(names.length, 'folder')}` : rangeText(firstMs, lastMs);
+  const sessionsOn = kinds.indexOf(AnonKind.SESSIONS) !== -1;
+  const lines = [`Beezi found ${plural(count, 'past Claude Code session')} (${span})`];
+  if (names.length > 0) lines.push(folderLine(names));
+  lines.push('  Sent', '    ✓ dates, duration, models, tokens, cost', '    ✓ tool, skill and MCP names');
+  if (notHidden.length > 0) lines.push(`    ✓ ${listText(notHidden)}, as they are`);
+  if (!sessionsOn) {
+    lines.push('    ✓ session titles (Claude Code uses your first message when a session has no title), error messages (up to 1,000 characters) and subagent task descriptions, as written');
+  }
+  if (hidden.length > 0) lines.push('  Hidden by your workspace — Beezi gets made-up names', ...pairLines(hidden));
+  if (sessionsOn) lines.push('  Never sent', '    ✕ session titles, error messages and task descriptions');
+  const question = count === 1 ? `Upload this session to ${workspace}?` : `Upload ${count} sessions to ${workspace}?`;
   return { lines, question };
 }
 
