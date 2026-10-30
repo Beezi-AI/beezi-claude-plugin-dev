@@ -1,4 +1,4 @@
-import fs from 'fs';
+import { scanTranscriptTail } from './transcript-reader.mjs';
 import { linkedSessions as _linkedSessions } from './sessions.mjs';
 import { postSessionError } from './session-error-report.mjs';
 import { allowsLiveFor, readTrackingState } from './tracking.mjs';
@@ -9,35 +9,26 @@ import { readSessionWorkspace, expandTargets, resolveTargets } from './workspace
 // own timestamp from the transcript tail. The StopFailure `error` code is the reliable signal;
 // these fill in whatever the hook payload didn't carry.
 export function readErrorContext(transcriptPath, deps = {}) {
-  const readFile = deps.readFile == null ? ((p) => fs.readFileSync(p, 'utf-8')) : deps.readFile;
+  const scanTail = deps.scanTail == null ? scanTranscriptTail : deps.scanTail;
   const empty = { lastAssistantMessage: null, errorDetails: null, occurredAt: null };
   if (!transcriptPath) return empty;
 
-  let content;
-  try {
-    content = readFile(transcriptPath);
-  } catch {
-    return empty;
-  }
-  const trimmed = String(content).replace(/\n+$/, '');
-  if (!trimmed) return empty;
-
-  const lines = trimmed.split('\n');
   let lastAssistantMessage = null;
   let errorDetails = null;
   let occurredAt = null;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].trim()) continue;
-    let line;
-    try { line = JSON.parse(lines[i]); } catch { continue; }
-    if (errorDetails == null) {
-      errorDetails = extractErrorDetail(line);
-      if (errorDetails != null && typeof line.timestamp === 'string') occurredAt = line.timestamp;
-    }
-    if (lastAssistantMessage == null && line.type === 'assistant') {
-      lastAssistantMessage = extractText(line.message);
-    }
-    if (lastAssistantMessage != null && errorDetails != null) break;
+  try {
+    scanTail(transcriptPath, (line) => {
+      if (errorDetails == null) {
+        errorDetails = extractErrorDetail(line);
+        if (errorDetails != null && typeof line.timestamp === 'string') occurredAt = line.timestamp;
+      }
+      if (lastAssistantMessage == null && line.type === 'assistant') {
+        lastAssistantMessage = extractText(line.message);
+      }
+      return lastAssistantMessage != null && errorDetails != null;
+    });
+  } catch {
+    return empty;
   }
   return { lastAssistantMessage, errorDetails, occurredAt };
 }

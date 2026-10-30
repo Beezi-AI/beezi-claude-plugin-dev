@@ -189,9 +189,6 @@ async function syncOne(account, options, label, runCache = null) {
   if (result.unreadable > 0) {
     console.log(`  ${plural(result.unreadable, 'session')} could not be read — not uploaded.`);
   }
-  if (result.oversize > 0) {
-    console.log(`  ${plural(result.oversize, 'session')} were too large to read — not uploaded.`);
-  }
   if (result.plannedReports > result.reportsStored + result.reportsSkipped) {
     console.log(
       `  Note: ${plural(result.plannedReports, 'report')} sent, ${result.reportsStored} stored ` +

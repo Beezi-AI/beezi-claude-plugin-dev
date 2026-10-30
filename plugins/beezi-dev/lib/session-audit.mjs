@@ -57,10 +57,6 @@ import {
 } from './tracking.mjs';
 import { UserError } from './friendly-error.mjs';
 
-// A transcript this big, parsed and held for its session (segments, timeline, task descriptions),
-// would put the process into the hundreds of MB. Report it rather than let node die mid-run.
-const MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
-
 // Error posts are single small upserts, so a little parallelism is free — but not unbounded,
 // or a 200-session run opens 200 sockets at once.
 const FOLLOWUP_CONCURRENCY = 4;
@@ -150,7 +146,7 @@ function readOnce(read) {
 // Seal only when a re-run could not improve the outcome, and only when the run covered
 // everything: any retryable failure, unattributable chunk, whole-chunk rejection, halt or scope
 // flag leaves the pull open. Per-item errors[] (unconnected repos on platform tenants) and
-// oversize/unreadable transcripts deliberately do NOT block — a re-run cannot help them, and
+// unreadable transcripts deliberately do NOT block — a re-run cannot help them, and
 // blocking would deadlock the seal forever.
 export function shouldFinalize(result, options = {}) {
   if (!result.ok) return false;
@@ -279,7 +275,6 @@ async function runAuditUnlocked(deps, options) {
     recent: [],
     liveTracked: 0,
     alreadyImported: 0,
-    oversize: 0,
     candidates: 0,
     plannedChunks: 0,
     // Reports built and handed to the flush — in a dry run, what WOULD have been sent. Counted in
@@ -472,7 +467,6 @@ async function runAuditUnlocked(deps, options) {
     // Session-keyed, so it goes stale the moment a session grows — coverage supersedes it in sync.
     if (!syncMode && !options.force && isImported(ledger, entry.sessionId)) { result.alreadyImported += 1; continue; }
     if (options.sinceMs != null && entry.mtimeMs < options.sinceMs) continue;
-    if (entry.size > MAX_TRANSCRIPT_BYTES) { result.oversize += 1; continue; }
     candidates.push(entry);
   }
   result.candidates = candidates.length;

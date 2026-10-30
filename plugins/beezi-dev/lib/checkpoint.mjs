@@ -26,10 +26,10 @@ import {
 import { resolveSessionName } from './session-name.mjs';
 import { readJson, readJsonSalvaged, writeJsonSecure } from './fs-store.mjs';
 import {
-  listSubagentTranscripts,
   buildTaskDescriptionMap,
   createWorkflowNameResolver,
 } from './subagents.mjs';
+import { createTranscriptMemo } from './transcript-memo.mjs';
 import { claimIntervals, mergeIntervals, subtractIntervals, totalMs } from './active-time.mjs';
 import { loadRepoMap, saveRepoMap, upsertRoot, knownOrigin, originFromGitConfig } from './repo-map.mjs';
 import { claudeMdLines } from './claude-md.mjs';
@@ -183,8 +183,8 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   const { session_id, transcript_path, cwd } = input;
   const gitImpl = deps.runCache != null ? deps.runCache.git : (deps.gitImpl == null ? git : deps.gitImpl);
   const computeDelta = deps.computeDelta == null ? _computeDelta : deps.computeDelta;
-  // The audit run's per-session memo: one read and parse per file for the delta, the Task map and the timeline.
-  const transcriptMemo = deps.transcriptMemo == null ? null : deps.transcriptMemo;
+  // One read and parse per file for the delta, the Task map and the timeline; the audit run passes its per-session memo.
+  const transcriptMemo = deps.transcriptMemo == null ? createTranscriptMemo() : deps.transcriptMemo;
   const fetchImpl = deps.fetchImpl == null ? resolveFetch() : deps.fetchImpl;
   const collectedErrors = [];
   const empty = (extra) => ({ enqueued: 0, flush: null, flushes: [], sessionErrors: collectedErrors, ...(extra || {}) });
@@ -333,9 +333,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
     : null;
   let delta;
   try {
-    delta = computeDelta(transcript_path, cursor, transcriptMemo == null
-      ? { cwd, repoRootOf, branchAt: branchOf }
-      : { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.main });
+    delta = computeDelta(transcript_path, cursor, { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.main });
   } catch {
     skipped.deltaFailed = true;
     return emptyResult;
@@ -542,17 +540,13 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // the meta.json toolUseId. Built once here (single main-transcript scan) for all subagents.
   const taskDescriptions = buildTaskDescriptionMap(transcript_path, { transcriptMemo });
   const workflowNameOf = createWorkflowNameResolver(transcript_path, session_id);
-  const agentTranscripts = transcriptMemo == null
-    ? listSubagentTranscripts(transcript_path, session_id)
-    : transcriptMemo.subagents(transcript_path, session_id);
+  const agentTranscripts = transcriptMemo.subagents(transcript_path, session_id);
   for (const { agentId, path: agentPath, workflowId, agentType, spawnDepth, toolUseId } of agentTranscripts) {
     const agentFrom = agentCursors[agentId] == null ? 0 : agentCursors[agentId];
     let agentDelta;
     try {
       // The memo parses the whole agent file and keeps its timestamps for the timeline's span.
-      agentDelta = computeDelta(agentPath, agentFrom, transcriptMemo == null
-        ? { cwd, repoRootOf, branchAt: branchOf }
-        : { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.agent });
+      agentDelta = computeDelta(agentPath, agentFrom, { cwd, repoRootOf, branchAt: branchOf, readRecords: transcriptMemo.agent });
     } catch { continue; }
     const taskDescription = toolUseId ? taskDescriptions.get(toolUseId) : null;
     // A workflow agent has no spawning Task block, so its run's state file names it instead.
@@ -607,7 +601,7 @@ export async function runCheckpoint(input, deps = {}, options = {}) {
   // checkpoint.
   if (options.emitTimeline) {
     try {
-      const timeline = computeSessionTimeline(transcript_path, session_id);
+      const timeline = computeSessionTimeline(transcript_path, session_id, { transcriptMemo });
       if (timeline && (timeline.periods.length > 0 || timeline.subagents.length > 0 || timeline.plan_events.length > 0)) {
         // The sender list is part of the signature so a newly answered workspace still gets the timeline.
         const senderSig = senders.map((s) => `${s.key}:${s.tenantId}`).sort().join(',');

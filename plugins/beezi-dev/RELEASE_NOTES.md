@@ -1,5 +1,11 @@
 # Beezi plugin release notes
 
+## 0.41.0 (2026-10-29) — Large sessions upload
+
+### Fixed
+- **Large sessions upload** — past and live sessions of any size are sent. Before, transcripts over 64 MB were skipped as "too large to read".
+- **Accurate code-change and tool counts** — newer Claude Code keeps copies of each request in the transcript. Beezi no longer counts them, so lines changed, tool calls, tool token estimates and repo attribution are no longer inflated.
+
 ## 0.40.0 (2026-10-23) — Enabled plugins in Beezi
 
 ### New
