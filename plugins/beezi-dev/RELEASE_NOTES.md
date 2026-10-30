@@ -11,6 +11,11 @@
 - **Large sessions upload** — past and live sessions of any size are sent. Before, transcripts over 64 MB were skipped as "too large to read".
 - **Accurate code-change and tool counts** — newer Claude Code keeps copies of each request in the transcript. Beezi no longer counts them, so lines changed, tool calls, tool token estimates and repo attribution are no longer inflated.
 
+## 0.40.1 (2026-10-26) — Terminal setup sees what your sessions see
+
+### Fixed
+- **One subscription per machine** — a `CLAUDE_CODE_OAUTH_TOKEN` set only in your shell no longer reaches terminal setup, the same way Claude Code hides it from plugins, so setup no longer registers the machine under a second subscription. Setup prints a warning when it finds such a token, with how to make it visible.
+
 ## 0.40.0 (2026-10-23) — Enabled plugins in Beezi
 
 ### New

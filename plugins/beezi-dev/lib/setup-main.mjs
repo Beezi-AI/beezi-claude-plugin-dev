@@ -3,6 +3,8 @@ import os from 'os';
 import path from 'path';
 import { readSettingsEnv } from './claude-settings-env.mjs';
 import { friendlyMessage } from './friendly-error.mjs';
+import { hasOauthTokenIdentity } from './oauth-identity.mjs';
+import { osEnvOauthToken } from './os-env-token.mjs';
 import { finaleLines } from './setup-finale.mjs';
 import { createPrompt, openTerminal } from './setup-prompt.mjs';
 import { createRunner } from './setup-runner.mjs';
@@ -12,6 +14,9 @@ import { runSetup } from './setup-wizard.mjs';
 export const SESSION_KEYS = ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'];
 export const NO_TERMINAL = '✗ Beezi setup needs a terminal. Run /beezi:login in Claude Code instead.';
 export const STOPPED = 'Setup stopped. Run the installer again, or /beezi:login in Claude Code, to finish.';
+export const HIDDEN_TOKEN = '⚠ Beezi: your shell sets CLAUDE_CODE_OAUTH_TOKEN, but Claude Code hides it from plugins, '
+  + 'so Beezi can’t count usage against that key. To fix that, add the token to the "env" block in ~/.claude/settings.json.';
+const OAUTH_TOKEN = 'CLAUDE_CODE_OAUTH_TOKEN';
 const AGENT = 'Claude Code';
 const SHOW_CURSOR = '\x1b[?25h';
 
@@ -20,6 +25,7 @@ export function realDeps(root) {
     root,
     env: process.env,
     settingsEnv: readSettingsEnv,
+    osEnvToken: osEnvOauthToken,
     output: process.stdout,
     random: Math.random,
     openTerminal,
@@ -37,6 +43,12 @@ export function realDeps(root) {
     onInterrupt: (handler) => { process.on('SIGINT', handler); },
     exit: (code) => { process.exit(code); },
   };
+}
+
+// True when the shell's setup token is in neither the settings env block nor the OS environment.
+function hiddenShellToken(deps, settings) {
+  if (!hasOauthTokenIdentity(deps.env) || hasOauthTokenIdentity(settings)) return false;
+  return deps.osEnvToken() == null;
 }
 
 // Runs the wizard on the terminal and resolves its exit code.
@@ -66,8 +78,10 @@ export function setupMain(deps) {
   deps.onInterrupt(stop);
   const interactive = canReadKeys({ input, output, env: deps.env });
   const ask = deps.createPrompt({ input, output, style, interactive, onInterrupt: stop });
-  // The settings env block over the shell's, as Claude Code gives its hooks.
-  const env = Object.assign({}, deps.env, deps.settingsEnv());
+  // The settings env block over the shell's, without the setup token, as Claude Code gives its hooks.
+  const settings = deps.settingsEnv();
+  const env = Object.assign({}, deps.env, settings);
+  delete env[OAUTH_TOKEN];
   run = deps.createRunner({
     root: deps.root, cwd, env, sessionKeys: SESSION_KEYS, paint: format,
     output, activity: output.isTTY === true && deps.env.TERM !== 'dumb',
@@ -81,6 +95,7 @@ export function setupMain(deps) {
     .then((code) => {
       ask.close();
       if (code === 0) {
+        if (hiddenShellToken(deps, settings)) print(HIDDEN_TOKEN);
         finaleLines({ agent: AGENT, style, columns: output.columns || 80, random: deps.random })
           .forEach((line) => { output.write(`${line}\n`); });
       }
