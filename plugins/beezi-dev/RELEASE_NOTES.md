@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.42.0 (2026-10-29) — Plan usage in the desktop app
+
+### New
+- **Plan usage check** — the Claude desktop app has no status line, so Beezi couldn't see your 5-hour and weekly plan usage there. Turn it on with `/beezi:settings usage-check on`: where the status line can't run, Beezi checks your usage with one small Haiku request on your plan at most every 30 minutes, and only when no fresher reading exists. It is off until you turn it on, and it never runs on machines that sign in with a setup token.
+
 ## 0.41.0 (2026-10-29) — Large sessions upload
 
 ### Fixed

@@ -33,6 +33,7 @@ import {
 } from './tracking.mjs';
 import { BillingSource, hasCustomGateway } from './billing.mjs';
 import { statuslineCaptureDetached as _statuslineCaptureDetached } from './statusline-install.mjs';
+import { takeDesktopUsageCheckNotice as _takeDesktopUsageCheckNotice } from './usage-check.mjs';
 import {
   readBillingConfig as _readBillingConfig,
   writeBillingConfig as _writeBillingConfig,
@@ -219,6 +220,8 @@ export async function runSessionStart(input, deps = {}) {
   const recordWhoamiImpl = deps.recordWhoamiImpl == null ? recordWhoami : deps.recordWhoamiImpl;
   const statuslineCaptureDetached =
     deps.statuslineCaptureDetached == null ? _statuslineCaptureDetached : deps.statuslineCaptureDetached;
+  const takeDesktopUsageCheckNotice =
+    deps.takeDesktopUsageCheckNotice == null ? _takeDesktopUsageCheckNotice : deps.takeDesktopUsageCheckNotice;
 
   // The plugin's own version check. Started BEFORE the credential store is touched (getAccessToken
   // may spawn `security` / `secret-tool` / PowerShell) and awaited only at the return points, so its
@@ -560,6 +563,10 @@ ${nudge}` : nudge;
       const nudge = 'Beezi: your status line no longer runs Beezi’s wrapper, so live plan-usage capture is off. Turn it back on with /beezi:settings statusline on.';
       message = message ? `${message}\n${nudge}` : nudge;
     }
+
+    let usageCheckNotice = null;
+    try { usageCheckNotice = takeDesktopUsageCheckNotice({ env: oauthEnv }); } catch { /* best-effort */ }
+    if (usageCheckNotice) message = message ? `${message}\n${usageCheckNotice}` : usageCheckNotice;
   }
 
   // Tracking-policy messages: tell a dark workspace it is dark, and point at the login flow

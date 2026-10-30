@@ -278,6 +278,26 @@ export function statuslineBadgeFile() {
   return path.join(beeziHome(), 'statusline-badge.json');
 }
 
+// Whether the plan-usage check may run where the status line can't: { version, enabled }. Off until turned on.
+export function usageCheckFile() {
+  return path.join(beeziHome(), 'usage-check.json');
+}
+
+// The check's throttle and last outcome: { version, lastAttemptAt, consecutiveFailures, lastOutcome, ... }.
+export function usageCheckStateFile() {
+  return path.join(stateDir(), 'usage-check.json');
+}
+
+// Present once the desktop-app notice has been shown, so it shows once per machine.
+export function usageCheckNoticeFile() {
+  return path.join(beeziHome(), 'usage-check-notice.json');
+}
+
+// The probe's working directory, so its `claude -p` run never touches a project folder.
+export function usageCheckCwd() {
+  return path.join(beeziHome(), 'usage-check-cwd');
+}
+
 // The last rule or New folders change, so /beezi:settings undo can put it back.
 export function ruleUndoFile() {
   return path.join(beeziHome(), 'rule-undo.json');

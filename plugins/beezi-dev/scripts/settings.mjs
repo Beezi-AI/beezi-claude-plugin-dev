@@ -11,19 +11,20 @@ import { isLiveTrackingAllowed, readTrackingState } from '../lib/tracking.mjs';
 import { claudePlan, crashMode } from '../lib/machine-settings.mjs';
 import { badgeEnabled, setBadgeEnabled } from '../lib/statusline-badge.mjs';
 import { installStatusline, statuslineInstalled, uninstallStatusline } from '../lib/statusline-install.mjs';
+import { setUsageCheckEnabled, usageCheckEnabled } from '../lib/usage-check.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 import { newFolders as printNewFoldersListing, rules as printRulesListing } from './workspace.mjs';
 import { setTelemetry } from './telemetry.mjs';
 
-const LABEL_WIDTH = 16;
+const LABEL_WIDTH = 17;
 // The Rules preview's label column: "You're here" and two spaces.
 const PREVIEW_WIDTH = 13;
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const USAGE = 'Usage: settings.mjs [rules | new-folders | account | privacy | all | keys]'
-  + ' | refresh [--account <ref>] | set [crash=<correlate|on|off|anonymous>] [statusline=<on|off>] [badge=<on|off>]';
+  + ' | refresh [--account <ref>] | set [crash=<correlate|on|off|anonymous>] [statusline=<on|off>] [badge=<on|off>] [usage-check=<on|off>]';
 const CRASH_MODES = ['correlate', 'on', 'off', 'anonymous'];
-const SET_NAMES = ['crash', 'statusline', 'badge'];
+const SET_NAMES = ['crash', 'statusline', 'badge', 'usage-check'];
 // key-resolve statuses whose answer is the local capture (settings.md, Refresh Step 2).
 const CAPTURE_STATUSES = ['no_key', 'not_linked'];
 
@@ -93,6 +94,7 @@ function screen(view) {
   const machine = [
     field('Crash reports', crashMode() === 'off' ? 'Off' : 'On'),
     field('Status line', statuslineInstalled() ? 'On' : 'Off'),
+    field('Plan usage check', usageCheckEnabled() ? 'On' : 'Off'),
   ];
   const { rows, health, def, dir, ctx } = view;
   if (rows.length === 0) return ['Beezi · not linked — run /beezi:login'].concat(machine);
@@ -171,7 +173,7 @@ function keyLines(view, badge = false) {
   for (const a of rows) {
     out.push(`account=${a.key} default=${a.key === def ? 'yes' : 'no'} multi=${isMultiTenant(a) ? 'yes' : 'no'} workspaces=${workspaceCount(a)} status=${a.status || 'linked'} email=${a.email || 'unknown'}`);
   }
-  const machine = `crash=${crashMode()} statusline=${statuslineInstalled() ? 'on' : 'off'}`;
+  const machine = `crash=${crashMode()} statusline=${statuslineInstalled() ? 'on' : 'off'} usage-check=${usageCheckEnabled() ? 'on' : 'off'}`;
   out.push(badge ? `${machine} badge=${badgeEnabled() ? 'on' : 'off'}` : machine);
   return out;
 }
@@ -317,6 +319,7 @@ function privacySection() {
   return [
     field('Crash reports', crashText(crashMode())),
     field('Status line', statuslineText()),
+    field('Plan usage check', usageCheckEnabled() ? 'On — one small request at most every 30 minutes where the status line can\'t run' : 'Off'),
   ];
 }
 
@@ -411,7 +414,7 @@ export async function refresh(argv, run = runScript) {
   block('capture', [capture.code === 0 ? capture.stdout : capture.stderr]);
 }
 
-// `crash=<mode>`, `statusline=<on|off>` and/or `badge=<on|off>`: every change in one call, each result line printed.
+// `crash=<mode>`, `statusline=<on|off>`, `badge=<on|off>` and/or `usage-check=<on|off>`: every change in one call, each result line printed.
 function set(argv) {
   const wanted = {};
   for (const arg of argv) {
@@ -422,10 +425,16 @@ function set(argv) {
   }
   if (Object.keys(wanted).length === 0) throw new UserError(USAGE);
   if (wanted.crash != null && CRASH_MODES.indexOf(wanted.crash) === -1) throw new UserError(USAGE);
-  for (const name of ['statusline', 'badge']) {
+  for (const name of ['statusline', 'badge', 'usage-check']) {
     if (wanted[name] != null && wanted[name] !== 'on' && wanted[name] !== 'off') throw new UserError(USAGE);
   }
   if (wanted.crash != null) console.log(setTelemetry(wanted.crash));
+  if (wanted['usage-check'] != null) {
+    setUsageCheckEnabled(wanted['usage-check'] === 'on');
+    console.log(wanted['usage-check'] === 'on'
+      ? '✓ Plan usage check on: where the status line can\'t run, Beezi checks your plan usage with one small request at most every 30 minutes.'
+      : '✓ Plan usage check off.');
+  }
   // The badge lives in the status line, so badge=on installs it first when it is not there.
   if (wanted.statusline != null || (wanted.badge === 'on' && !statuslineInstalled())) {
     const { ok, message } = wanted.statusline === 'off' ? uninstallStatusline() : installStatusline();

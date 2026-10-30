@@ -6,6 +6,7 @@ export const FINALIZE_NOTE = 'History import is now closed for this account: pas
 export const DEFAULT_UNCHANGED = 'The default account is unchanged. /beezi:settings account switches it later.';
 export const CRASH_QUESTION = 'How should Beezi crash reports work?';
 export const STATUS_LINE_QUESTION = "Show Beezi in Claude Code's status line?";
+export const USAGE_CHECK_QUESTION = "Check your plan usage where the status line can't run, like the desktop app?";
 export const UPLOAD_LABEL = 'Uploading past sessions…';
 // backfill.mjs prints this once per batch; the wizard shows it on the activity line instead.
 export const UPLOAD_PROGRESS = /^Beezi: (\d+)\/(\d+) sessions read…$/;
@@ -47,7 +48,7 @@ async function askCrashReports(ctx, current) {
   report(ctx, await ctx.run('telemetry.mjs', [choice.options[picked].mode]));
 }
 
-// Crash reports, then the status line when it is off, from `settings.mjs keys`.
+// Crash reports, then the status line and the usage check when each is off, from `settings.mjs keys`.
 export async function askMachineSettings(ctx) {
   const keys = await ctx.run('settings.mjs', ['keys']);
   if (keys.code !== 0) {
@@ -57,8 +58,10 @@ export async function askMachineSettings(ctx) {
   const line = lastLine(keys.stdout, /^crash=/);
   if (line === null) return;
   await askCrashReports(ctx, token(line, 'crash'));
-  if (token(line, 'statusline') !== 'off') return;
-  if (await ctx.ask.confirm(STATUS_LINE_QUESTION, true) === true) {
+  if (token(line, 'statusline') === 'off' && await ctx.ask.confirm(STATUS_LINE_QUESTION, true) === true) {
     report(ctx, await ctx.run('statusline-install.mjs', []));
+  }
+  if (token(line, 'usage-check') === 'off' && await ctx.ask.confirm(USAGE_CHECK_QUESTION, false) === true) {
+    report(ctx, await ctx.run('settings.mjs', ['set', 'usage-check=on']));
   }
 }
