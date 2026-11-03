@@ -142,6 +142,12 @@ export function queueDir(key) {
   return path.join(accountDir(key), 'queue');
 }
 
+// Hook network work other than session reports (errors, timelines, the usage snapshot), written
+// by hooks and sent by the upload worker. Never holds a token; pruneStale sweeps it like queue/.
+export function outboxDir(key) {
+  return path.join(accountDir(key), 'outbox');
+}
+
 export function stateDir() {
   return path.join(beeziHome(), 'state');
 }
@@ -252,6 +258,13 @@ export function usageSnapshotStateFile(key) {
 // every account's ping shares this one reading rather than re-probing the OS per account.
 export function usagePingStateFile() {
   return path.join(beeziHome(), 'usage-ping.json');
+}
+
+// The background uploader's run record: { version, state, pid, startedAt, lastRunAt, retryAfterAt,
+// attemptedAt, outcome }. Root-level, one per Beezi home: the spawn gate and the worker share it,
+// and pruneStale() must never sweep it, or a stalled run's retry backoff would vanish with it.
+export function uploadWorkerFile() {
+  return path.join(beeziHome(), 'upload-worker.json');
 }
 
 // Rate-limit observations captured by the status line, awaiting the next drain. Separate from

@@ -16,6 +16,13 @@ function toSession(row, token) {
   };
 }
 
+// The only way an account row becomes a recipient: the session shape with no token and
+// tenantId null. The row's own tenantId is the web-side tenant and must never be followed;
+// expandTargets passes an entry with a set tenantId through unexpanded.
+export function accountRecipient(row) {
+  return toSession(row, null);
+}
+
 async function resolve(row, deps) {
   if (row == null || row.status !== AccountStatus.LINKED) return null;
   if (deps.getAccessToken && !deps.getAuthentication) {

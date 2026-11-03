@@ -1,7 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { getAccessToken as _getAccessToken, getAuthentication as _getAuthentication } from './token.mjs';
-import { flushQueue } from './checkpoint.mjs';
+import { flushUnderUploadLock } from './checkpoint.mjs';
+import { maybeSpawnUploadWorker } from './upload-trigger.mjs';
+import { hookDeadline } from './hook-budget.mjs';
 import { git as _git, resolveOriginRemote } from './git.mjs';
 import { resolveRepoRoot } from './repo-timeline.mjs';
 import {
@@ -14,6 +16,7 @@ import {
 import { stateDir } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { pruneStale } from './prune.mjs';
+import { pruneStaleLocks, CHECKPOINT_LOCK_PREFIX, CHECKPOINT_LOCK_STALE_MS } from './single-instance-lock.mjs';
 import { apiBase, ENDPOINTS } from './config.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { whoami, probeIdentity, PROBE_OUTCOMES } from './whoami.mjs';
@@ -338,8 +341,19 @@ export async function runSessionStart(input, deps = {}) {
   const targetKey = (s) => `${s.key}:${s.tenantId == null ? '' : s.tenantId}`;
   const liveAllowed = liveSessions.length > 0;
   initSessionState(input.session_id, { cwd: input.cwd == null ? null : input.cwd, transcriptPath: input.transcript_path == null ? null : input.transcript_path });
+  // Whatever earlier sessions left queued goes to the detached background uploader. Only a
+  // refused spawn flushes here, deadline-bounded and under the uploader's lock.
+  const spawnUploadWorker = deps.spawnUploadWorker == null ? maybeSpawnUploadWorker : deps.spawnUploadWorker;
+  let spawnOutcome;
+  try { spawnOutcome = spawnUploadWorker(); } catch { spawnOutcome = 'failed'; }
   const [, announcements] = await Promise.all([
-    Promise.all(sessions.map((s) => flushQueue(s, { fetchImpl }))),
+    spawnOutcome === 'failed'
+      ? flushUnderUploadLock(sessions, {
+        fetchImpl,
+        deadline: deps.deadline == null ? hookDeadline() : deps.deadline,
+        acquireUploadLock: deps.acquireUploadLock,
+      })
+      : null,
     Promise.all(targetSessions.map(async (s) => {
       // An analytics workspace answers connected for every repo, so its line says nothing; the banner says where analytics go.
       if (workspaceType(s) === 'analytics') return null;
@@ -352,7 +366,11 @@ export async function runSessionStart(input, deps = {}) {
     const mine = announcements.filter((a, i) => targetSessions[i].key === key);
     return mine.length > 0 && mine.every((a) => a != null && a.connected === false);
   }));
-  try { pruneStale(); } catch { /* best-effort */ }
+  // Every account row, revoked ones included: a queue or outbox no session flushes can only age
+  // out. The same keys cover both dirs, and a stale outbox `.sending` claim goes back here.
+  try { pruneStale({ accountKeys: rows.map((r) => r.key) }); } catch { /* best-effort */ }
+  // A checkpoint killed while holding its session lock leaves one dir per session behind.
+  try { pruneStaleLocks(CHECKPOINT_LOCK_PREFIX, CHECKPOINT_LOCK_STALE_MS); } catch { /* best-effort */ }
 
   // Pre-warm + self-heal the repo-map: discover this session's repo(s) and drop dead roots.
   try {

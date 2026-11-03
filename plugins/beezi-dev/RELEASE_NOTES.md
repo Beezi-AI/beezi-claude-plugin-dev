@@ -1,5 +1,20 @@
 # Beezi plugin release notes
 
+## 0.43.0 (2026-11-03) — Faster hooks, uploads in the background
+
+### Improved
+- **Uploads run in the background** — turn ends and session starts no longer wait for queued analytics to upload. One low-priority background uploader per machine sends them and stops when the queue is empty, after a few passes without progress, or after 5 minutes.
+- **Hooks no longer read your sign-in** — the hooks that run while you work no longer read your saved Beezi sign-in from the system credential store (a slow PowerShell call on Windows). Errors, timelines and plan usage are handed to the background uploader, which reads the sign-in once per run.
+- **Fewer and lighter hooks** — one process per tool call instead of two, and tool calls, compactions and subagent ends no longer wait for Beezi where Claude Code supports background hooks. Checkpoints read only the new part of the transcript, and on large sessions the activity timeline is rebuilt at most every 5 minutes (always at session end).
+- **Batched uploads** — on servers that support it, up to 50 reports go in one request; older servers keep getting one report per request.
+
+### Fixed
+- **No double counting after an interrupted upload** — queued reports are sent so that a shorter window of a session always arrives before a longer one that contains it, and a window that failed holds back the ones after it.
+- **Nothing re-sent after a killed hook** — the session's read position is saved before any upload starts.
+- **Old queue files are cleaned up** — queues and leftover temporary files are pruned for every linked account.
+- **Status line usage backlog drains** — each usage reading is cleared as soon as it is sent, so a stopped upload no longer resends the whole backlog.
+- **`/beezi:sync` waits its turn** — it waits for the background uploader instead of uploading alongside it, and stops early with "another session sync is running" when it can't get its turn.
+
 ## 0.42.0 (2026-10-29) — Plan usage in the desktop app
 
 ### New

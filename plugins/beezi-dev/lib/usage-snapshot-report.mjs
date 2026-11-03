@@ -10,7 +10,7 @@ import { normalizePlan } from './billing.mjs';
 import { buildIdentityStamp, recordOwnsIdentity } from './identity-stamp.mjs';
 import {
   readPendingStatuslineUsage as _readPendingStatuslineUsage,
-  clearPendingStatuslineUsage as _clearPendingStatuslineUsage,
+  clearPendingRow as _clearPendingRow,
 } from './statusline-usage.mjs';
 
 // The API deep-whitelists nested limit entries (forbidNonWhitelisted): an unknown upstream key
@@ -162,7 +162,7 @@ export async function drainStatuslineSnapshots(sessions, deps = {}) {
   // keeps a caller that has none working, just blind to those two places.
   const env = deps.env == null ? process.env : deps.env;
   const readPending = deps.readPendingStatuslineUsage == null ? _readPendingStatuslineUsage : deps.readPendingStatuslineUsage;
-  const clearPending = deps.clearPendingStatuslineUsage == null ? _clearPendingStatuslineUsage : deps.clearPendingStatuslineUsage;
+  const clearPendingRow = deps.clearPendingRow == null ? _clearPendingRow : deps.clearPendingRow;
   const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   // Only accounts holding both a token and a key can settle a row, so nothing else joins the fan-out.
   const recipients = (sessions || []).filter((s) => s && s.key);
@@ -228,9 +228,11 @@ export async function drainStatuslineSnapshots(sessions, deps = {}) {
       }
     }));
     if (waitingForToken || settled.some((ok) => !ok)) break;
+    // Cleared the moment it settles, by identity: a hook killed mid-drain never re-sends it, and
+    // a row the status line records meanwhile is never mistaken for it.
+    clearPendingRow(pendingRow);
     posted += 1;
   }
-  if (posted > 0) clearPending(posted);
   return { posted };
 }
 
@@ -246,8 +248,13 @@ export async function maybePostUsageSnapshot(session, deps = {}) {
   const readAccount = deps.readClaudeAccount == null ? _readClaudeAccount : deps.readClaudeAccount;
   if (!session || !session.token || session.key == null) return { reported: false, reason: 'no-token' };
 
+  // deps.utilization: a sample stored at enqueue time (the outbox snapshot item). The worker sends
+  // each stored sample as it was seen, so refreshes between enqueue and send are not collapsed.
   let utilization = null;
-  try { utilization = readUtilization(); } catch { utilization = null; }
+  if (deps.utilization != null) utilization = deps.utilization;
+  else {
+    try { utilization = readUtilization(); } catch { utilization = null; }
+  }
   if (!utilization) return { reported: false, reason: 'no-utilization' };
 
   const stateFile = usageSnapshotStateFile(session.key);

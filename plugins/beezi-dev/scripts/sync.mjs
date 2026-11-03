@@ -6,6 +6,7 @@ import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { maybeSpawnCoworkLive } from '../lib/cowork-live.mjs';
 import { usesRules } from '../lib/workspace-rules.mjs';
 import { startHistoryWorker } from '../lib/history-trigger.mjs';
+import { eachUntilBusy, isBusy } from '../lib/sync-loop.mjs';
 import { joined as printJoined, routes as printRoutes } from './workspace.mjs';
 
 // /beezi:sync — uploads every past session this machine still has on disk, skipping whatever Beezi
@@ -23,7 +24,8 @@ function fail(message) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-// One account's run. Per-account problems print and return so the accounts after it still run.
+// One account's run. Per-account problems print and return so the accounts after it still run —
+// except busy, which the caller's loop stops on (lib/sync-loop.mjs). -> the audit's result.
 async function syncOne(account, options, label, runCache = null) {
   options.account = account;
   options.mode = SYNC_MODE;
@@ -38,7 +40,11 @@ async function syncOne(account, options, label, runCache = null) {
     },
     options,
   );
+  report(result, options);
+  return result;
+}
 
+function report(result, options) {
   // The real count, after the live-session skip the audit already applies — not the pre-run plan,
   // which also counts the live session and sessions still being written.
   if (options.excludedLabel != null && result.excluded > 0) {
@@ -92,8 +98,16 @@ async function syncOne(account, options, label, runCache = null) {
     );
   }
 
+  // Their live reports are still queued; re-sending them now could count them twice.
+  if (result.pendingLive > 0) {
+    console.log(
+      `Beezi: ${plural(result.pendingLive, 'session')} still ${result.pendingLive === 1 ? 'has' : 'have'} live uploads pending ` +
+        'and will be included on the next /beezi:sync.',
+    );
+  }
+
   if (result.candidates === 0) {
-    console.log('✓ Beezi: everything is already uploaded.');
+    if (!(result.pendingLive > 0)) console.log('✓ Beezi: everything is already uploaded.');
     return;
   }
 
@@ -277,28 +291,31 @@ async function main() {
     fail('Beezi: /beezi:sync does not take --force — there is no one-time seal to force past.');
   }
 
-  // One run per account × routed workspace.
+  // One run per account × routed workspace. The first busy run ends them all: the locks it waited
+  // on are machine-wide, so every later run would wait the same 60 s and end busy too.
   for (const row of rows) {
     const override = parseTenantFlags(rest, row).tenantIds;
     // One git cache for every workspace's run of this account, as in backfill.
     const runCache = createRunCache();
     if (!isMultiTenant(row)) {
       if (rows.length > 1) console.log(`\n— ${describeAccount(row)} —`);
+      let result;
       if (usesRules(row)) {
         const plan = planWorkspaceRuns(row);
         const excludedSessionIds = dontTrackSessionIds(plan);
-        await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null, runCache);
+        result = await syncOne(row.key, { ...options, tenantId: null, excludedSessionIds, excludedLabel: describeAccount(row) }, null, runCache);
       } else {
-        await syncOne(row.key, { ...options, tenantId: null }, null, runCache);
+        result = await syncOne(row.key, { ...options, tenantId: null }, null, runCache);
       }
+      if (isBusy(result)) break;
       continue;
     }
     // --tenant is an override: those workspaces get every past session, unrouted.
     if (override.length > 0) {
-      for (const tenantId of override) {
+      if (await eachUntilBusy(override, (tenantId) => {
         console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
-        await syncOne(row.key, { ...options, tenantId }, null, runCache);
-      }
+        return syncOne(row.key, { ...options, tenantId }, null, runCache);
+      })) break;
       continue;
     }
     const plan = planWorkspaceRuns(row);
@@ -308,10 +325,10 @@ async function main() {
     }
     const summary = routeSummary(row, plan);
     if (summary != null) console.log(`\n${summary}`);
-    for (const tenantId of plan.tenantIds) {
+    if (await eachUntilBusy(plan.tenantIds, (tenantId) => {
       console.log(`\n— ${describeAccount(row)} · ${tenantLabel(row, tenantId)} —`);
-      await syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null, runCache);
-    }
+      return syncOne(row.key, { ...options, tenantId, sessionRoutes: plan.routes }, null, runCache);
+    })) break;
   }
   // Pending history (rules gained a workspace) gets its own coverage-based pass once this sync let go of the lock.
   if (!options.dryRun) for (const row of rows) await startHistoryWorker(row.key);

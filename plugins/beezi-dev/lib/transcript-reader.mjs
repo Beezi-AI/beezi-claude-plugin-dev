@@ -1,6 +1,9 @@
+import crypto from 'crypto';
 import fs from 'fs';
 
 export const MAX_LINE_BYTES = 256 * 1024 * 1024;
+// A byte anchor proves the file is the one it was taken on by the SHA-1 of this many leading bytes.
+export const HEAD_HASH_BYTES = 4096;
 const CHUNK_BYTES = 1024 * 1024;
 const NEWLINE = 0x0a;
 const CLOSE_BRACE = 0x7d;
@@ -157,47 +160,52 @@ function withFile(transcriptPath, read) {
   }
 }
 
-// Calls onLine(buf, start, end, skip) per `\n`-split line in file order, the unterminated last one included when non-empty.
-function forEachLine(transcriptPath, { chunkBytes = CHUNK_BYTES, maxLineBytes = MAX_LINE_BYTES } = {}, onLine) {
-  withFile(transcriptPath, (fd, size) => {
-    let buf = Buffer.alloc(chunkBytes);
-    let start = 0;
-    let end = 0;
-    let pos = 0;
-    let skip = null;
-    for (;;) {
-      const nl = buf.subarray(0, end).indexOf(NEWLINE, start);
-      if (nl !== -1) {
-        if (skip == null && nl - start > maxLineBytes) skip = newSkip();
-        if (skip != null) skipForward(skip, buf, start, nl);
-        if (onLine(buf, start, nl, skip)) return;
-        skip = null;
-        start = nl + 1;
-        continue;
-      }
-      if (skip == null && end - start > maxLineBytes) skip = newSkip();
-      if (skip != null) {
-        skipForward(skip, buf, start, end);
-        start = 0;
-        end = 0;
-      } else {
-        buf.copy(buf, 0, start, end);
-        end -= start;
-        start = 0;
-        if (end === buf.length) {
-          const grown = Buffer.alloc(buf.length * 2);
-          buf.copy(grown, 0, 0, end);
-          buf = grown;
-        }
-      }
-      if (pos >= size) break;
-      const read = fs.readSync(fd, buf, end, Math.min(buf.length - end, size - pos), pos);
-      if (read === 0) break;
-      pos += read;
-      end += read;
+// Calls onLine(buf, start, end, skip, next) per `\n`-split line in file order from byte `fromOffset`,
+// the unterminated last one included when non-empty. `next` is the file offset after the line's `\n`,
+// or -1 for the unterminated last line. Invariant: buf[0..end) holds file bytes [pos - end, pos).
+function forEachLineFd(fd, size, { chunkBytes = CHUNK_BYTES, maxLineBytes = MAX_LINE_BYTES } = {}, fromOffset, onLine) {
+  let buf = Buffer.alloc(chunkBytes);
+  let start = 0;
+  let end = 0;
+  let pos = fromOffset;
+  let skip = null;
+  for (;;) {
+    const nl = buf.subarray(0, end).indexOf(NEWLINE, start);
+    if (nl !== -1) {
+      if (skip == null && nl - start > maxLineBytes) skip = newSkip();
+      if (skip != null) skipForward(skip, buf, start, nl);
+      if (onLine(buf, start, nl, skip, pos - end + nl + 1)) return;
+      skip = null;
+      start = nl + 1;
+      continue;
     }
-    if (skip != null || end > start) onLine(buf, start, end, skip);
-  });
+    if (skip == null && end - start > maxLineBytes) skip = newSkip();
+    if (skip != null) {
+      skipForward(skip, buf, start, end);
+      start = 0;
+      end = 0;
+    } else {
+      buf.copy(buf, 0, start, end);
+      end -= start;
+      start = 0;
+      if (end === buf.length) {
+        const grown = Buffer.alloc(buf.length * 2);
+        buf.copy(grown, 0, 0, end);
+        buf = grown;
+      }
+    }
+    if (pos >= size) break;
+    const read = fs.readSync(fd, buf, end, Math.min(buf.length - end, size - pos), pos);
+    if (read === 0) break;
+    pos += read;
+    end += read;
+  }
+  if (skip != null || end > start) onLine(buf, start, end, skip, -1);
+}
+
+// Calls onLine(buf, start, end, skip) per `\n`-split line in file order, the unterminated last one included when non-empty.
+function forEachLine(transcriptPath, options, onLine) {
+  withFile(transcriptPath, (fd, size) => forEachLineFd(fd, size, options, 0, onLine));
 }
 
 // Same as forEachLine, from the last line to the first; empty lines are passed too.
@@ -248,15 +256,19 @@ export function scanTranscript(transcriptPath, fromLine, onRecord, options) {
   let count = 0;
   // Empty lines count only once a later non-empty line arrives: that is the trailing-`\n` trim.
   let pendingEmpty = 0;
-  forEachLine(transcriptPath, options, (buf, start, end, skip) => {
+  forEachLine(transcriptPath, options, (buf, start, end, skip, next) => {
     if (skip == null && start === end) {
       pendingEmpty += 1;
       return false;
     }
+    // An unterminated last line that gives no record is one Claude Code is still writing: it is
+    // not counted (nor the blank lines before it), so the cursor stays where its finished form is read.
+    const tail = next === -1 ? recordOf(buf, start, end, skip) : undefined;
+    if (next === -1 && tail === undefined) return true;
     count += pendingEmpty + 1;
     pendingEmpty = 0;
     if (count <= fromLine) return false;
-    const line = recordOf(buf, start, end, skip);
+    const line = next === -1 ? tail : recordOf(buf, start, end, skip);
     return line !== undefined && onRecord({ lineNo: count, line: projectRecord(line) }) === true;
   });
   return count;
@@ -266,6 +278,81 @@ export function readTranscript(transcriptPath, fromLine = 0, options) {
   const records = [];
   const lineCount = scanTranscript(transcriptPath, fromLine, (record) => { records.push(record); }, options);
   return { lineCount, records };
+}
+
+// Exactly `length` bytes at `position`, or null when the file ends first.
+function readExact(fd, length, position) {
+  const buf = Buffer.alloc(length);
+  let got = 0;
+  while (got < length) {
+    const read = fs.readSync(fd, buf, got, length - got, position + got);
+    if (read === 0) return null;
+    got += read;
+  }
+  return buf;
+}
+
+function sha1Hex(buf, length) {
+  return crypto.createHash('sha1').update(buf.subarray(0, length)).digest('hex');
+}
+
+// `head` holds at least min(HEAD_HASH_BYTES, size) leading bytes of the file.
+function anchorOf(head, offset, line, size) {
+  const headBytes = Math.min(HEAD_HASH_BYTES, size);
+  return { offset, line, headHash: sha1Hex(head, headBytes), headBytes, size };
+}
+
+function isAnchor(anchor) {
+  return anchor != null
+    && Number.isInteger(anchor.offset) && anchor.offset >= 0
+    && Number.isInteger(anchor.line) && anchor.line >= 0
+    && Number.isInteger(anchor.headBytes) && anchor.headBytes >= 0
+    && typeof anchor.headHash === 'string';
+}
+
+// Where a later readTranscriptFrom may resume: `offset` must be the start of line `line + 1`.
+export function transcriptAnchor(transcriptPath, offset, line) {
+  return withFile(transcriptPath, (fd, size) => {
+    const head = readExact(fd, Math.min(HEAD_HASH_BYTES, size), 0);
+    if (head == null) throw new Error('transcript changed while reading');
+    return anchorOf(head, offset, line, size);
+  });
+}
+
+// The records after `anchor`, numbered from `anchor.line + 1` exactly like scanTranscript, or null
+// when the anchor does not fit this file (rewritten, truncated, not on a line boundary): the caller
+// then falls back to a full read. Only complete lines are consumed; `end` sits after the last
+// complete non-empty line, so a trailing partial line and trailing blank lines wait for the next read.
+export function readTranscriptFrom(transcriptPath, anchor, options) {
+  if (!isAnchor(anchor)) return null;
+  return withFile(transcriptPath, (fd, size) => {
+    if (size < anchor.offset || size < anchor.headBytes) return null;
+    // One head read serves both the check (anchor.headBytes) and the new anchor (min(4096, size)).
+    const head = readExact(fd, Math.max(anchor.headBytes, Math.min(HEAD_HASH_BYTES, size)), 0);
+    if (head == null || sha1Hex(head, anchor.headBytes) !== anchor.headHash) return null;
+    if (anchor.offset > 0) {
+      const before = anchor.offset <= head.length ? head.subarray(anchor.offset - 1) : readExact(fd, 1, anchor.offset - 1);
+      if (before == null || before[0] !== NEWLINE) return null;
+    }
+    const records = [];
+    let count = anchor.line;
+    let pendingEmpty = 0;
+    let endOffset = anchor.offset;
+    forEachLineFd(fd, size, options, anchor.offset, (buf, start, end, skip, next) => {
+      if (next === -1) return true;
+      if (skip == null && start === end) {
+        pendingEmpty += 1;
+        return false;
+      }
+      count += pendingEmpty + 1;
+      pendingEmpty = 0;
+      endOffset = next;
+      const line = recordOf(buf, start, end, skip);
+      if (line !== undefined) records.push({ lineNo: count, line: projectRecord(line) });
+      return false;
+    });
+    return { records, lineCount: count, end: anchorOf(head, endOffset, count, size) };
+  });
 }
 
 export function scanTranscriptTail(transcriptPath, visit, options) {

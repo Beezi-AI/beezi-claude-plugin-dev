@@ -8,6 +8,7 @@ import { readSyncState, isSegmentRepaired, markSegmentRepaired } from './cost-st
 import { readTrackingState, isTrackingDisabled } from './tracking.mjs';
 import { resolveFetch } from './fetch-compat.mjs';
 import { isMultiTenant } from './workspace.mjs';
+import { DRAIN_LOCK_WAIT_MS } from './upload-drain.mjs';
 
 // Retrying these cannot help: the workspace refuses uploads for good, so the repair stops asking.
 const FINAL_HALTS = [BackfillHalt.NOT_ALLOWED, BackfillHalt.ALREADY_COMPLETED];
@@ -90,13 +91,24 @@ async function repairAccount(session, deps, options) {
 
   // Halt at a batch boundary before the worker's watchdog kills the process mid-upload. The batch
   // dropped by the halt stays at coverage 0 and is picked up on the next pass.
+  // The sync path first waits up to DRAIN_LOCK_WAIT_MS for the `upload` lock, and shouldContinue is
+  // not consulted during that wait. Bound it by the time left, so a busy worker cannot carry this
+  // pass past the deadline; the caller's deadline already holds the margin before the watchdog.
+  // Out of wait, the audit returns busy, nothing is stamped and the next pass retries.
+  const auditDeps = {
+    ...deps,
+    fetchImpl,
+    listTranscripts: () => broken,
+    shouldContinue: () => !outOfTime(),
+  };
+  if (deadlineMs != null) {
+    const given = deps.uploadLockDeps == null ? null : deps.uploadLockDeps.waitMs;
+    const cap = given == null ? DRAIN_LOCK_WAIT_MS : Math.min(given, DRAIN_LOCK_WAIT_MS);
+    const waitMs = Math.max(0, Math.min(cap, deadlineMs - now()));
+    auditDeps.uploadLockDeps = Object.assign({}, deps.uploadLockDeps, { waitMs });
+  }
   const result = await runAudit(
-    {
-      ...deps,
-      fetchImpl,
-      listTranscripts: () => broken,
-      shouldContinue: () => !outOfTime(),
-    },
+    auditDeps,
     { mode: SYNC_MODE, account: session.key },
   );
 
@@ -105,7 +117,9 @@ async function repairAccount(session, deps, options) {
   // the ledger's unreadable marker lets the pass after that stamp the account regardless.
   const clean = result.ok === true && result.halt == null &&
     result.reportsFailed === 0 && result.costStatesFailed === 0 && result.unattributed === 0 &&
-    !(result.retriableUnreadable > 0);
+    !(result.retriableUnreadable > 0) &&
+    // Held back by reports still in the live queue: not repaired yet, the next pass retries them.
+    !(result.pendingLive > 0);
   if (final || clean) done();
   return {
     repaired: final || clean,

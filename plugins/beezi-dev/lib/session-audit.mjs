@@ -30,6 +30,7 @@ import { readLastCostState as _readLastCostState, toCostStateItem } from './cost
 import { listAnalyticsSessions } from './analytics-sessions.mjs';
 import { nonRegressingSnapshot, sameCumulativeUsage } from './cowork-snapshot.mjs';
 import { acquireOwnedLock } from './single-instance-lock.mjs';
+import { drainQueueLocked, queuedSessionNames, queueSessionName } from './upload-drain.mjs';
 import { readSessionShell as _readSessionShell } from './transcript-shell.mjs';
 import { sessionNameFrom as _sessionNameFrom } from './session-name.mjs';
 import { loadRepoMap as _loadRepoMap, resolveRemoteOffline } from './repo-map.mjs';
@@ -336,6 +337,8 @@ async function runAuditUnlocked(deps, options) {
     routeDeferred: 0,
     // One-workspace runs only: sessions a matched rule excludes from tracking (`excludedSessionIds`).
     excluded: 0,
+    // Sync only: sessions left out of this run because the live queue still holds a report of theirs.
+    pendingLive: 0,
   };
 
   if (options.account == null) { result.reason = 'no-account'; return result; }
@@ -411,9 +414,22 @@ async function runAuditUnlocked(deps, options) {
   // queue/<segmentId>.json; if it landed after this run's wide re-send, the server would hold a
   // narrow row inside a wider one — the one direction its containment supersede cannot dedupe, so
   // both would count in every SUM. Draining first also makes the coverage answer below current.
+  // The drain runs under the background uploader's `upload` lock (taken after `session-audit`,
+  // never the other way round). If a worker holds it past the bounded wait, report busy before
+  // any re-send: an unlocked drain beside the worker could reorder narrow and wide windows.
   if (syncMode && !options.coworkLive) {
-    try { await flushQueue(session, { fetchImpl }); } catch { /* best-effort; coverage still bounds us */ }
+    const drained = await drainQueueLocked(session, Object.assign({}, deps.uploadLockDeps, {
+      fetchImpl,
+      flushQueue,
+      acquireLock: deps.acquireUploadLock,
+    }));
+    if (!drained.locked) return { ok: false, reason: 'busy', scanned: 0 };
   }
+  // A drain can leave files queued (5xx, 401, offline, a stopped group). Re-sending such a session
+  // from coverage to EOF would post a wide window around a narrow one still queued, and the worker
+  // would post the narrow one after it: the order the server counts twice. Those sessions sit this
+  // run out and the next sync takes them once their queue has drained. Skipped, never deleted.
+  const queuedLive = syncMode ? queuedSessionNames(key) : new Set();
 
   const live = liveSessionId(env, deps);
   const all = listTranscripts();
@@ -467,6 +483,7 @@ async function runAuditUnlocked(deps, options) {
     // Session-keyed, so it goes stale the moment a session grows — coverage supersedes it in sync.
     if (!syncMode && !options.force && isImported(ledger, entry.sessionId)) { result.alreadyImported += 1; continue; }
     if (options.sinceMs != null && entry.mtimeMs < options.sinceMs) continue;
+    if (queuedLive.has(queueSessionName(entry.sessionId))) { result.pendingLive += 1; continue; }
     candidates.push(entry);
   }
   result.candidates = candidates.length;

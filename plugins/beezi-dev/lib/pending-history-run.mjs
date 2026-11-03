@@ -15,6 +15,9 @@ export function classifyRun(result, waiting) {
   if (REFUSED_REASONS.indexOf(result.reason) !== -1 || REFUSED_HALTS.indexOf(result.halt) !== -1) return RunOutcome.REFUSED;
   if (result.ok !== true || result.reason != null || result.halt != null) return RunOutcome.FAILED;
   if (result.reportsFailed > 0 || (result.coverageKnown === false && result.candidates > 0)) return RunOutcome.FAILED;
+  // Sessions held back because the live queue still holds their reports: the uploader is mid-drain,
+  // so retry soon like a busy run instead of closing the request with them left out.
+  if (result.pendingLive > 0) return RunOutcome.BUSY;
   return waiting ? RunOutcome.WAITING : RunOutcome.CLEAN;
 }
 

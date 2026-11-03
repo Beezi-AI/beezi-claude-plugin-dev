@@ -30,6 +30,7 @@ export const OAUTH_SCOPES = "email profile offline_access";
 // The Beezi REST surface, in one place. Paths are relative to apiBase().
 export const ENDPOINTS = Object.freeze({
   sessionsReport: "/sessions/report",
+  sessionsReportBatch: "/sessions/report-batch",
   // Chunked backfill of past sessions (runs at the end of /beezi:login); duplicates are absorbed by the
   // server's upsert keys, and /complete seals the one-time pull.
   sessionsBackfill: "/sessions/backfill",
