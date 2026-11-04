@@ -1,5 +1,30 @@
 # Beezi plugin release notes
 
+## 0.45.0 (2026-11-03) — Past sessions upload without asking
+
+### New
+- **Workspaces can upload past sessions without asking** — when the workspace owner turns off "Ask the developer first", `/beezi:login`, terminal setup, `/beezi:sync` and a later session start show the same summary of what is sent and hidden, then say the workspace "uploads past sessions without asking, so there's no question" and upload. At session start the upload runs in the background. Such an upload is never recorded as a "Not now", and one that fails retries quietly without showing the notice again.
+- **One summary for several workspaces** — when past sessions go to two or more workspaces, Beezi shows one summary with each workspace's sessions and what it hides, uploads to the ones that don't ask, then asks once about the rest: one multi-select question for up to 3 workspaces, with "Not now" last. Terminal setup ticks every workspace for you.
+
+### Improved
+- **`/beezi:sync` follows the owner's choice** — a workspace that uploads without asking uploads with no question in `/beezi:sync` too. Syncing specific workspaces with `--tenant` still asks.
+
+## 0.44.0 (2026-11-03) — Anonymized workspaces
+
+### New
+- **Anonymized workspaces, chosen per kind** — each workspace picks what it hides: repo and folder names, branch names, session titles, this computer's name and your account email. The plugin sends made-up names for each kind the workspace hides and real ones for the rest. Hiding session titles also leaves out subagent task descriptions and error text; hiding the account email also leaves out the Claude organization name.
+- **See it at a glance** — the session banner says which workspaces are anonymized, and `/beezi:settings account` shows the name this machine appears as when the workspace hides computer names.
+- **Past sessions are summarized before any upload** — `/beezi:login`, terminal setup and a later session start show how many past sessions a workspace would get, from which dates and folders, and what each one carries, then ask. Nothing is uploaded until you choose Upload now, unless the workspace owner turned off "Ask the developer first" (from 0.45.0). "Not now" is remembered: Beezi asks again only when the workspace owner changes the setting or a new rule sends a folder there. Adding or changing a rule uploads nothing on its own.
+- **`/beezi:sync` shows what it will send first** — it prints the same summary for each workspace and asks before uploading, even for a workspace that starts from today. From 0.45.0 a workspace that uploads past sessions without asking uploads without the question.
+- **What the question hid stays hidden** — an upload hides every kind the question said was hidden, even if the workspace owner turns one off before it finishes.
+- **Declined sessions stay declined** — sessions you said no to are not asked about again at login, in terminal setup or at session start; `/beezi:sync` still lists them. From 0.45.0, a workspace whose owner chose to upload past sessions without asking shows the notice and uploads them.
+- **Repairs only touch what you sent** — the background repair of older uploads re-sends only sessions this machine uploaded after a yes or tracked live.
+- **Typed emails follow the workspace** — an email you type to link a setup token to your account is hashed when the workspace hides account emails.
+- **Enabled-plugin reports follow the workspace** — the repo a project's plugins are enabled for is sent as a made-up name when the workspace hides repo and folder names.
+
+### Improved
+- **Sign-in client name** — the sign-in client this machine registers is now named "Beezi Claude Code plugin", without the machine's hostname.
+
 ## 0.43.0 (2026-11-03) — Faster hooks, uploads in the background
 
 ### Improved

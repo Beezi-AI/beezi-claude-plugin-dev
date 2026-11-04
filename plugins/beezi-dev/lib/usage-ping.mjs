@@ -114,17 +114,18 @@ export async function pingUsageSnapshot(deps = {}) {
   const unsent = targets.filter((s) => !sampleAlreadySent(readJson(usageSnapshotStateFile(s.key)), s.tenantId, sample));
   if (unsent.length === 0) return { reported: false, reason: 'already-sent' };
 
-  // One snapshot item per account, with that account's surviving target workspaces.
-  const targetsByKey = new Map();
+  // One snapshot item per account, with that account's surviving target workspaces and the kinds of those that hide accounts now.
+  const clonesByKey = new Map();
   for (const s of unsent) {
-    if (!targetsByKey.has(s.key)) targetsByKey.set(s.key, []);
-    targetsByKey.get(s.key).push(s.tenantId);
+    if (!clonesByKey.has(s.key)) clonesByKey.set(s.key, []);
+    clonesByKey.get(s.key).push(s);
   }
   const { enqueueOutbox, OUTBOX_KINDS } = await import('./outbox.mjs');
+  const { accountKindMap } = await import('./anonymization.mjs');
   let outboxed = 0;
-  for (const [key, ids] of targetsByKey) {
+  for (const [key, clones] of clonesByKey) {
     try {
-      enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets: ids, sample });
+      enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets: clones.map((s) => s.tenantId), capturedKinds: accountKindMap(clones), sample });
       outboxed += 1;
     } catch { /* best-effort: the next ping or turn-end writes it again */ }
   }

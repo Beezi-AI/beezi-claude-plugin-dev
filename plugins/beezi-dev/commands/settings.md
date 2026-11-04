@@ -250,6 +250,8 @@ dismissal runs nothing.
 After `rule add`, `rule set` or `rule remove`, write its first line verbatim (an error line too;
 it ends with " Undo: /beezi:settings undo" when there is a change to undo).
 
+Changing where analytics go uploads nothing. If this machine has past sessions for a workspace that gains a folder, Beezi asks about uploading them when a later session starts; a workspace whose owner chose upload without asking gets a notice and the upload instead.
+
 ### One-workspace rules
 
 For a one-workspace account (the chosen `account=` line has `workspaces=1`), there is no workspace
@@ -363,6 +365,8 @@ with no rule is sent"); add " (current)" to the description of the option matchi
   `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <ids> --account <key>`
 
 Write the command's first line verbatim (an error line too).
+
+Changing where analytics go uploads nothing. If this machine has past sessions for a workspace that gains a folder, Beezi asks about uploading them when a later session starts; a workspace whose owner chose upload without asking gets a notice and the upload instead.
 
 ## Account
 

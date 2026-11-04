@@ -9,6 +9,7 @@ import { resolveFetch } from './fetch-compat.mjs';
 import { readSessionWorkspace, expandTargets, resolveTargets } from './workspace.mjs';
 import { createTranscriptMemo as _createTranscriptMemo } from './transcript-memo.mjs';
 import { CHECKPOINT_LOCK_WAIT_MS } from './single-instance-lock.mjs';
+import { privateKinds, markPrivate } from './anonymization.mjs';
 
 // Walks the memo's whole-file records newest first, so the tail scan reuses the parse the
 // checkpoint needs anyway instead of reading the file a second time.
@@ -143,9 +144,11 @@ export async function reportSessionError(input, deps = {}) {
   };
   if (localOnly) {
     let outboxed = 0;
+    // Marked with the kinds the targets hide now, as queued reports are, for the worker's later send.
+    const marked = markPrivate(payload, privateKinds(sessions.map((s) => ({ session: s, targets: [s.tenantId], hold: [] }))));
     for (const s of sessions) {
       try {
-        enqueueOutbox(s.key, { kind: OUTBOX_KINDS.ERROR, tenantId: s.tenantId, sessionId, payload });
+        enqueueOutbox(s.key, { kind: OUTBOX_KINDS.ERROR, tenantId: s.tenantId, sessionId, payload: marked });
         outboxed += 1;
       } catch { /* best-effort, as the POST was */ }
     }

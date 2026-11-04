@@ -1,5 +1,5 @@
 import { chooseAccount } from './setup-account.mjs';
-import { askMachineSettings, offerDefault, uploadHistory } from './setup-finish.mjs';
+import { askMachineSettings, offerDefault, offerHistory } from './setup-finish.mjs';
 import { capturePlan } from './setup-plan.mjs';
 import { askNewFolders, reviewJoined, reviewRoutes } from './setup-routing.mjs';
 
@@ -21,7 +21,7 @@ export async function runSetup(ctx) {
   ctx.progress(SESSIONS_LABEL);
   await reviewJoined(ctx, account.key);
   await reviewRoutes(ctx, account.key);
-  await uploadHistory(ctx, account.key);
+  await offerHistory(ctx, account.key);
   ctx.progress(SETTINGS_LABEL);
   await offerDefault(ctx, account);
   await askMachineSettings(ctx);

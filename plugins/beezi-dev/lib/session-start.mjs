@@ -31,9 +31,9 @@ import {
   recordWhoami,
   readTrackingState,
   allowsLiveFor,
-  shouldBackfill,
   TrackingMode,
 } from './tracking.mjs';
+import { workspacesAt } from './history-trigger.mjs';
 import { BillingSource, hasCustomGateway } from './billing.mjs';
 import { statuslineCaptureDetached as _statuslineCaptureDetached } from './statusline-install.mjs';
 import { takeDesktopUsageCheckNotice as _takeDesktopUsageCheckNotice } from './usage-check.mjs';
@@ -302,7 +302,7 @@ export async function runSessionStart(input, deps = {}) {
     try { recordWhoamiImpl(session.key, probe.who, session.clientId); } catch { /* best-effort */ }
     if (probe.who != null) {
       const patch = {};
-      for (const field of ['email', 'name', 'tenantId', 'tenantName', 'tenants']) {
+      for (const field of ['email', 'name', 'tenantId', 'tenantName', 'tenants', 'anonymization', 'pastSessions']) {
         if (probe.who[field] != null) patch[field] = probe.who[field];
       }
       try { await updateAccount(session.key, patch); } catch { /* best-effort */ }
@@ -587,31 +587,32 @@ ${nudge}` : nudge;
     if (usageCheckNotice) message = message ? `${message}\n${usageCheckNotice}` : usageCheckNotice;
   }
 
-  // Tracking-policy messages: tell a dark workspace it is dark, and point at the login flow
-  // wherever the one-time history pull has not completed yet (paid tenants included) — the
-  // backfill runs as the last step of /beezi:login.
+  // Tracking-policy messages: tell a dark workspace it is dark, and point an audit workspace at
+  // /beezi:sync until its past sessions are settled.
   for (const session of sessions) {
     // A multi-workspace account's cached mode describes the web-side workspace, not this session's.
     if (isMultiTenant(session)) continue;
     const tracking = trackingByKey.get(session.key);
   const mode = tracking == null || tracking.trackingMode == null ? null : tracking.trackingMode;
+  // Offer state is keyed by the row's real workspace id, which the session clone cleared.
+  const own = rows.find((r) => r.key === session.key);
+  const historyOpen = mode === TrackingMode.BACKFILL_ONLY
+    && (await workspacesAt({ ...session, tenantId: own == null ? null : own.tenantId }, tracking, 'SETTLED')).length === 0;
   let policy = null;
   // The banner's route line already said live tracking is off: only the action is left to say.
   const noted = banner.noted.has(session.key);
   if (mode === TrackingMode.BACKFILL_ONLY && noted) {
-    policy = shouldBackfill(tracking)
-      ? 'Beezi: run /beezi:login to upload your session history, or upgrade your workspace plan to track new sessions.'
+    policy = historyOpen
+      ? 'Beezi: run /beezi:sync to upload your session history, or upgrade your workspace plan to track new sessions.'
       : 'Beezi: upgrade your workspace plan to track new sessions.';
   } else if (mode === TrackingMode.DISABLED && noted) {
     policy = null;
   } else if (mode === TrackingMode.BACKFILL_ONLY) {
-    policy = shouldBackfill(tracking)
-      ? 'Beezi: audit mode — new sessions are not tracked. Run /beezi:login to upload your session history, or upgrade your workspace plan to track new sessions.'
+    policy = historyOpen
+      ? 'Beezi: audit mode — new sessions are not tracked. Run /beezi:sync to upload your session history, or upgrade your workspace plan to track new sessions.'
       : 'Beezi: audit mode — new sessions are not tracked. Upgrade your workspace plan to start tracking them.';
   } else if (mode === TrackingMode.DISABLED) {
     policy = 'Beezi: analytics are off for this workspace.';
-  } else if (shouldBackfill(tracking)) {
-    policy = 'Beezi: run /beezi:login once to include your past sessions.';
   }
   if (policy) message = append(message, policy.replace('Beezi:', `${label(session)}:`));
 

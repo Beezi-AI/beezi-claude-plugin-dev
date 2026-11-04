@@ -25,21 +25,20 @@ import {
   tenantsOf,
 } from '../lib/workspace.mjs';
 import { releaseHeldQueue } from '../lib/workspace-queue.mjs';
-import { pluginRoot } from '../lib/workspace-prompt.mjs';
+import { pluginRoot } from '../lib/paths.mjs';
 import {
   createRouteContext, keepCurrentRules, outsideKey, placeNow, planReviewPlaces, planUnruledRoutes, routeForDir, routeKeyForDir, rulesOf, rulesTableLines, shortLabel,
 } from '../lib/workspace-rules.mjs';
 import { canonicalRemote } from '../lib/git.mjs';
 import { normPath, pathHasPrefix } from '../lib/repo-map.mjs';
 import { listAllTranscripts } from '../lib/transcript-index.mjs';
-import { pastSessions } from '../lib/past-sessions.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
 import { sessionFor } from '../lib/sessions.mjs';
 import { syncAccountIfNeeded } from '../lib/account-sync.mjs';
 import { fetchOauthKeyStatus } from '../lib/oauth-key-status.mjs';
 import { recordResolvedKeyData } from '../lib/plan-writeback.mjs';
 import { oauthTokenEnvWithOsProbe } from '../lib/claude-settings-env.mjs';
-import { startHistoryWorker, takeDeferFlag } from '../lib/history-trigger.mjs';
+import { startHistoryScan, takeDeferFlag } from '../lib/history-trigger.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 
 const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account <ref>]'
@@ -49,7 +48,7 @@ const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account 
   + ' | rule add-all (<id|name|n>… | none) [--session <id>] [--account <ref>]'
   + ' | routes [--session <id>] [--account <ref>]'
   + ' | joined [add-all | done | pick (--repo <url> | --folder <path> | --outside) <id|name|n>] [--session <id>] [--account <ref>]'
-  + ' | new-folders [--history | ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
+  + ' | new-folders [ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
   + ' | read <id|name|n> [--session <id>] [--account <ref>]'
   + ' | places [--session <id>] [--account <ref>]'
   + ' | undo [--session <id>]';
@@ -61,11 +60,11 @@ const UNDO_HINT = ' Undo: /beezi:settings undo';
 // The folder picker offers at most this many places.
 const PICKER_PLACES = 3;
 
-const deferText = (flags) => (flags.deferUpload ? ' --defer-upload' : '');
+const deferText = (flags) => (flags.deferScan ? ' --defer-scan' : '');
 
-// Starts the history upload a write just requested, unless the calling flow uploads next.
+// Scans the account's workspaces waiting for a scan (a rule add may re-open one), unless the calling flow offers next.
 async function afterRuleWrite(key, flags) {
-  if (!flags.deferUpload) await startHistoryWorker(key);
+  if (!flags.deferScan) await startHistoryScan(key);
 }
 
 function parseSessionFlag(argv) {
@@ -161,7 +160,7 @@ function targetWords(row, ids) {
 // Prints a write's confirmation as the first stdout line (the undo hint unless a flow defers) and records it as the change undo reverts.
 // `change` is the undo line's wording of it (default: the line without "✓ "), `was` a set's old target.
 function confirmChange(fresh, line, before, flags, { change = line.slice('✓ '.length), was = null } = {}) {
-  console.log(`${line}${flags.deferUpload ? '' : UNDO_HINT}`);
+  console.log(`${line}${flags.deferScan ? '' : UNDO_HINT}`);
   recordUndo({ account: fresh.key, summary: line.slice('✓ '.length), change, was, before, after: routingOf(fresh) });
 }
 
@@ -386,7 +385,7 @@ function ruleTarget(argv) {
   return { target, rest };
 }
 
-async function ruleAdd(argv, flags = { deferUpload: false }) {
+async function ruleAdd(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   const { target, rest: refs } = ruleTarget(rest);
@@ -407,7 +406,7 @@ async function ruleAdd(argv, flags = { deferUpload: false }) {
   console.log(`rule=${n}`);
 }
 
-async function ruleSet(argv, flags = { deferUpload: false }) {
+async function ruleSet(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length < 2) throw new UserError(USAGE);
@@ -427,7 +426,7 @@ async function ruleSet(argv, flags = { deferUpload: false }) {
   console.log(`rule=${found.index}`);
 }
 
-async function ruleRemove(argv, flags = { deferUpload: false }) {
+async function ruleRemove(argv, flags = { deferScan: false }) {
   const { account, rest } = await parseAccountFlag(argv);
   if (rest.length !== 1) throw new UserError(USAGE);
   const row = await resolveAccount(account);
@@ -463,7 +462,7 @@ async function rerouteGone(fresh, gone, ctx) {
 }
 
 // One rule per repo or folder that `routes` lists, all sending to the same workspaces.
-async function ruleAddAll(argv, flags = { deferUpload: false }) {
+async function ruleAddAll(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length === 0) throw new UserError(USAGE);
@@ -493,7 +492,7 @@ async function ruleAddAll(argv, flags = { deferUpload: false }) {
   console.log(`rules-added=${n}`);
 }
 
-async function rule(argv, flags = { deferUpload: false }) {
+async function rule(argv, flags = { deferScan: false }) {
   const [sub, ...rest] = argv;
   if (sub === 'add') { await ruleAdd(rest, flags); return; }
   if (sub === 'set') { await ruleSet(rest, flags); return; }
@@ -508,7 +507,7 @@ function ruleTargetFlag(place) {
 }
 
 // Past sessions waiting under New folders = Ask me, grouped by repo or folder, for the planning questions; returns the P-line count.
-export async function routes(argv, flags = { deferUpload: false }) {
+export async function routes(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -549,7 +548,7 @@ export async function routes(argv, flags = { deferUpload: false }) {
 const UNSAFE_LINE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 // Accounts that joined a workspace since their last re-pick here: every place to re-pick, with where it sends now (login Step 4a, /beezi:sync Step 1); returns the J-line count.
-export async function joined(argv, flags = { deferUpload: false }) {
+export async function joined(argv, flags = { deferScan: false }) {
   const [sub, ...after] = argv;
   if (sub === 'add-all') { await joinedAddAll(after, flags); return; }
   if (sub === 'pick') { await joinedPick(after, flags); return; }
@@ -598,7 +597,7 @@ function extendedTenantIds(row, place, addIds, newIds) {
 }
 
 // Adds one newly-joined workspace to one place, extending its current targets; the caller marks the join reviewed via `joined done`.
-async function joinedPick(argv, flags = { deferUpload: false }) {
+async function joinedPick(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest: afterAccount } = await parseAccountFlag(afterSession);
   const { target, rest } = ruleTarget(afterAccount);
@@ -618,7 +617,7 @@ async function joinedPick(argv, flags = { deferUpload: false }) {
 }
 
 // Adds the new workspaces to every listed place that already sends somewhere; Don't-track and no-rule-yet places stay as they are. Then marks the join reviewed.
-async function joinedAddAll(argv, flags = { deferUpload: false }) {
+async function joinedAddAll(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -653,7 +652,7 @@ async function joinedAddAll(argv, flags = { deferUpload: false }) {
 }
 
 // Keeps rule-less places sending where they send now (Ask me only), then marks the account's new workspaces reviewed.
-async function joinedDone(argv, flags = { deferUpload: false }) {
+async function joinedDone(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -679,9 +678,8 @@ async function joinedDone(argv, flags = { deferUpload: false }) {
   console.log(`kept=${kept.length}`);
 }
 
-export async function newFolders(argv, flags = { deferUpload: false }) {
-  const history = argv.indexOf('--history') !== -1;
-  const { session, rest: afterSession } = parseSessionFlag(argv.filter((arg) => arg !== '--history'));
+export async function newFolders(argv, flags = { deferScan: false }) {
+  const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   const row = await resolveAccount(account);
   if (rest.length === 0) {
@@ -693,13 +691,12 @@ export async function newFolders(argv, flags = { deferUpload: false }) {
     const newFoldersNow = newFoldersOf(row);
     console.log(`New folders${several ? ` (${accountLabel(row)})` : ''}: ${newFoldersLabel(row)}`);
     printWorkspaces(row);
-    if (history) printHistory(row);
     console.log(`new-folders=${newFoldersNow.mode} set=${newFoldersNow.set ? 'yes' : 'no'} multi=yes account=${row.key}`);
     return;
   }
   requireMulti(row);
   const mode = String(rest[0]).toLowerCase();
-  if ((mode !== 'ask' && mode !== 'send' && mode !== 'none') || (mode !== 'send' && rest.length > 1) || history) throw new UserError(USAGE);
+  if ((mode !== 'ask' && mode !== 'send' && mode !== 'none') || (mode !== 'send' && rest.length > 1)) throw new UserError(USAGE);
   const tenantIds = mode === 'send' ? selection(row, rest.slice(1)) : [];
   if (mode === 'send' && tenantIds.length === 0) throw new UserError('Send needs at least one workspace; use none to send nowhere.');
   const current = resolveSession(session);
@@ -716,14 +713,6 @@ export async function newFolders(argv, flags = { deferUpload: false }) {
   console.log(`new-folders=${mode}`);
 }
 
-// The setup wizard's preview: past sessions the upload would send and the places they come from. A count that fails prints
-// nothing, so the question still stands without numbers.
-function printHistory(row) {
-  let counts = null;
-  try { counts = pastSessions(row); } catch { counts = null; }
-  if (counts != null) console.log(`history=${counts.sessions} places=${counts.places}`);
-}
-
 // A session here with no rule follows the new New folders now: its held reports go out and workspaces it newly sends to check in.
 async function followNewFolders(fresh, current, prior) {
   if (current.sessionId == null || prior.rule != null) return;
@@ -738,7 +727,7 @@ function sameRule(a, b) {
 }
 
 // Puts back the rules and New folders from before the last recorded change, unless something changed them since.
-async function undo(argv, flags = { deferUpload: false }) {
+async function undo(argv, flags = { deferScan: false }) {
   const { session, rest } = parseSessionFlag(argv);
   if (rest.length !== 0) throw new UserError(USAGE);
   const last = readUndo();
@@ -791,7 +780,7 @@ export function pickerPlaces(row, entries, dir, ctx, options = {}) {
 }
 
 // The picker's lines: a header, then per place its F line and the rule-add command to finish with <tenants>.
-export function pickerLines(row, places, flags = { deferUpload: false }) {
+export function pickerLines(row, places, flags = { deferScan: false }) {
   if (places.length === 0) return [];
   const count = places.length === 1 ? '1 repo or folder' : `${places.length} repos or folders`;
   const lines = [`${accountLabel(row)}: ${count} with recent sessions account=${row.key}`];
@@ -802,7 +791,7 @@ export function pickerLines(row, places, flags = { deferUpload: false }) {
   return lines;
 }
 
-async function places(argv, flags = { deferUpload: false }) {
+async function places(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
   if (rest.length !== 0) throw new UserError(USAGE);
@@ -831,8 +820,8 @@ async function read(argv) {
 }
 
 async function main() {
-  const { deferUpload, argv: args } = takeDeferFlag(process.argv.slice(2));
-  const flags = { deferUpload };
+  const { deferScan, argv: args } = takeDeferFlag(process.argv.slice(2));
+  const flags = { deferScan };
   const [cmd, ...argv] = args;
   if (cmd === 'rules') { await rules(argv); return; }
   if (cmd === 'rule') { await rule(argv, flags); return; }

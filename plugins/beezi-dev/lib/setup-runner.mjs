@@ -19,7 +19,7 @@ const CLEAR_LINE = '\r\x1b[2K';
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
 
-// Writes complete lines through paint as they arrive, skipping the ones matching hide; a line matching live goes to onLive instead, and the activity line, when given, is cleared before each write and redrawn after.
+// Writes complete lines through paint as they arrive, skipping the ones matching hide; a line matching live goes to onLive instead of printing, and the activity line, when given, is cleared before each write and redrawn after.
 function lineEcho(write, hide, paint, activity, live, onLive) {
   let pending = '';
   const emit = (line) => {
@@ -111,8 +111,9 @@ export function createRunner(options) {
     const hide = opts && opts.hide ? opts.hide : null;
     const text = opts && opts.label ? opts.label : label;
     const busy = activity !== null && text !== null ? activity : null;
-    const live = busy !== null && opts && opts.live ? opts.live : null;
-    const onLive = (found) => { busy.setText(`${text} ${found[1]}/${found[2]}`); };
+    const live = opts && opts.live ? opts.live : null;
+    // With no activity line a live line is dropped, so a run without a TTY echoes no progress.
+    const onLive = (found) => { if (busy !== null) busy.setText(`${text} ${found[1]}/${found[2]}`); };
     return new Promise((resolve) => {
       let out = '';
       let err = '';

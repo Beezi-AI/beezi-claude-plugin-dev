@@ -14,6 +14,9 @@ import { installStatusline, statuslineInstalled, uninstallStatusline } from '../
 import { setUsageCheckEnabled, usageCheckEnabled } from '../lib/usage-check.mjs';
 import { UserError, friendlyMessage } from '../lib/friendly-error.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
+import { accountLabel } from '../lib/session-banner.mjs';
+import { hasKind } from '../lib/anonymization.mjs';
+import { AnonKind } from '../lib/anonymize.mjs';
 import { newFolders as printNewFoldersListing, rules as printRulesListing } from './workspace.mjs';
 import { setTelemetry } from './telemetry.mjs';
 
@@ -285,9 +288,15 @@ function newFoldersSection(view) {
   return out;
 }
 
+// The made-up machine name each account's workspace shows; the account named when there are several.
+function appearsAsLines(rows) {
+  return rows.filter((row) => hasKind(row.anonymization, AnonKind.HOSTS) && row.anonymization.machineName)
+    .map((row) => field('Appears as', rows.length > 1 ? `${row.anonymization.machineName} (${accountLabel(row)})` : row.anonymization.machineName));
+}
+
 function accountSection(view) {
   const { rows, health, def } = view;
-  const machine = ['This machine', field('Claude plan', claudePlan())];
+  const machine = ['This machine', field('Claude plan', claudePlan())].concat(appearsAsLines(rows));
   if (rows.length === 0) return ['Beezi · not linked — run /beezi:login', ''].concat(machine);
   const several = rows.length > 1;
   const out = [];

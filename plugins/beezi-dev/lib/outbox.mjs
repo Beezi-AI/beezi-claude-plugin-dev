@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { outboxDir, tenantTag } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
+import { unionKinds } from './anonymization.mjs';
 
 // Durable store for hook network work other than session reports: session errors, session
 // timelines and the per-account usage snapshot. Hooks enqueue; the upload worker lists, claims
@@ -77,6 +78,16 @@ function mergeSamples(existing, sample) {
   return out.length > MAX_SAMPLES ? out.slice(out.length - MAX_SAMPLES) : out;
 }
 
+// Workspace → kinds hidden at capture, unioned per workspace; anything not a kind list is ignored.
+function unionKindMaps(a, b) {
+  const out = {};
+  for (const map of [a, b]) {
+    if (map == null || typeof map !== 'object' || Array.isArray(map)) continue;
+    Object.keys(map).forEach((id) => { if (Array.isArray(map[id])) out[id] = unionKinds([out[id] || [], map[id]]); });
+  }
+  return out;
+}
+
 function requireSessionItem(item) {
   if (typeof item.sessionId !== 'string' || item.sessionId === '') {
     throw new TypeError(`outbox ${item.kind} item needs a sessionId`);
@@ -87,7 +98,7 @@ function requireSessionItem(item) {
 }
 
 // Writes one item and returns its file name. Only kind, tenantId, sessionId (name only),
-// payload, targets and sample are read from `item`; anything else on it is ignored.
+// payload, targets, sample and capturedKinds are read from `item`; anything else on it is ignored.
 export function enqueueOutbox(key, item) {
   const kind = item == null ? null : item.kind;
   if (kind !== OUTBOX_KINDS.ERROR && kind !== OUTBOX_KINDS.TIMELINE && kind !== OUTBOX_KINDS.SNAPSHOT) {
@@ -101,6 +112,7 @@ export function enqueueOutbox(key, item) {
     const filePath = path.join(dir, SNAPSHOT_FILE);
     const prior = readJson(filePath, null);
     const valid = prior != null && prior.version === OUTBOX_VERSION && prior.kind === OUTBOX_KINDS.SNAPSHOT;
+    const capturedKinds = unionKindMaps(valid ? prior.capturedKinds : null, item.capturedKinds);
     const body = {
       version: OUTBOX_VERSION,
       kind,
@@ -110,6 +122,8 @@ export function enqueueOutbox(key, item) {
       samples: mergeSamples(valid && Array.isArray(prior.samples) ? prior.samples : [], item.sample),
       createdAt: valid && typeof prior.createdAt === 'string' ? prior.createdAt : createdAt,
     };
+    // The kinds each target hid when a sample was taken, so the worker never sends it under fewer.
+    if (Object.keys(capturedKinds).length > 0) body.capturedKinds = capturedKinds;
     writeJsonSecure(filePath, body);
     return SNAPSHOT_FILE;
   }
@@ -229,12 +243,12 @@ export function finishOutbox(claimedPath, filePath, delivered) {
 }
 
 // Folds an undelivered snapshot into snapshot.json through enqueueOutbox's read-merge-write
-// (targets union, samples deduped), so a newer snapshot written mid-send loses nothing.
+// (targets and captured kinds union, samples deduped), so a newer snapshot written mid-send loses nothing.
 // `enqueue` is injectable for the delivery worker's test seam.
 export function mergeSnapshotBack(key, item, enqueue = enqueueOutbox) {
   const targets = targetIds(item.targets);
   const samples = Array.isArray(item.samples) ? item.samples.filter(isSample) : [];
-  const base = { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: item.tenantId, targets };
+  const base = { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: item.tenantId, targets, capturedKinds: item.capturedKinds };
   if (samples.length === 0) enqueue(key, base);
   for (const sample of samples) enqueue(key, Object.assign({}, base, { sample }));
 }

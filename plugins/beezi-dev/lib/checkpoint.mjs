@@ -43,6 +43,7 @@ import { oauthTokenEnvWithOsProbe } from './claude-settings-env.mjs';
 import {
   maybePostUsageSnapshot as _maybePostUsageSnapshot,
   drainStatuslineSnapshots as _drainStatuslineSnapshots,
+  markPendingStatuslineUsage,
 } from './usage-snapshot-report.mjs';
 import { readSessionWorkspace, resolveTargets, tenantsOf, isMultiTenant, QUEUE_HOLD_MS } from './workspace.mjs';
 import { enqueue, enqueueHeld, unwrapQueueFile, releaseHeldFile } from './workspace-queue.mjs';
@@ -50,6 +51,7 @@ import { parseQueueName, orderQueueFiles } from './queue-order.mjs';
 import { planBatches, BATCH_MAX_ITEMS, BATCH_MAX_BYTES } from './batch-plan.mjs';
 import { BATCH_POST_BUDGET_MS, readBatchResults, readBoundedJson } from './batch-upload.mjs';
 import { bindSessionRoutes, usesRules } from './workspace-rules.mjs';
+import { privateKinds, markPrivate, reportForWire, anonymizationFor, kindsOf, accountKinds } from './anonymization.mjs';
 import {
   acquireOwnedLock as _acquireOwnedLock,
   checkpointLockName,
@@ -430,15 +432,18 @@ async function checkpointBody(input, deps, options, gate) {
   for (const p of plans) for (const t of p.targets) senders.push({ ...p.session, tenantId: t });
   // Under localOnly every target gets its outbox items: enqueueing needs no token.
   const liveSenders = localOnly ? senders : senders.filter((s) => s.token);
-  // Fan each payload into every target file, plus one held copy while the session awaits a rule.
+  // Fan each payload into every target file, plus one held copy while the session awaits a rule; returns what was queued.
+  const kindMap = privateKinds(plans);
   const emit = options.sink == null
     ? (payload) => {
+      const marked = markPrivate(payload, kindMap);
       for (const p of plans) {
-        for (const t of p.targets) enqueue(p.session.key, payload, t, { multi: p.multi });
-        if (p.hold.length > 0) enqueueHeld(p.session.key, payload, p.hold);
+        for (const t of p.targets) enqueue(p.session.key, marked, t, { multi: p.multi });
+        if (p.hold.length > 0) enqueueHeld(p.session.key, marked, p.hold);
       }
+      return marked;
     }
-    : options.sink;
+    : (payload) => { options.sink(payload); return payload; };
   const resolvedSessionName = resolveSessionName(session_id, transcript_path);
 
   // Memoized git shell-outs for this checkpoint: dir→root, root→remote, root→reflog/HEAD.
@@ -722,7 +727,7 @@ async function checkpointBody(input, deps, options, gate) {
           ...stats,
           duration_sec: durationSec,
         };
-        emit(payload);
+        const queued = emit(payload);
         carryFrom = null;
         // Claim only what actually reached the queue: a failed write must not swallow the window
         // for every later segment too.
@@ -730,7 +735,7 @@ async function checkpointBody(input, deps, options, gate) {
           covered = claimIntervals(covered, intervals);
           coveredDirty = true;
         }
-        lastPayload = payload;
+        lastPayload = queued;
         enqueued += 1;
       } catch {
         carryFrom = fromLine;
@@ -922,7 +927,7 @@ async function checkpointBody(input, deps, options, gate) {
       // One item per error and target; the same error seen again overwrites its own file.
       for (const s of liveSenders) {
         try {
-          enqueueOutbox(s.key, { kind: OUTBOX_KINDS.ERROR, tenantId: s.tenantId, sessionId: session_id, payload: errorPayload });
+          enqueueOutbox(s.key, { kind: OUTBOX_KINDS.ERROR, tenantId: s.tenantId, sessionId: session_id, payload: markPrivate(errorPayload, kindMap) });
           outboxed += 1;
         } catch { /* best-effort, as the POST was */ }
       }
@@ -987,6 +992,8 @@ async function checkpointBody(input, deps, options, gate) {
       // One snapshot item per account: its targets are that account's sender workspaces, and the
       // sample is the usage reading this checkpoint already stamped. Written even without a
       // sample: the targets are what carries the statusline drain to the worker.
+      // Items and status-line rows carry the kinds of the targets that hide accounts now, honored at send.
+      const hidesAccounts = accountKinds(kindMap);
       const targetsByKey = new Map();
       for (const s of senders) {
         if (!targetsByKey.has(s.key)) targetsByKey.set(s.key, []);
@@ -994,10 +1001,12 @@ async function checkpointBody(input, deps, options, gate) {
       }
       for (const [key, targets] of targetsByKey) {
         try {
-          enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets, ...(utilization ? { sample: utilization } : {}) });
+          enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets, capturedKinds: hidesAccounts, ...(utilization ? { sample: utilization } : {}) });
           outboxed += 1;
         } catch { /* best-effort */ }
       }
+      // The worker drains the status-line rows later: mark them now.
+      try { markPendingStatuslineUsage(hidesAccounts); } catch { /* best-effort */ }
     } else {
       const postSnapshot = deps.maybePostUsageSnapshot == null ? _maybePostUsageSnapshot : deps.maybePostUsageSnapshot;
       // One after another: the per-account snapshot state is read-modify-write.
@@ -1636,12 +1645,22 @@ export async function flushQueue(session, deps = {}) {
       try { fs.unlinkSync(filePath); result.rejected += 1; } catch { /* best-effort */ }
       continue;
     }
+    // Never posted raw: kept while the workspace is anonymized but keyless, dropped when only its marker made it private.
+    const wire = reportForWire(payload, session, tenantId);
+    if (wire == null) {
+      if (kindsOf(anonymizationFor(session, tenantId)).length > 0) {
+        failOrExpire({ filePath, groupKey: queueGroupOf(file), mtimeMs });
+      } else {
+        try { fs.unlinkSync(filePath); result.rejected += 1; } catch { /* best-effort */ }
+      }
+      continue;
+    }
 
     // Past every hold, dark and member filter: postable.
-    const ready = { name: file, filePath, payload, tenantId, groupKey: queueGroupOf(file), mtimeMs };
+    const ready = { name: file, filePath, payload: wire, tenantId, groupKey: queueGroupOf(file), mtimeMs };
     // Batching collects every ready entry first; the batches go out after the loop.
     if (batching) {
-      ready.bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+      ready.bytes = Buffer.byteLength(JSON.stringify(wire), 'utf8');
       readyEntries.push(ready);
       continue;
     }

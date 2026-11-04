@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
+import { ACCOUNTS_DIR, CLAUDE_SESSIONS_DIR } from './dir-names.mjs';
 
 // Baked environment identity: scripts/make-variant.sh writes env.json into dev/staging variants;
 // the prod plugin ships { "name": "" }. Missing or unreadable reads as prod.
@@ -15,6 +16,14 @@ function readEnvJson() {
   }
 }
 const ENV_JSON = readEnvJson();
+
+export function pluginRoot(deps = {}) {
+  const env = deps.env == null ? process.env : deps.env;
+  const root = deps.pluginRoot != null
+    ? deps.pluginRoot
+    : (env.CLAUDE_PLUGIN_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
+  return root.replace(/\\/g, '/');
+}
 
 // Namespace for every machine-local artifact: state dir and OS credential entry alike.
 // BEEZI_ENV overrides for local development; otherwise the identity is baked into the variant,
@@ -62,7 +71,7 @@ export function accountsIndexFile() {
 }
 
 export function accountsRoot() {
-  return path.join(beeziHome(), 'accounts');
+  return path.join(beeziHome(), ACCOUNTS_DIR);
 }
 
 // Held by mkdir while the single-account store is folded into accounts/<key>/; see
@@ -168,6 +177,16 @@ export function repoMapFile() {
 // living there would expire and make every old session look importable again on the next run.
 export function auditLedgerFile(key, tenantId = null) {
   return path.join(accountDir(key), tenantId == null ? 'audit-ledger.json' : `audit-ledger.${tenantTag(tenantId)}.json`);
+}
+
+// The past-session offer a scan left for the next prompt; at the account dir root, away from pruneStale().
+export function historyOfferFile(key, tenantId = null) {
+  return path.join(accountDir(key), tenantId == null ? 'history-offer.json' : `history-offer.${tenantTag(tenantId)}.json`);
+}
+
+// Session ids the developer was asked about and did not upload, per workspace, next to the offer file.
+export function historyDeclinedFile(key, tenantId = null) {
+  return path.join(accountDir(key), tenantId == null ? 'history-declined.json' : `history-declined.${tenantTag(tenantId)}.json`);
 }
 
 // File-name-safe form of a tenant id, shared by per-tenant ledgers and queue copies.
@@ -334,5 +353,5 @@ export function claudeProjectsDir() {
 }
 
 export function claudeSessionsDir() {
-  return path.join(claudeHome(), 'sessions');
+  return path.join(claudeHome(), CLAUDE_SESSIONS_DIR);
 }
