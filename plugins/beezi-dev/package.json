@@ -9,6 +9,6 @@
     "node": ">=13.2"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   }
 }
