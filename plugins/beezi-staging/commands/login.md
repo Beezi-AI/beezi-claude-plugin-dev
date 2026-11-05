@@ -1,6 +1,6 @@
 ---
 description: Link a Beezi account to this machine (browser sign-in); repeat to add more accounts
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/key-resolve.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login-flow.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login-preflight.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs:*), AskUserQuestion
+allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/billing-capture.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/history.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/key-resolve.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login-flow.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login-preflight.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/login.mjs:*), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs:*), AskUserQuestion
 ---
 
 Do NOT read, open, or inspect any files yourself. Run only the given commands.
@@ -35,7 +35,7 @@ to do now: `next=<step> account=<key>`, or just `next=stop` when it stopped befo
 | `payment question=tier`    | Step 3c                                                 |
 | `joined`                   | Step 4a, new workspaces                                 |
 | `routes`                   | Step 4a, repos and folders with no rule                 |
-| `backfill`                 | Step 4b                                                 |
+| `offer`                    | Step 4b                                                 |
 
 After a question's answers (or its dismissal) and the commands they call for, carry on with
 EXACTLY this, with the same `timeout`, where the step names `<step>`:
@@ -79,8 +79,8 @@ approved there. Show the user that output, except its LAST line, `account=<key>`
 token or credential.
 
 If it says the machine is **already linked** as that account, tell the user; the steps below still
-run (Step 2 right away, or after Step 1w's question), so a changed subscription tier is refreshed
-and an interrupted history upload resumes. If it printed no `account=` line (`next=stop`), STOP and
+run (Step 2 right away, or after Step 1w's question), so a changed subscription tier is refreshed.
+If it printed no `account=` line (`next=stop`), STOP and
 show the output.
 
 If the sign-in fails with a network or connection error (`next=stop`), do NOT retry and do NOT
@@ -101,9 +101,9 @@ in several workspaces that has never set New folders. Without a `<setup>` block,
 it.
 
 The `<setup account="<key>">` block is for you only: one `W. <workspace> account=<key> tenant=<id>
-role=<role>` line per workspace, then `sessions=<N> places=<M>` (past sessions the history upload
-would send, and the other repos and folders they ran in), or a `✗` line when they could not be
-counted (write it verbatim). After it come one `<preview tenant="<id>">` block for each of the
+role=<role>` line per workspace, then `places=<M>` (the other repos and folders past sessions on
+this machine ran in; for routing only, never shown or promised as an upload), or a `✗` line when they
+could not be counted (write it verbatim). After it come one `<preview tenant="<id>">` block for each of the
 first 2 workspaces, a `<preview tenant="several">` block and a `<preview tenant="choose">` block.
 
 Ask ONE single-select question, "Where should analytics from this machine go?", with one option per
@@ -120,7 +120,7 @@ workspaces; when any name matches none it is a dismissal.
 - a workspace, or the workspaces of a typed answer → run EXACTLY, with `<tenants>` = their `W.`
   lines' `tenant=` values joined by commas:
 
-  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <tenants> --account <key> --defer-upload`
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders send <tenants> --account <key> --defer-scan`
 
   write its first line verbatim, then carry on with `--from plan` (this folder now follows New
   folders, so there is no question about it).
@@ -134,7 +134,7 @@ workspaces; when any name matches none it is a dismissal.
   chosen → the workspace bullet above with their `tenant=` values (one is fine). Nothing chosen,
   with every part dismissed or empty → as a dismissal of the first question.
 - "Let me choose per repo" → run EXACTLY
-  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders ask --account <key> --defer-upload`,
+  `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs new-folders ask --account <key> --defer-scan`,
   write its first line verbatim, then carry on with `--from here`.
 - A dismissal → run nothing (the next /beezi:login asks again), then carry on with `--from here`.
 
@@ -166,7 +166,7 @@ nothing; the next /beezi:login asks again. Then run EXACTLY, with `<ids>` = the 
 `tenant=` values joined by commas, or `none` when the last option was chosen, only when it is the
 whole answer:
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current --account <key> --defer-upload <ids>`
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace.mjs rule add --current --account <key> --defer-scan <ids>`
 
 and write its first line verbatim. Nothing chosen or a dismissal runs nothing. Then carry on with
 `--from plan`.
@@ -328,8 +328,8 @@ Report its one-line summary. If the user dismisses a question or answers
 something not in the table, skip the capture — the link itself already
 succeeded, say so. Either way, then carry on with `--from joined`.
 
-Step 4 — upload past sessions (ALWAYS after Steps 2/3, on both fresh links and
-already-linked accounts; only Step 5 may follow it). Two parts, in order: 4a (new workspaces,
+Step 4 — where past sessions go, then the question about uploading them (ALWAYS after Steps 2/3,
+on both fresh links and already-linked accounts; only Step 5 may follow it). Two parts, in order: 4a (new workspaces,
 then repos and folders with no rule), then 4b.
 
 Step 4a — new workspaces, then repos and folders with no rule.
@@ -359,7 +359,7 @@ machine, it lists every repo and folder with where its analytics go now. Its lin
 `joined=0` → nothing to ask; the script went on to "Then, repos and folders with no rule" below.
 
 More than 4 `J` lines → first ask (single-select) "You joined <names>. Where should analytics for these
-<N> repos and folders go? Their past sessions will be sent there too." (`<N>` = the number of `J` lines)
+<N> repos and folders go?" (`<N>` = the number of `J` lines)
 with the options "Add <names> to all <N>" (description "Repos you don't track, and ones with no rule
 yet, stay as they are"), "Choose repos" ("Pick which repos and folders go to each new workspace") and
 "Leave them as they are" ("Nothing changes, and you're not asked about <names> again").
@@ -374,8 +374,7 @@ Except for "Choose repos", then carry on with `--from routes`.
 4 or fewer `J` lines → the per-workspace questions.
 
 Per-workspace questions — for each `W.` line with `new=yes`, in order, ask the `multiSelect: true`
-question "Which repos and folders should also send analytics to <name>? Their past sessions will be sent
-there too." `<name>` is the `W.` line's text after `W. ` up to ` account=`, and `<tenant>` its `tenant=`
+question "Which repos and folders should also send analytics to <name>?" `<name>` is the `W.` line's text after `W. ` up to ` account=`, and `<tenant>` its `tenant=`
 value. Options: one per `J` line, in order — label = `<short>` (the `J` line's text after `J<i>. ` up to
 ` (` or `,`), description = "Now: <where>" (`<where>` = the text after `now: ` up to ` account=`),
 or "No rule yet" when `<where>` is `no rule yet`; then "None of these" LAST (description "Nothing from
@@ -417,7 +416,7 @@ folders). Its lines:
   ask about it;
 - `routes=<total>` — the number of `P` lines, always last.
 
-`routes=0` → nothing to ask; the script ended with `next=backfill`: go to Step 4b.
+`routes=0` → nothing to ask; the script ended with `next=offer`: go to Step 4b.
 
 More than 4 `P` lines → first ask (single-select) "Where should analytics for these <N> repos and
 folders go?" (`<N>` = the number of `P` lines) with the options "Send all <N> to the same
@@ -465,36 +464,32 @@ again.
 
 Write each command's first line verbatim, then go to Step 4b.
 
-Step 4b — backfill. Run EXACTLY this one command, with the Bash tool's `timeout` set to 600000,
-substituting only `<key>` with the key from Step 1:
+Step 4b — past sessions. Run EXACTLY `node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --account <key>`, with the Bash `timeout` set to 600000. It uploads only to workspaces whose owner chose to upload past sessions without asking, and asks about every other one. Its blocks, in order:
 
-`node ${CLAUDE_PLUGIN_ROOT}/scripts/backfill.mjs --via login --account <key>`
+- `<notice …>` (one workspace that uploads without asking) or `<offers …>` (several workspaces with past sessions, in two groups): write its lines, and the `Uploading …` and `✓ Uploaded …` lines after it, verbatim inside one plain fenced code block (```, no language), keeping every leading space and line break. Ask nothing about them: that upload already ran.
+- `<offer …>` (one workspace that asks first): write its lines the same way, except `question=`, `upload-command=` and `decline-command=`; an `<offer>` after an `<offers>` block has no other lines and gets no code block. Then ask ONE AskUserQuestion per block, up to 4 per call: question = the `question=` value; options `Upload now` (description "Send these sessions to Beezi now") and `Not now` (description "Nothing is sent. /beezi:sync uploads them any time"). `Upload now` → run the block's `upload-command=` text EXACTLY ONCE, with the Bash `timeout` set to 600000, and report its output verbatim (the result notes below). Anything else, a dismissal included → run its `decline-command=` text EXACTLY ONCE and write its line verbatim.
+- `<ask …>` (several workspaces that ask first, at most 3 per block): write nothing from it. Ask ONE `multiSelect: true` AskUserQuestion per block, one call per block: question = its `question=` value, word for word; one option per `workspace=` line, in order — label = the `workspace=` value, description = the `description=` value after it — then `Not now` LAST (description "Nothing more is uploaded. Run /beezi:sync any time."). Each `workspace=` line is followed by that workspace's own `upload-command=` and `decline-command=`. For each picked workspace run its `upload-command=` text EXACTLY ONCE, with the Bash `timeout` set to 600000, and report its output verbatim (the result notes below); for each other workspace of the block run its `decline-command=` text EXACTLY ONCE and write its line verbatim. If `Not now` is chosen together with any workspace, run nothing yet: ask that block's question again once, starting with `"Not now" can't be combined with a workspace — pick one or the other.` A second mixed answer counts as `Not now`. `Not now`, nothing picked or a dismissal → run every `decline-command=` of the block.
 
-It is the one-time upload of this machine's Claude Code history into Beezi and
-can take several minutes; it prints progress lines as it goes. Report its
-output verbatim — progress and final summary, or the error line. It is safe on
-every login: already-uploaded sessions are skipped, and if it says nothing new
-to upload, just tell the user their history is up to date. If some sessions
-could not be delivered, tell the user that re-running /beezi:login later will
-resume the upload where it left off. A `Beezi (<account>): …` line saying where past sessions go
-is expected; when it is the only line, the run succeeded with nothing to send. Never echo any
-token.
+These are the only questions where a dismissal runs a command. Never run an `upload-command=` without an `Upload now` answer or a picked workspace. `offers=0 notices=0` → say nothing about past sessions.
 
-- `… to this workspace you joined`, `this workspace already has this machine's history`, `Some history
-  did not reach this workspace this time…` — the upload for a workspace joined after this machine was
-  linked: it resumes from what that workspace already has, like /beezi:sync. Show it verbatim; when it
-  says some history did not arrive, offer /beezi:sync.
+Outside the blocks, write verbatim only a `Note:` line, a line saying another sync is running, a
+`Beezi: could not count past sessions for …` line, a `… hides some names, but this machine has no valid key for it yet …` line, the `one-time import has been used` line (and the
+upgrade line under it), or a `✗` line: they say why something could not be counted or uploaded. Every other line (a `Beezi (<account>): …` route line, whose counts are not the offered sessions, a
+`no past Claude Code sessions found` line, the `— … —` headers, the `… sessions read…` progress
+lines and the `offers=<n> notices=<m>` line) is for you only; add nothing of your own. Never echo any token.
 
-If it reports the one-time import **has already been used**, that is final —
-the import is once per account and cannot be re-run. Do NOT retry, do NOT run
-the script again with different flags, and refuse politely if the user asks
-you to bypass it; relay the script's message (including the upgrade suggestion
-when it prints one), then continue to Step 5 without retrying the import.
+Result notes, for an `Upload now` command's output:
 
-Note for the user, only when Step 4 reports the pull finalized: the pull is
-one-time per account and tool — if they have Claude Code history on other
-machines, they should run /beezi:login there BEFORE it finalizes; a finalized
-pull cannot be re-opened.
+- `✓ Beezi: uploaded …` is the success line. `✓ Beezi: nothing new to upload…` means there was
+  nothing left to send.
+- `Beezi: <workspace> hides some names, but this machine has no valid key for it yet…` → show it
+  verbatim and add nothing; it already says what to do.
+- Any other line that says to run /beezi:sync again (an upload that stopped, or reports that could
+  not be delivered) → offer /beezi:sync.
+- `Beezi: nothing to upload for <workspace>. Run /beezi:sync to check again.` → the offer was gone;
+  show it verbatim and run nothing else.
+- `✓ Beezi already has the history for this workspace — the one-time import has been used …` → show
+  it (and the upgrade line under it) verbatim; do not run the script again with other flags.
 
 Step 5 — default account for analytics (only when Step 1's output contained the line
 `/beezi:analytics still reads from …`). Ask the user ONE yes/no question with the

@@ -4,6 +4,7 @@ const DONT_TRACK = {
   outside: "Don't track these",
 };
 const SETUP_QUESTION = 'Where should analytics from this machine go?';
+const SEND_ALL = 'Everything goes here, starting with new repos and folders';
 const PER_REPO = { label: 'Let me choose per repo', description: 'Beezi asks about each repo and folder with history next, and new ones when a session starts there' };
 export const SEVERAL = { label: 'Several workspaces…', description: 'Pick two or more; everything goes to each of them' };
 export const SEVERAL_QUESTION = 'Which workspaces should get analytics from this machine?';
@@ -13,9 +14,8 @@ const NO_FOLDER = /^\d+ other past sessions? ha(?:s|ve) no recorded folder and (
 const JOINED_NAMES = / you joined (.+) — \d+ repos? or folders? to review account=/;
 const MACHINE_LINES = [/^[\w-]+=/, /^[A-Z]\d*\. .* account=/, /-command=/, /^\s*[{[]/];
 const STOPPED = '✗ That step stopped unexpectedly.';
-const CONSENT = ' Their past sessions will be sent there too.';
-// Writes leave the upload to the wizard's backfill that follows.
-const DEFER = '--defer-upload';
+// Writes start no history scan: the wizard's offer step counts past sessions next.
+const DEFER = '--defer-scan';
 
 export function outputLines(text) {
   return String(text || '').split(/\r?\n/);
@@ -136,29 +136,13 @@ async function runAndReport(ctx, argv) {
   report(ctx, await ctx.run('workspace.mjs', argv));
 }
 
-const plural = (n, one, many) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
-
-// The `history=<N> places=<M>` counts, or null when the line is missing or malformed.
-export function parseHistory(text) {
-  const line = lastLine(text, /^history=/);
-  const found = line === null ? null : /^history=(\d+) places=(\d+)$/.exec(line.trimEnd());
-  return found ? { sessions: Number(found[1]), places: Number(found[2]) } : null;
-}
-
 // One option per workspace, each sending everything there, then the several-workspaces and per-repo options.
-export function setupOptions(workspaces, history) {
-  const sessions = history === null ? '' : plural(history.sessions, 'past session', 'past sessions');
-  let description = 'Everything goes here, starting with new repos and folders';
-  if (history !== null && history.sessions > 0) {
-    description = history.places > 0
-      ? `Everything goes here: new repos and folders, and ${history.places} with history (${sessions})`
-      : `Everything goes here: new repos and folders, and ${sessions}`;
-  }
-  return workspaces.map((w) => ({ label: w.name, description })).concat([SEVERAL, PER_REPO]);
+export function setupOptions(workspaces) {
+  return workspaces.map((w) => ({ label: w.name, description: SEND_ALL })).concat([SEVERAL, PER_REPO]);
 }
 
 export async function askNewFolders(ctx, key) {
-  const listing = await ctx.run('workspace.mjs', ['new-folders', '--history', '--account', key]);
+  const listing = await ctx.run('workspace.mjs', ['new-folders', '--account', key]);
   if (listing.code !== 0) {
     report(ctx, listing);
     return;
@@ -166,7 +150,7 @@ export async function askNewFolders(ctx, key) {
   const last = lastLine(listing.stdout, /^new-folders=/);
   if (last === null || token(last, 'set') !== 'no' || token(last, 'multi') !== 'yes') return;
   const workspaces = parseWorkspaces(listing.stdout);
-  const choice = await ctx.ask.choose(SETUP_QUESTION, setupOptions(workspaces, parseHistory(listing.stdout)), { defaultIndex: 0 });
+  const choice = await ctx.ask.choose(SETUP_QUESTION, setupOptions(workspaces), { defaultIndex: 0 });
   if (choice === null) return;
   if (choice === workspaces.length + 1) {
     await runAndReport(ctx, ['new-folders', 'ask', '--account', key, DEFER]);
@@ -203,7 +187,7 @@ async function askReposForTenant(ctx, key, tenant, places) {
     const batch = places.slice(i, i + 4);
     const part = parts > 1 ? ` (part ${i / 4 + 1} of ${parts})` : '';
     const options = batch.map((p) => ({ label: p.short, description: p.where === 'no rule yet' ? 'No rule yet' : `Now: ${p.where}` }));
-    const picked = await ctx.ask.chooseMany(`Which repos and folders should also send analytics to ${name}?${CONSENT}${part}`, options);
+    const picked = await ctx.ask.chooseMany(`Which repos and folders should also send analytics to ${name}?${part}`, options);
     if (picked === null) return false;
     for (let j = 0; j < picked.length; j += 1) {
       const place = batch[picked[j]];
@@ -227,7 +211,7 @@ export async function reviewJoined(ctx, key) {
   if (places.length > 4) {
     const names = joinedNames(listing.stdout, workspaces);
     const n = places.length;
-    const choice = await ctx.ask.choose(`You joined ${names}. Where should analytics for these ${n} repos and folders go?${CONSENT}`, [
+    const choice = await ctx.ask.choose(`You joined ${names}. Where should analytics for these ${n} repos and folders go?`, [
       { label: `Add ${names} to all ${n}`, description: "Repos you don't track, and ones with no rule yet, stay as they are" },
       { label: 'Choose repos', description: 'Pick which repos and folders go to each new workspace' },
       { label: 'Leave them as they are', description: `Nothing changes, and you're not asked about ${names} again` },

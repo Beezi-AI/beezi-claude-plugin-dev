@@ -66,20 +66,6 @@ export function typedSkillOf(line) {
   return m === null ? null : m[1];
 }
 
-// Byte length of a tool_result's content, tolerating both the string and text-block-array forms.
-function resultBytes(content) {
-  if (typeof content === 'string') return Buffer.byteLength(content, 'utf-8');
-  if (Array.isArray(content)) {
-    let bytes = 0;
-    for (const block of content) {
-      const text = block != null && typeof block.text === 'string' ? block.text : null;
-      bytes += Buffer.byteLength(text == null ? JSON.stringify(block == null ? '' : block) : text, 'utf-8');
-    }
-    return bytes;
-  }
-  return 0;
-}
-
 // Per-category { count, est_tokens } over a segment's transcript lines, plus finer maps
 // (mcp.by_server, skill.by_skill) and the `plugins` cross-cut. tool_use blocks live on assistant
 // lines; their tool_result (matched by tool_use_id) lands on a later user line within the same
@@ -91,7 +77,7 @@ export function computeOperations(lines) {
     if (!Array.isArray(content)) continue;
     for (const block of content) {
       if (block == null || block.type !== 'tool_result' || !block.tool_use_id) continue;
-      bytesById.set(block.tool_use_id, resultBytes(block.content));
+      bytesById.set(block.tool_use_id, block.contentBytes || 0);
     }
   }
 

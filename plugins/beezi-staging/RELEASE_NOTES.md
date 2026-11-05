@@ -1,5 +1,56 @@
 # Beezi plugin release notes
 
+## 0.45.0 (2026-11-03) — Past sessions upload without asking
+
+### New
+- **Workspaces can upload past sessions without asking** — when the workspace owner turns off "Ask the developer first", `/beezi:login`, terminal setup, `/beezi:sync` and a later session start show the same summary of what is sent and hidden, then say the workspace "uploads past sessions without asking, so there's no question" and upload. At session start the upload runs in the background. Such an upload is never recorded as a "Not now", and one that fails retries quietly without showing the notice again.
+- **One summary for several workspaces** — when past sessions go to two or more workspaces, Beezi shows one summary with each workspace's sessions and what it hides, uploads to the ones that don't ask, then asks once about the rest: one multi-select question for up to 3 workspaces, with "Not now" last. Terminal setup ticks every workspace for you.
+
+### Improved
+- **`/beezi:sync` follows the owner's choice** — a workspace that uploads without asking uploads with no question in `/beezi:sync` too. Syncing specific workspaces with `--tenant` still asks.
+
+## 0.44.0 (2026-11-03) — Anonymized workspaces
+
+### New
+- **Anonymized workspaces, chosen per kind** — each workspace picks what it hides: repo and folder names, branch names, session titles, this computer's name and your account email. The plugin sends made-up names for each kind the workspace hides and real ones for the rest. Hiding session titles also leaves out subagent task descriptions and error text; hiding the account email also leaves out the Claude organization name.
+- **See it at a glance** — the session banner says which workspaces are anonymized, and `/beezi:settings account` shows the name this machine appears as when the workspace hides computer names.
+- **Past sessions are summarized before any upload** — `/beezi:login`, terminal setup and a later session start show how many past sessions a workspace would get, from which dates and folders, and what each one carries, then ask. Nothing is uploaded until you choose Upload now, unless the workspace owner turned off "Ask the developer first" (from 0.45.0). "Not now" is remembered: Beezi asks again only when the workspace owner changes the setting or a new rule sends a folder there. Adding or changing a rule uploads nothing on its own.
+- **`/beezi:sync` shows what it will send first** — it prints the same summary for each workspace and asks before uploading, even for a workspace that starts from today. From 0.45.0 a workspace that uploads past sessions without asking uploads without the question.
+- **What the question hid stays hidden** — an upload hides every kind the question said was hidden, even if the workspace owner turns one off before it finishes.
+- **Declined sessions stay declined** — sessions you said no to are not asked about again at login, in terminal setup or at session start; `/beezi:sync` still lists them. From 0.45.0, a workspace whose owner chose to upload past sessions without asking shows the notice and uploads them.
+- **Repairs only touch what you sent** — the background repair of older uploads re-sends only sessions this machine uploaded after a yes or tracked live.
+- **Typed emails follow the workspace** — an email you type to link a setup token to your account is hashed when the workspace hides account emails.
+- **Enabled-plugin reports follow the workspace** — the repo a project's plugins are enabled for is sent as a made-up name when the workspace hides repo and folder names.
+
+### Improved
+- **Sign-in client name** — the sign-in client this machine registers is now named "Beezi Claude Code plugin", without the machine's hostname.
+
+## 0.43.0 (2026-11-03) — Faster hooks, uploads in the background
+
+### Improved
+- **Uploads run in the background** — turn ends and session starts no longer wait for queued analytics to upload. One low-priority background uploader per machine sends them and stops when the queue is empty, after a few passes without progress, or after 5 minutes.
+- **Hooks no longer read your sign-in** — the hooks that run while you work no longer read your saved Beezi sign-in from the system credential store (a slow PowerShell call on Windows). Errors, timelines and plan usage are handed to the background uploader, which reads the sign-in once per run.
+- **Fewer and lighter hooks** — one process per tool call instead of two, and tool calls, compactions and subagent ends no longer wait for Beezi where Claude Code supports background hooks. Checkpoints read only the new part of the transcript, and on large sessions the activity timeline is rebuilt at most every 5 minutes (always at session end).
+- **Batched uploads** — on servers that support it, up to 50 reports go in one request; older servers keep getting one report per request.
+
+### Fixed
+- **No double counting after an interrupted upload** — queued reports are sent so that a shorter window of a session always arrives before a longer one that contains it, and a window that failed holds back the ones after it.
+- **Nothing re-sent after a killed hook** — the session's read position is saved before any upload starts.
+- **Old queue files are cleaned up** — queues and leftover temporary files are pruned for every linked account.
+- **Status line usage backlog drains** — each usage reading is cleared as soon as it is sent, so a stopped upload no longer resends the whole backlog.
+- **`/beezi:sync` waits its turn** — it waits for the background uploader instead of uploading alongside it, and stops early with "another session sync is running" when it can't get its turn.
+
+## 0.42.0 (2026-10-29) — Plan usage in the desktop app
+
+### New
+- **Plan usage check** — the Claude desktop app has no status line, so Beezi couldn't see your 5-hour and weekly plan usage there. Turn it on with `/beezi:settings usage-check on`: where the status line can't run, Beezi checks your usage with one small Haiku request on your plan at most every 30 minutes, and only when no fresher reading exists. It is off until you turn it on, and it never runs on machines that sign in with a setup token.
+
+## 0.41.0 (2026-10-29) — Large sessions upload
+
+### Fixed
+- **Large sessions upload** — past and live sessions of any size are sent. Before, transcripts over 64 MB were skipped as "too large to read".
+- **Accurate code-change and tool counts** — newer Claude Code keeps copies of each request in the transcript. Beezi no longer counts them, so lines changed, tool calls, tool token estimates and repo attribution are no longer inflated.
+
 ## 0.40.1 (2026-10-26) — Terminal setup sees what your sessions see
 
 ### Fixed

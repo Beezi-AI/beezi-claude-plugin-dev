@@ -15,12 +15,12 @@ import { joined, routes, rules } from './workspace.mjs';
 // /beezi:login's commands in as few calls as its questions allow: each call runs from the start (or
 // `--from <step>`) up to the next question, printing every output as a block and `next=<step>` last.
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
-const FROM_STEPS = ['here', 'plan', 'joined', 'routes'];
-const USAGE = 'Usage: login-flow.mjs [--account <ref> --from <here|plan|joined|routes>]';
+const FROM_STEPS = ['here', 'plan', 'joined', 'routes', 'offer'];
+const USAGE = 'Usage: login-flow.mjs [--account <ref> --from <here|plan|joined|routes|offer>]';
 // Statuses whose answer is the local capture, so its gateway or tier question may follow (login.md Step 3).
 const CAPTURE_STATUSES = ['no_key', 'not_linked'];
-// Writes made between calls leave the upload to login.md's backfill.
-const DEFER = { deferUpload: true };
+// Writes made between calls start no history scan: login.md's offer step counts past sessions next.
+const DEFER = { deferScan: true };
 // The setup question previews this many workspaces, then Several workspaces… reaches every one.
 const PREVIEW_WORKSPACES = 2;
 
@@ -99,22 +99,17 @@ function previewRows(here, places, values) {
   return columns(rows);
 }
 
-// `heading`, then every row `→ <target>` and the upload line naming `uploadTo`.
-function sendPreview(heading, target, uploadTo, here, counts) {
+// `heading`, then every row `→ <target>`.
+function sendPreview(heading, target, here, counts) {
   const to = `→ ${target}`;
-  const lines = [heading, ''].concat(previewRows(here, counts.places, { newFolders: to, here: to, places: to }), ['']);
-  if (counts.sessions > 0) lines.push(`Then ${plural(counts.sessions, 'past session uploads', 'past sessions upload')} to ${uploadTo}.`);
-  lines.push('Change any of it in /beezi:settings.');
-  return lines;
+  return [heading, ''].concat(previewRows(here, counts.places, { newFolders: to, here: to, places: to }), ['', 'Change any of it in /beezi:settings.']);
 }
 
-const workspacePreview = (name, here, counts) => sendPreview(`Everything goes to ${name}:`, name, name, here, counts);
-const severalPreview = (here, counts) => sendPreview('Everything goes to each workspace you pick next:', 'the ones you pick', 'each of them', here, counts);
+const workspacePreview = (name, here, counts) => sendPreview(`Everything goes to ${name}:`, name, here, counts);
+const severalPreview = (here, counts) => sendPreview('Everything goes to each workspace you pick next:', 'the ones you pick', here, counts);
 
 function choosePreview(here, counts) {
-  const lines = ['Pick where each repo goes:', ''].concat(previewRows(here, counts.places, { newFolders: 'ask me', here: 'asked next', places: 'asked next' }));
-  if (counts.sessions > 0) lines.push('', counts.sessions === 1 ? 'Then the past session uploads where you chose.' : 'Then past sessions upload where you chose.');
-  return lines;
+  return ['Pick where each repo goes:', ''].concat(previewRows(here, counts.places, { newFolders: 'ask me', here: 'asked next', places: 'asked next' }));
 }
 
 function printPreview(tenant, lines) {
@@ -122,17 +117,17 @@ function printPreview(tenant, lines) {
 }
 
 // login.md Step 1w's one question: the workspaces and counts, then a preview per answer.
-// A count that fails shows its ✗ line and previews as 0 sessions and places, like a failed listing: the question still stands.
+// A count that fails shows its ✗ line and previews as 0 places, like a failed listing: the question still stands.
 function setupQuestion(row, { pastSessions: count, herePlace }) {
   const tenants = tenantsOf(row);
   let here = null;
   try { here = herePlace(); } catch { here = null; }
   console.log(`<setup account="${row.key}">`);
   for (const t of tenants) console.log(`W. ${t.name ? t.name : t.id} account=${row.key} tenant=${t.id} role=${roleLabel(t)}`);
-  let counts = { sessions: 0, places: 0 };
+  let counts = { places: 0 };
   try {
     counts = count(row, here == null ? null : here.key);
-    console.log(`sessions=${counts.sessions} places=${counts.places}`);
+    console.log(`places=${counts.places}`);
   } catch (error) {
     console.log(`✗ ${friendlyMessage(error)}`);
   }
@@ -156,7 +151,8 @@ function planQuestion(key, { run }) {
   return need === 'none' ? null : `payment question=${need}`;
 }
 
-// From `from` on, each step's output, stopping at the first one that needs a question; 'backfill' when none does.
+// From `from` on, each step's output, stopping at the first one that needs a question; 'offer' when none does. The offer's
+// dry run is login.md Step 4b's own command, so it never shares the sign-in call's Bash timeout.
 async function fromStep(from, key, deps) {
   const { lists } = deps;
   const steps = FROM_STEPS.slice(FROM_STEPS.indexOf(from));
@@ -171,7 +167,7 @@ async function fromStep(from, key, deps) {
     if (step === 'joined' && await listing('joined', key, () => lists.joined(['--account', key], DEFER)) > 0) return 'joined';
     if (step === 'routes' && await listing('routes', key, () => lists.routes(['--account', key], DEFER)) > 0) return 'routes';
   }
-  return 'backfill';
+  return 'offer';
 }
 
 // Step 0 and 1, then the setup question: null when the flow stops (the preflight refused or the sign-in failed).
@@ -206,7 +202,7 @@ const DEFAULTS = {
 };
 
 // deps: `run` (captured script), `live` (streamed script), `lists` (the workspace.mjs listings),
-// `pastSessions(row, hereKey)` ({ sessions, places }) and `herePlace` (placeOfDir of this session's directory) for the setup question.
+// `pastSessions(row, hereKey)` ({ places }) and `herePlace` (placeOfDir of this session's directory) for the setup question.
 export async function loginFlow(argv, deps = {}) {
   const all = { ...DEFAULTS, ...deps };
   const { account, rest } = await parseAccountFlag(argv);
