@@ -1,6 +1,25 @@
 // "resets 4:30pm (Europe/Kiev)" -> the next UTC instant of that wall-clock in that zone after occurredAt.
-const RESET_RE = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(([^)]+)\)/i;
+// "resets Oct 23, 11pm (Europe/Kyiv)" -> that calendar day's wall-clock; Claude Code names the date
+// when the reset is more than a day out (a weekly limit), so the next-occurrence rule can't apply.
+const RESET_RE = /resets?\s+(?:at\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*\(([^)]+)\)/i;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// The exact reset Claude Code stamps on a rate-limit transcript line, in unix seconds:
+// apiErrorParams.rate_limit_info.resetsAt, mirrored in quotaLimits.resetsAt. ISO string or null.
+// Preferred over parseRateLimitReset: it needs no text, so it survives a scrubbed message too.
+export function exactResetsAt(line) {
+  if (line == null) return null;
+  const params = line.apiErrorParams == null ? null : line.apiErrorParams.rate_limit_info;
+  const fromParams = params == null ? null : epochSecondsToIso(params.resetsAt);
+  if (fromParams != null) return fromParams;
+  return line.quotaLimits == null ? null : epochSecondsToIso(line.quotaLimits.resetsAt);
+}
+
+function epochSecondsToIso(seconds) {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(seconds * 1000).toISOString();
+}
 
 export function parseRateLimitReset(text, occurredAtIso) {
   if (!text) return null;
@@ -9,10 +28,10 @@ export function parseRateLimitReset(text, occurredAtIso) {
   const occurredAt = new Date(occurredAtIso);
   if (isNaN(occurredAt.getTime())) return null;
 
-  let hour = Number(match[1]);
-  const minute = match[2] ? Number(match[2]) : 0;
-  const meridiem = match[3] ? match[3].toLowerCase() : null;
-  const timeZone = match[4].trim();
+  let hour = Number(match[3]);
+  const minute = match[4] ? Number(match[4]) : 0;
+  const meridiem = match[5] ? match[5].toLowerCase() : null;
+  const timeZone = match[6].trim();
   if (minute > 59) return null;
 
   if (meridiem) {
@@ -24,7 +43,25 @@ export function parseRateLimitReset(text, occurredAtIso) {
   }
 
   if (!isValidTimeZone(timeZone)) return null;
-  return nextOccurrenceUtc(hour, minute, timeZone, occurredAt).toISOString();
+  if (match[1] == null) return nextOccurrenceUtc(hour, minute, timeZone, occurredAt).toISOString();
+
+  const month = MONTHS.indexOf(match[1].toLowerCase()) + 1;
+  const day = Number(match[2]);
+  if (month === 0) return null;
+  const dated = nextDatedOccurrenceUtc(month, day, hour, minute, timeZone, occurredAt);
+  return dated == null ? null : dated.toISOString();
+}
+
+// The text names month and day but no year: the first such date after occurredAt, in that zone.
+function nextDatedOccurrenceUtc(month, day, hour, minute, timeZone, after) {
+  const year = zonedDateParts(after, timeZone).year;
+  for (const y of [year, year + 1]) {
+    // Feb 30 rolls into March in Date.UTC; a day that does not survive the round trip is not real.
+    if (new Date(Date.UTC(y, month - 1, day)).getUTCDate() !== day) continue;
+    const candidate = zonedWallToUtc({ year: y, month, day }, hour, minute, timeZone);
+    if (candidate.getTime() > after.getTime()) return candidate;
+  }
+  return null;
 }
 
 function isValidTimeZone(timeZone) {

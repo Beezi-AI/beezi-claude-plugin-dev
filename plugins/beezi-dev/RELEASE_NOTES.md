@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.45.2 (2026-11-09) — Blocked time for every rate limit
+
+### Fixed
+- **Weekly limits now count as blocked time** — when Claude Code said a weekly limit "resets Oct 23, 11pm", Beezi could not read the date, so the error reached Beezi with no reset time and no blocked time. Beezi now sends the exact reset time Claude Code records with each rate limit, both live and in past-session uploads. The date form of the message is understood too.
+
 ## 0.45.1 (2026-11-09) — Max and Ultra plan names
 
 ### Improved
