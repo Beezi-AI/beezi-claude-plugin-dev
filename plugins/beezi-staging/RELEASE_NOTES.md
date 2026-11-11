@@ -1,5 +1,31 @@
 # Beezi plugin release notes
 
+## 0.46.0 (2026-11-11) — One-question setup
+
+### New
+- **One question: what to track** — terminal setup and `/beezi:login` show the summary of your past sessions, then ask one question: track everything, or let you choose the repos and folders. With several workspaces it asks where everything goes, or lets you tick repos for each workspace. The answer is your consent: past sessions from what you track upload in the background, and nothing is sent from a repo or folder you left out. A workspace whose owner chose never to upload past sessions still gets none.
+- **Asked once per account** — once tracking is set up for an account on this machine, signing in again asks nothing and says it is already set up. Change it any time in `/beezi:settings`.
+
+### Improved
+- **Fewer questions** — the plan is detected without asking; when it can't be, the closing lines say to set it in `/beezi:settings`. The questions about this session's folder, new workspaces, repos with no rule, uploading past sessions and the default account are gone from sign-in.
+- **Crash reports and the status line are on after setup** — crash reports turn on unless you already chose, and the status line is installed when it is off. The last lines say what is on; `/beezi:settings` changes either.
+- **Beezi's colours in terminal setup** — the Beezi mark at the top, violet marks for what is done, a shorter closing block, and tick lists that scroll on small terminals. `NO_COLOR` still turns the colours off.
+
+## 0.45.3 (2026-11-10) — Project skills counted under their own name
+
+### Fixed
+- **Skills from a project folder keep one name** — a skill that lives in a project or worktree folder (Claude Code names it like `apps/web:deploy`) is now counted under its skill name, `deploy`, instead of the folder path. The same skill used from several worktrees now adds up under one name, and the folder no longer shows up as a plugin.
+
+## 0.45.2 (2026-11-09) — Blocked time for every rate limit
+
+### Fixed
+- **Weekly limits now count as blocked time** — when Claude Code said a weekly limit "resets Oct 23, 11pm", Beezi could not read the date, so the error reached Beezi with no reset time and no blocked time. Beezi now sends the exact reset time Claude Code records with each rate limit, both live and in past-session uploads. The date form of the message is understood too.
+
+## 0.45.1 (2026-11-09) — Max and Ultra plan names
+
+### Improved
+- **Claude's new plan names** — the plan question in `/beezi:login` and terminal setup offers "Max or Ultra", then Max or Ultra, and `/beezi:settings` shows Max or Ultra instead of Max 5x or Max 20x. Anthropic renamed Max 20x to Ultra; what Beezi records for each plan is unchanged.
+
 ## 0.45.0 (2026-11-03) — Past sessions upload without asking
 
 ### New

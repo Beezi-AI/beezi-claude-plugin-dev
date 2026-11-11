@@ -3,6 +3,7 @@ import { computeCodeChanges } from './code-changes.mjs';
 import { computeOperations } from './operations.mjs';
 import { buildActiveIntervals, totalMs } from './active-time.mjs';
 import { readTranscript } from './transcript-reader.mjs';
+import { exactResetsAt } from './rate-limit-reset.mjs';
 
 // Gaps longer than this between two activity lines count as idle, not active time. Exported so the
 // session-timeline derivation classifies "working" against the exact same threshold.
@@ -258,6 +259,8 @@ export function computeDelta(transcriptPath, fromLine, resolvers = {}) {
           : (line.apiErrorStatus === 429 ? 'rate_limit' : 'unknown'),
         text: messageText(line.message),
         occurredAt: line.timestamp == null ? null : line.timestamp,
+        // The exact reset the line itself carries; null leaves it to the text parser at send time.
+        resetsAt: exactResetsAt(line),
         lineNo,
       });
     }

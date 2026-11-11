@@ -915,6 +915,9 @@ async function checkpointBody(input, deps, options, gate) {
       lastAssistantMessage: event.text,
       occurredAt: event.occurredAt == null ? new Date().toISOString() : event.occurredAt,
     };
+    // The line's exact reset, when it has one. The server measures blocked time as
+    // resets_at - occurred_at, and a weekly limit's text ("resets Oct 23, 11pm") gave it none.
+    if (event.resetsAt != null) errorPayload.resetsAt = event.resetsAt;
     // The audit run buffers these instead: one awaited POST per event across hundreds of
     // sessions is minutes of dead time, and follow-ups only make sense for sessions the server
     // accepted — the backfill route dedupes via its upsert keys, so ordering is about

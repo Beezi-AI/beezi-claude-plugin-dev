@@ -10,6 +10,7 @@ import { readSessionWorkspace, expandTargets, resolveTargets } from './workspace
 import { createTranscriptMemo as _createTranscriptMemo } from './transcript-memo.mjs';
 import { CHECKPOINT_LOCK_WAIT_MS } from './single-instance-lock.mjs';
 import { privateKinds, markPrivate } from './anonymization.mjs';
+import { exactResetsAt } from './rate-limit-reset.mjs';
 
 // Walks the memo's whole-file records newest first, so the tail scan reuses the parse the
 // checkpoint needs anyway instead of reading the file a second time.
@@ -23,23 +24,25 @@ function memoTail(transcriptMemo) {
 }
 
 // Best-effort: pull the last assistant message text, any API-error detail, and the error line's
-// own timestamp from the transcript tail. The StopFailure `error` code is the reliable signal;
-// these fill in whatever the hook payload didn't carry. With deps.transcriptMemo the records come
-// from the memo's one read of the main transcript.
+// own timestamp and exact reset from the transcript tail. The StopFailure `error` code is the
+// reliable signal; these fill in whatever the hook payload didn't carry. With deps.transcriptMemo
+// the records come from the memo's one read of the main transcript.
 export function readErrorContext(transcriptPath, deps = {}) {
   let scanTail = deps.scanTail == null ? scanTranscriptTail : deps.scanTail;
   if (deps.transcriptMemo != null) scanTail = memoTail(deps.transcriptMemo);
-  const empty = { lastAssistantMessage: null, errorDetails: null, occurredAt: null };
+  const empty = { lastAssistantMessage: null, errorDetails: null, occurredAt: null, resetsAt: null };
   if (!transcriptPath) return empty;
 
   let lastAssistantMessage = null;
   let errorDetails = null;
   let occurredAt = null;
+  let resetsAt = null;
   try {
     scanTail(transcriptPath, (line) => {
       if (errorDetails == null) {
         errorDetails = extractErrorDetail(line);
         if (errorDetails != null && typeof line.timestamp === 'string') occurredAt = line.timestamp;
+        if (errorDetails != null) resetsAt = exactResetsAt(line);
       }
       if (lastAssistantMessage == null && line.type === 'assistant') {
         lastAssistantMessage = extractText(line.message);
@@ -49,7 +52,7 @@ export function readErrorContext(transcriptPath, deps = {}) {
   } catch {
     return empty;
   }
-  return { lastAssistantMessage, errorDetails, occurredAt };
+  return { lastAssistantMessage, errorDetails, occurredAt, resetsAt };
 }
 
 function extractText(message) {
@@ -142,6 +145,9 @@ export async function reportSessionError(input, deps = {}) {
     // checkpoint's transcript scan, which can't see the hook's clock.
     occurredAt: context.occurredAt == null ? now().toISOString() : context.occurredAt,
   };
+  // Same line, same exact reset as the checkpoint's scan: the server's row key uses resetsAt when
+  // there is one, so both paths must send it or one event becomes two rows.
+  if (context.resetsAt != null) payload.resetsAt = context.resetsAt;
   if (localOnly) {
     let outboxed = 0;
     // Marked with the kinds the targets hide now, as queued reports are, for the worker's later send.

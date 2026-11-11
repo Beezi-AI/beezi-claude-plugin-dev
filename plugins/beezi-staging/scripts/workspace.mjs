@@ -1,8 +1,11 @@
 import os from 'os';
 import path from 'path';
 import {
-  AccountStatus, getDefaultKey, listAccounts, markTenantsReviewed, parseAccountFlag, removeWorkspaceRule, restoreRouting, setNewFolders, setWorkspaceRule,
+  AccountStatus, getDefaultKey, listAccounts, markTenantsReviewed, markTrackingChosen, parseAccountFlag, removeWorkspaceRule, restoreRouting, setNewFolders, setWorkspaceRule,
 } from '../lib/accounts.mjs';
+import { UNSAFE_LINE, markSetupListingAnswered, saveSetupListing, setupPlaces } from '../lib/setup-places.mjs';
+import { combinedHeader, hidesPhrase, offerLines } from '../lib/history-offer.mjs';
+import { anonymizationFor, kindsOf } from '../lib/anonymization.mjs';
 import { clearUndo, readUndo, recordUndo, routingOf } from '../lib/rule-undo.mjs';
 import { placeOfDir, routeOfDir } from '../lib/route-describe.mjs';
 import { resolveSessionId } from '../lib/permission-mode-store.mjs';
@@ -51,6 +54,7 @@ const USAGE = 'Usage: workspace.mjs rules [--table] [--session <id>] [--account 
   + ' | new-folders [ask | send <id|name|n>… | none] [--session <id>] [--account <ref>]'
   + ' | read <id|name|n> [--session <id>] [--account <ref>]'
   + ' | places [--session <id>] [--account <ref>]'
+  + ' | setup [everything [<id|name|n>…] | chosen] [--account <ref>]'
   + ' | undo [--session <id>]';
 const NOT_LINKED = 'Beezi: this machine is not linked. Run /beezi:login to link an account.';
 const TARGET_FLAGS = ['--current', '--repo', '--folder', '--outside'];
@@ -506,6 +510,14 @@ function ruleTargetFlag(place) {
   return place.kind === 'outside' ? '--outside' : `--${place.kind} '${place.match.replace(/'/g, "'\\''")}'`;
 }
 
+function printNoFolder(lost) {
+  if (lost > 0) {
+    console.log(lost === 1
+      ? '1 other past session has no recorded folder and is not sent.'
+      : `${lost} other past sessions have no recorded folder and are not sent.`);
+  }
+}
+
 // Past sessions waiting under New folders = Ask me, grouped by repo or folder, for the planning questions; returns the P-line count.
 export async function routes(argv, flags = { deferScan: false }) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
@@ -533,19 +545,11 @@ export async function routes(argv, flags = { deferScan: false }) {
       }
       console.log(`all-command=${SCRIPT} rule add-all --account ${row.key}${deferText(flags)} <tenants>`);
     }
-    const lost = groups.noDirectory;
-    if (lost > 0) {
-      console.log(lost === 1
-        ? '1 other past session has no recorded folder and is not sent.'
-        : `${lost} other past sessions have no recorded folder and are not sent.`);
-    }
+    printNoFolder(groups.noDirectory);
   }
   console.log(`routes=${total}`);
   return total;
 }
-
-// A match or label holding a control character could forge a machine line, so `joined` leaves such a place out.
-const UNSAFE_LINE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 // Accounts that joined a workspace since their last re-pick here: every place to re-pick, with where it sends now (login Step 4a, /beezi:sync Step 1); returns the J-line count.
 export async function joined(argv, flags = { deferScan: false }) {
@@ -805,6 +809,104 @@ async function places(argv, flags = { deferScan: false }) {
   console.log(`places=${found.length}`);
 }
 
+// Setup's printed commands always defer the scan: the wizard writes several, then uploads once.
+const SETUP_FLAGS = { deferScan: true };
+
+async function linkedAccount(account) {
+  const row = await resolveAccount(account);
+  if (row.status !== AccountStatus.LINKED) throw new UserError(NOT_LINKED);
+  return row;
+}
+
+// Setup answered here, or (several workspaces) New folders was already set.
+function trackingChosen(row) {
+  return row.trackingChosenAt != null || (isMultiTenant(row) && newFoldersOf(row).set);
+}
+
+const hiddenKinds = (row, tenantId) => kindsOf(anonymizationFor(row, tenantId));
+
+// The past-sessions checklist: one workspace's offer lines without the question, else the combined header and one line per workspace.
+function checklistLines(row, found) {
+  const tenants = tenantsOf(row);
+  if (tenants.length === 1) {
+    return offerLines({
+      count: found.sessionIds.length,
+      firstMs: found.firstMs,
+      lastMs: found.lastMs,
+      folders: found.places.map((place) => ({ name: place.short })),
+      kinds: hiddenKinds(row, tenants[0].id),
+      workspace: tenantName(row, tenants[0].id),
+    }).lines;
+  }
+  return combinedHeader([found]).concat(tenants.map((t) => `  ${tenantName(row, t.id)} · ${hidesPhrase(hiddenKinds(row, t.id))}`));
+}
+
+const NOTHING_LISTED = { places: [], sessionIds: [], noFolder: 0 };
+
+// The tracking question's listing, or 1 with only the failure line when a workspace could not count.
+async function setupListing(argv, deps) {
+  const { account, rest } = await parseAccountFlag(argv);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const row = await linkedAccount(account);
+  const tenants = tenantsOf(row) || [];
+  const chosen = trackingChosen(row);
+  const found = tenants.length === 0 || chosen ? NOTHING_LISTED : await setupPlaces(row, deps);
+  if (found == null) return 1;
+  if (tenants.length > 0 && !chosen) {
+    const kinds = {};
+    tenants.forEach((t) => { kinds[t.id] = hiddenKinds(row, t.id); });
+    saveSetupListing(row.key, found.sessionIds, kinds);
+  }
+  if (found.places.length > 0) console.log(['<checklist>', ...checklistLines(row, found), '</checklist>'].join('\n'));
+  if (tenants.length > 0) {
+    printWorkspaces(row);
+    found.places.forEach((place, i) => {
+      const now = place.tracked == null ? 'default' : idList(place.tracked);
+      console.log(`T${i + 1}. ${labeled(place)}, ${sessionsCount(place.sessions)} account=${row.key} kind=${place.kind} now=${now} match=${place.match}`);
+      console.log(`T${i + 1}-command=${SCRIPT} rule add ${ruleTargetFlag(place)} --account ${row.key}${deferText(SETUP_FLAGS)} <tenants>`);
+    });
+    console.log(`everything-command=${SCRIPT} setup everything --account ${row.key}${deferText(SETUP_FLAGS)} <tenants>`);
+    console.log(`chosen-command=${SCRIPT} setup chosen --account ${row.key}${deferText(SETUP_FLAGS)}`);
+  }
+  printNoFolder(found.noFolder);
+  console.log(`setup=${found.places.length} sessions=${found.sessionIds.length} workspaces=${tenants.length} chosen=${chosen ? 'yes' : 'no'}`);
+  return 0;
+}
+
+// The account's workspaces count as reviewed, so the join prompt skips them, setup won't ask again, and the listing is answered.
+async function recordTrackingChoice(row) {
+  await markTenantsReviewed(row.key, (tenantsOf(row) || []).map((t) => t.id));
+  await markTrackingChosen(row.key, new Date().toISOString());
+  markSetupListingAnswered(row.key);
+}
+
+// Everything: several workspaces send new folders to <tenants>, existing rules stay; one workspace has nothing to route.
+async function setupEverything(argv, flags) {
+  const { account, rest } = await parseAccountFlag(argv);
+  const row = await linkedAccount(account);
+  if (isMultiTenant(row)) await newFolders(['send', ...rest, '--account', row.key], flags);
+  await recordTrackingChoice(row);
+  console.log('setup=everything');
+}
+
+// Let me choose, after the rule writes: several workspaces ask about new folders; one workspace has nothing to set.
+async function setupChosen(argv, flags) {
+  const { account, rest } = await parseAccountFlag(argv);
+  if (rest.length !== 0) throw new UserError(USAGE);
+  const row = await linkedAccount(account);
+  if (isMultiTenant(row)) await newFolders(['ask', '--account', row.key], flags);
+  await recordTrackingChoice(row);
+  console.log('setup=chosen');
+}
+
+// The listing's exit status; the writes return nothing.
+export async function setup(argv, flags = { deferScan: false }, deps = {}) {
+  const [sub, ...rest] = argv;
+  if (sub === 'everything') { await setupEverything(rest, flags); return; }
+  if (sub === 'chosen') { await setupChosen(rest, flags); return; }
+  return setupListing(argv, deps);
+}
+
 async function read(argv) {
   const { session, rest: afterSession } = parseSessionFlag(argv);
   const { account, rest } = await parseAccountFlag(afterSession);
@@ -830,11 +932,12 @@ async function main() {
   if (cmd === 'new-folders') { await newFolders(argv, flags); return; }
   if (cmd === 'read') { await read(argv); return; }
   if (cmd === 'places') { await places(argv, flags); return; }
+  if (cmd === 'setup') { if (await setup(argv, flags) === 1) process.exitCode = 1; return; }
   if (cmd === 'undo') { await undo(argv, flags); return; }
   throw new UserError(cmd == null ? USAGE : `Unknown command "${cmd}". ${USAGE}`);
 }
 
-// settings.mjs, sync.mjs and login-flow.mjs import the listings, so main runs only when this file is the entry script.
+// settings.mjs and sync.mjs import the listings, so main runs only when this file is the entry script.
 if (isEntryScript(import.meta.url)) {
   main().catch((error) => {
     console.error(`\n✗ ${friendlyMessage(error)}`);

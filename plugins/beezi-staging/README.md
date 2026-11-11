@@ -105,8 +105,11 @@ any upload, Beezi shows a summary per workspace: how many past sessions, their d
 which names are sent as they are and which are hidden. The workspace owner chooses what comes next:
 **ask first** (the default) — Beezi asks **Upload now** or **Not now**; or **upload without asking** —
 Beezi shows the summary as a notice, says the workspace chose it, and uploads. It does this at
-`/beezi:login`, in terminal setup, at the start of a later session (after it has counted them in the
-background; a no-ask upload then runs in the background), and whenever you run `/beezi:sync`. Either
+the start of a later session (after it has counted them in the background; a no-ask upload then
+runs in the background) and whenever you run `/beezi:sync`. At `/beezi:login` and in terminal setup
+the summary comes with the one tracking question instead, and your answer is the consent: past
+sessions from the repos and folders you track upload in the background, except to a workspace
+whose owner chose never to upload them. Either
 way you still choose which repos and folders send analytics to the workspace (see
 `/beezi:settings rules`). When past sessions go to several workspaces, Beezi shows one summary,
 uploads to the ones that don't ask, then asks once about the rest.
@@ -133,22 +136,24 @@ uploads to the ones that don't ask, then asks once about the rest.
 
 ## Terminal setup
 
-The one-line installers finish by running `node scripts/setup.mjs` in your terminal. It asks the same questions
-as `/beezi:login` (account, new folders, plan, new workspaces and repos with no rule), shows the past-sessions
-summary for each workspace and asks whether to upload (the menu starts on Upload now; Esc or Not now declines), then offers crash reports and the status
-line, all without a Claude Code session. For an account in several workspaces whose New folders was never set, it
-asks one question, "Where should analytics from this machine go?": pick a workspace to send everything there,
-starting with new repos and folders, **Several workspaces…** to send everything to each of the ones you pick next, or **Let me choose per repo** to be asked about each repo and folder with history. Each step runs the plugin's own
+The one-line installers finish by running `node scripts/setup.mjs` in your terminal. It does what `/beezi:login`
+does, without a Claude Code session: it uses the linked account (or opens the browser to sign in), detects the
+plan without asking, then shows the past-sessions summary and asks one question, "What should it track?":
+**Everything**, or **Let me choose** to tick the repos and folders. For an account in several workspaces the
+question is "Where should they go?": everything to one workspace, to several, or **Let me choose** to tick repos
+for each workspace. Past sessions from what you track then upload in the background. Setup turns crash reports
+on (unless you already chose) and installs the status line when it is off, and its last lines say what is on.
+An account that already chose on this machine is not asked again. Each step runs the plugin's own
 script from a fresh temporary folder, without `CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID`, so nothing binds to an
 earlier session. Steps also run without `CLAUDE_CODE_OAUTH_TOKEN`, as Claude Code runs its hooks, so they find a
 setup token only where a hook can (the settings `env` block, the OS environment) and setup registers the machine the
 same way its sessions report it; a token set only in the shell gets a warning on how to make it visible. It starts no
-Cowork worker; the next Claude Code session does. It needs a terminal; without one, run `/beezi:login` in Claude Code. Its questions are colourful arrow-key menus (↑/↓, then Enter), with typed numbers
+Cowork worker; the next Claude Code session does. It needs a terminal; without one, run `/beezi:login` in Claude Code. Its question is an arrow-key menu (↑/↓, then Enter; Space ticks in a tick list), with typed numbers
 as the fallback where keys cannot be read; `NO_COLOR` turns the colours off.
 
 ## Commands
 
-- `/beezi:login` — link a Beezi account to this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores that account's credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). Run it again to add another account: the browser signs in as whichever Beezi account it is already signed in as, so sign out there (or use a private window) first. After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan and finishes by showing that account's past sessions and asking whether to upload them, or uploading them with a notice for a workspace whose owner chose upload without asking (see [Past sessions](#past-sessions-ask-first-or-upload-without-asking)) — re-running `/beezi:login` for an already-linked account is the way to refresh the plan.
+- `/beezi:login` — link a Beezi account to this machine (browser sign-in with your Beezi account via Clerk OAuth + PKCE); stores that account's credentials in the OS secret store, or a restricted-permission file when no store is available (see Credential storage below). Run it again to add another account: the browser signs in as whichever Beezi account it is already signed in as, so sign out there (or use a private window) first. After upgrading from 0.1.x, run it once — old device-flow tokens are invalid. The flow then captures the machine's Claude subscription plan without asking, shows that account's past sessions and asks the same one question as terminal setup (see [Terminal setup](#terminal-setup)), and finishes by uploading past sessions from what you track, turning crash reports on unless you already chose, and installing the status line when it is off — re-running `/beezi:login` for an already-linked account is the way to refresh the plan, and it asks nothing once tracking is set up.
 - `/beezi:settings` — one screen showing where this folder's analytics go, your rules, New folders, crash reports and the status line, then a menu to change them:
   - `/beezi:settings rules` — for an account in several workspaces: a rule sends every session in one repo (matched by its `origin`, however it was cloned) or under one folder to the workspaces it names, or marks it not tracked. A repo rule wins first, then the folder rule with the longest matching path. Sessions in the home folder, `/` or a temp folder share one "outside a project" rule. While New folders is **Ask me**, the first session in a repo or folder with no rule asks once where its analytics go, and the answer becomes its rule; that session's data waits on this machine until it is answered. `/beezi:settings rules add` adds a rule for the current folder and `/beezi:settings rules remove <n>` removes one. A new or changed rule applies at once to open sessions there. A remote that uses an SSH host alias from `~/.ssh/config` (e.g. `git@github-work:org/repo`) is keyed by the alias, so its repo rule does not match the same repo's other clones.
   - `/beezi:settings new-folders` — for an account in several workspaces, where analytics go for a repo or folder with no rule: **Ask me** (the default), **Send to** the workspaces you pick, or **Don't send**. `/beezi:login` asks once.
@@ -186,8 +191,9 @@ into the first account slot automatically on first run.
 
 ## Plugin diagnostics (`/beezi:settings telemetry`)
 
-Off until you turn it on, per machine. When on, the plugin records structured facts about **its
-own** failures — plugin and Claude Code versions, OS, which plugin file failed, and the
+Per machine. Terminal setup and `/beezi:login` turn it on, with account correlation (the recommended
+mode below), unless you already chose a setting; `/beezi:settings telemetry` changes it. When on, the
+plugin records structured facts about **its own** failures — plugin and Claude Code versions, OS, which plugin file failed, and the
 authentication state at the time. Never your code, prompts, file paths, or repository names.
 
 Delivery does not require authorization. Reports go to a public ingestion route with no
@@ -196,7 +202,7 @@ triggered by hook startup and completion, handled crashes, authentication state 
 startup failures and login failures. That is deliberate: an OAuth failure is exactly the failure a
 token cannot report.
 
-Account correlation is a **separate** opt-in. With it, a random installation UUID is minted, bound
+Account correlation is a **separate** setting, on in the mode setup picks. With it, a random installation UUID is minted, bound
 to your account the next time authenticated activity succeeds, and attached to later reports so
 support can find yours. It is stored outside the credential store, survives refresh failures and
 reauthorization, and is discarded when the last account is logged out.

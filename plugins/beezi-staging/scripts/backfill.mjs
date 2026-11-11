@@ -2,12 +2,12 @@ import { planWorkspaceRuns, createRunCache } from '../lib/session-audit.mjs';
 import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.mjs';
 import { isMultiTenant } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
-import { readTrackingState } from '../lib/tracking.mjs';
-import { startHistoryWorker, offerTenantIds, offerTrackingOff } from '../lib/history-trigger.mjs';
-import { OfferGate, offerGate, OfferVia } from '../lib/history-offer.mjs';
+import { startHistoryWorker } from '../lib/history-trigger.mjs';
+import { OfferVia } from '../lib/history-offer.mjs';
+import { answeredSetupListing, openTenantIds, removeSetupListing } from '../lib/setup-places.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 import {
-  countWorkspace, presentOffers, acceptOffer, acceptPrefix, foregroundRun, printCounts, flagValue, routeSummary, workspaceName,
+  countWorkspace, presentOffers, oweConsented, acceptOffer, acceptPrefix, foregroundRun, printCounts, flagValue, routeSummary, workspaceName,
 } from '../lib/history-summary.mjs';
 
 // The login flow's history step (/beezi:login and the setup wizard). Without --accept it counts each workspace's past
@@ -15,19 +15,16 @@ import {
 // whose owner chose upload without asking prints a notice and uploads now. `--accept <tenant> --offer <token>` uploads
 // exactly the sessions that workspace's printed offer counted.
 
-const OPEN_GATES = [OfferGate.SCAN, OfferGate.READY];
+const WORKER_LATER = 'Beezi: the past-session upload will start with your next Claude Code session.';
 
 function fail(message) {
   console.error(`✗ ${message}`);
   process.exit(1);
 }
 
-// One dry run per workspace whose offer gate is open, then their offers and `offers=<n> notices=<m>`; the exit status is
-// 1 when any workspace failed.
-export async function backfillSummary(row, deps = {}) {
-  const tracking = readTrackingState(row.key);
-  let tenantIds = offerTenantIds(row)
-    .filter((tenantId) => OPEN_GATES.indexOf(offerGate(row, tenantId, { trackingOff: offerTrackingOff(row, tracking, tenantId) })) !== -1);
+// One dry run per workspace whose offer gate is open; { counted, status }, status 1 when any workspace failed.
+async function countOpen(row, deps) {
+  let tenantIds = openTenantIds(row);
   let planRuns;
   const multi = isMultiTenant(row);
   if (multi && tenantIds.length > 0) {
@@ -58,6 +55,13 @@ export async function backfillSummary(row, deps = {}) {
       status = 1;
     }
   }
+  return { counted, status };
+}
+
+// The counted workspaces' offers, then `offers=<n> notices=<m>`; the exit status is 1 when any workspace failed.
+export async function backfillSummary(row, deps = {}) {
+  const { counted, status: countStatus } = await countOpen(row, deps);
+  let status = countStatus;
   let shown = { offers: 0, notices: 0 };
   try {
     shown = await presentOffers(row, counted, { uploadPrefix: acceptPrefix('backfill.mjs', row), background: false, runOne: foregroundRun(deps) });
@@ -70,6 +74,46 @@ export async function backfillSummary(row, deps = {}) {
   return status;
 }
 
+// The consented run's last line, with the distinct sessions owed; returns `status`.
+function printUploading(owed, status) {
+  const ids = new Set();
+  owed.forEach((c) => c.offer.sessionIds.forEach((id) => ids.add(id)));
+  console.log(`uploading=${ids.size} workspaces=${owed.length}`);
+  return status;
+}
+
+// Each counted workspace's sessions that the answered listing showed; a workspace left with none is dropped.
+function onlyListed(counted, sessionIds) {
+  const listed = new Set(sessionIds);
+  return counted
+    .map((c) => ({ ...c, offer: { ...c.offer, sessionIds: c.offer.sessionIds.filter((id) => listed.has(id)) } }))
+    .filter((c) => c.offer.sessionIds.length > 0);
+}
+
+async function oweListed(row, listing, deps) {
+  const done = await countOpen(row, deps);
+  if (done.status !== 0) return printUploading([], 1);
+  const { owed, status } = await oweConsented(row, onlyListed(done.counted, listing.sessionIds), listing.kinds);
+  if (owed.length === 0) return printUploading([], status);
+  const start = deps.startHistoryWorker == null ? startHistoryWorker : deps.startHistoryWorker;
+  if (!(await start(row.key))) {
+    console.log(WORKER_LATER);
+    return printUploading([], 1);
+  }
+  return printUploading(owed, status);
+}
+
+// Owes each workspace the answered listing's sessions it routes to now and starts the worker once, then drops the listing; the exit status.
+export async function backfillConsented(row, deps = {}) {
+  const listing = answeredSetupListing(row.key);
+  if (listing == null) return printUploading([], 0);
+  try {
+    return await oweListed(row, listing, deps);
+  } finally {
+    removeSetupListing(row.key);
+  }
+}
+
 // Uploads the sessions the workspace's offer counted, when `token` names that offer; its exit status.
 export function backfillAccept(row, tenantKey, token, deps = {}) {
   return acceptOffer(row, tenantKey, token, foregroundRun(deps));
@@ -79,6 +123,10 @@ async function main() {
   const { account, rest } = await parseAccountFlag(process.argv.slice(2));
   if (account == null) fail('Beezi: backfill needs --account <key|email|n>. /beezi:login passes it automatically.');
   const row = (await getAccount(account)) || { key: account };
+  if (rest.indexOf('--consented') !== -1) {
+    if (await backfillConsented(row) !== 0) process.exit(1);
+    return;
+  }
   const tenantKey = flagValue(rest, '--accept');
   if (tenantKey == null) {
     if (await backfillSummary(row) !== 0) process.exit(1);

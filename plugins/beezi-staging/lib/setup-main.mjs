@@ -5,20 +5,20 @@ import { readSettingsEnv } from './claude-settings-env.mjs';
 import { friendlyMessage } from './friendly-error.mjs';
 import { hasOauthTokenIdentity } from './oauth-identity.mjs';
 import { osEnvOauthToken } from './os-env-token.mjs';
-import { finaleLines } from './setup-finale.mjs';
+import { headerLines } from './setup-finale.mjs';
 import { createPrompt, openTerminal } from './setup-prompt.mjs';
 import { createRunner } from './setup-runner.mjs';
-import { canReadKeys, colorEnabled, createStyle, formatLine, paint } from './setup-style.mjs';
-import { runSetup } from './setup-wizard.mjs';
+import { canReadKeys, formatLine, paint, terminalStyle } from './setup-style.mjs';
+import { AGENT, runSetup } from './setup-wizard.mjs';
 
 export const SESSION_KEYS = ['CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'];
 export const NO_TERMINAL = '✗ Beezi setup needs a terminal. Run /beezi:login in Claude Code instead.';
-export const STOPPED = 'Setup stopped. Run the installer again, or /beezi:login in Claude Code, to finish.';
+export const STOPPED = 'Setup stopped. Run /beezi:login in Claude Code to finish.';
 export const HIDDEN_TOKEN = '⚠ Beezi: your shell sets CLAUDE_CODE_OAUTH_TOKEN, but Claude Code hides it from plugins, '
   + 'so Beezi can’t count usage against that key. To fix that, add the token to the "env" block in ~/.claude/settings.json.';
 const OAUTH_TOKEN = 'CLAUDE_CODE_OAUTH_TOKEN';
-const AGENT = 'Claude Code';
 const SHOW_CURSOR = '\x1b[?25h';
+const MARGIN = '  ';
 
 export function realDeps(root) {
   return {
@@ -27,7 +27,6 @@ export function realDeps(root) {
     settingsEnv: readSettingsEnv,
     osEnvToken: osEnvOauthToken,
     output: process.stdout,
-    random: Math.random,
     openTerminal,
     createPrompt,
     createRunner,
@@ -51,13 +50,19 @@ function hiddenShellToken(deps, settings) {
   return deps.osEnvToken() == null;
 }
 
-// Runs the wizard on the terminal and resolves its exit code.
+// Each non-empty \n-separated part starts at the setup's left margin.
+function indent(line) {
+  return String(line).split('\n').map((part) => (part === '' ? part : MARGIN + part)).join('\n');
+}
+
+// Runs the wizard on the terminal and resolves its exit code; the header is left to the installer when it ran the setup.
 export function setupMain(deps) {
   const output = deps.output;
-  const style = createStyle({ enabled: colorEnabled({ stream: output, env: deps.env }) });
+  const style = terminalStyle({ stream: output, env: deps.env });
   // Wrapped to the width on a terminal; a log keeps each line whole.
-  const format = (line) => (output.isTTY ? formatLine(style, line, output.columns || 80) : paint(style, line));
+  const format = (line) => (output.isTTY ? formatLine(style, indent(line), output.columns || 80) : paint(style, indent(line)));
   const print = (line) => { output.write(`${format(line)}\n`); };
+  if (deps.env.BEEZI_INSTALLER !== '1') headerLines({ agent: AGENT, style }).forEach((line) => { output.write(`${line}\n`); });
   const input = deps.openTerminal();
   if (input === null) {
     print(NO_TERMINAL);
@@ -77,28 +82,24 @@ export function setupMain(deps) {
   };
   deps.onInterrupt(stop);
   const interactive = canReadKeys({ input, output, env: deps.env });
-  const ask = deps.createPrompt({ input, output, style, interactive, onInterrupt: stop });
+  const ask = deps.createPrompt({ input, output, style, interactive, onInterrupt: stop, format });
   // The settings env block over the shell's, without the setup token, as Claude Code gives its hooks.
   const settings = deps.settingsEnv();
   const env = Object.assign({}, deps.env, settings);
   delete env[OAUTH_TOKEN];
   run = deps.createRunner({
     root: deps.root, cwd, env, sessionKeys: SESSION_KEYS, paint: format,
-    output, activity: output.isTTY === true && deps.env.TERM !== 'dumb',
+    output, activity: output.isTTY === true && deps.env.TERM !== 'dumb', margin: MARGIN, accent: style.accent,
   });
   const progress = (label) => { run.setLabel(label); };
-  return deps.runSetup({ run, ask, print, progress, style })
+  const notices = hiddenShellToken(deps, settings) ? [HIDDEN_TOKEN] : [];
+  return deps.runSetup({ run, ask, print, progress, style, notices })
     .catch((error) => {
       print(`✗ ${friendlyMessage(error)}`);
       return 1;
     })
     .then((code) => {
       ask.close();
-      if (code === 0) {
-        if (hiddenShellToken(deps, settings)) print(HIDDEN_TOKEN);
-        finaleLines({ agent: AGENT, style, columns: output.columns || 80, random: deps.random })
-          .forEach((line) => { output.write(`${line}\n`); });
-      }
       return code;
     });
 }

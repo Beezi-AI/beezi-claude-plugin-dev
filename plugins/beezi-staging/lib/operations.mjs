@@ -46,6 +46,19 @@ function skillPlugin(skillId) {
   return i === -1 ? 'builtin' : skillId.slice(0, i);
 }
 
+// A directory-scoped skill id names its folder as the namespace — '.claude/worktrees/x:facts',
+// 'apps/web:deploy'. A folder is not a plugin and differs per worktree, so keying on it splits one
+// skill across many names; only the name after the last ':' is kept. A plugin namespace never holds
+// a path separator. An empty name falls back to 'unknown', like a missing id.
+function skillKey(skillId) {
+  const i = skillId.lastIndexOf(':');
+  if (i === -1) return skillId;
+  const namespace = skillId.slice(0, i);
+  if (namespace.indexOf('/') === -1 && namespace.indexOf('\\') === -1) return skillId;
+  const name = skillId.slice(i + 1);
+  return name === '' ? 'unknown' : name;
+}
+
 // A typed `/name` skill writes no Skill tool_use. An inline one leaves a user echo that opens with
 // <command-message> (built-in commands like /clear open with <command-name>); a forked one, like
 // /code-review, leaves a local_command line holding <forked-skill-launch>{"skillName":…}. Returns
@@ -94,7 +107,8 @@ export function computeOperations(lines) {
     p.est_tokens += est;
   };
 
-  const addSkill = (skillId, est) => {
+  const addSkill = (rawId, est) => {
+    const skillId = skillKey(rawId);
     const bySkill = totals.skill.by_skill;
     if (bySkill[skillId] == null) bySkill[skillId] = { count: 0, est_tokens: 0 };
     const s = bySkill[skillId];
