@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.45.3 (2026-11-10) — Project skills counted under their own name
+
+### Fixed
+- **Skills from a project folder keep one name** — a skill that lives in a project or worktree folder (Claude Code names it like `apps/web:deploy`) is now counted under its skill name, `deploy`, instead of the folder path. The same skill used from several worktrees now adds up under one name, and the folder no longer shows up as a plugin.
+
 ## 0.45.2 (2026-11-09) — Blocked time for every rate limit
 
 ### Fixed
