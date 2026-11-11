@@ -298,10 +298,10 @@ self-reported plan` and there was no `gateway=custom`; or when Step 3a was asked
 and the user answered "My Claude subscription".
 
 Ask with the AskUserQuestion tool: "How does this machine pay for Claude?"
-with exactly these options: "Pro", "Max", "Team or Enterprise", "API key (no
-subscription)". If they pick "Max", ask one follow-up question with options
-"Max 5x" and "Max 20x". If they pick "Team or Enterprise", ask one follow-up
-question with options "Team" and "Enterprise". Omit the API-key option when you
+with exactly these options: "Pro", "Max or Ultra", "Team or Enterprise", "API
+key (no subscription)". If they pick "Max or Ultra", ask one follow-up question
+with options "Max" and "Ultra". If they pick "Team or Enterprise", ask one
+follow-up question with options "Team" and "Enterprise". Omit the API-key option when you
 are here from Step 3a — they have already ruled it out.
 
 The API-key option matters: without it a machine paying per-token gets pinned to
@@ -312,8 +312,8 @@ Map the final answer through this table — no other values are valid:
 | Answer                                | value        |
 | ------------------------------------- | ------------ |
 | Pro                                   | `pro`        |
-| Max 5x                                | `max_5x`     |
-| Max 20x                               | `max_20x`    |
+| Max                                   | `max_5x`     |
+| Ultra                                 | `max_20x`    |
 | Team                                  | `team`       |
 | Enterprise                            | `enterprise` |
 | API key (no subscription)             | `api_key`    |

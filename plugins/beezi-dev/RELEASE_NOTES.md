@@ -1,5 +1,10 @@
 # Beezi plugin release notes
 
+## 0.45.1 (2026-11-09) — Max and Ultra plan names
+
+### Improved
+- **Claude's new plan names** — the plan question in `/beezi:login` and terminal setup offers "Max or Ultra", then Max or Ultra, and `/beezi:settings` shows Max or Ultra instead of Max 5x or Max 20x. Anthropic renamed Max 20x to Ultra; what Beezi records for each plan is unchanged.
+
 ## 0.45.0 (2026-11-03) — Past sessions upload without asking
 
 ### New

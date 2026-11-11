@@ -8,7 +8,7 @@ export const UNREADABLE = "Beezi could not understand the server's answer, so th
 const TIER_QUESTION = 'How does this machine pay for Claude?';
 const TIERS = [
   { label: 'Pro', value: 'pro' },
-  { label: 'Max', follow: { question: 'Which Max plan?', options: [{ label: 'Max 5x', value: 'max_5x' }, { label: 'Max 20x', value: 'max_20x' }] } },
+  { label: 'Max or Ultra', follow: { question: 'Max or Ultra?', options: [{ label: 'Max', value: 'max_5x' }, { label: 'Ultra', value: 'max_20x' }] } },
   { label: 'Team or Enterprise', follow: { question: 'Team or Enterprise?', options: [{ label: 'Team', value: 'team' }, { label: 'Enterprise', value: 'enterprise' }] } },
   { label: 'API key (no subscription)', value: 'api_key' },
 ];
