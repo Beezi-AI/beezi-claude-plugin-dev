@@ -289,6 +289,17 @@ export function markTenantsReviewed(key, ids, deps = {}) {
   return addTenantIds(key, 'reviewedTenantIds', ids, deps);
 }
 
+// Setup's tracking question was answered for this account on this machine (workspace.mjs setup everything / chosen).
+export function markTrackingChosen(key, nowIso, deps = {}) {
+  return withIndexLock(async () => {
+    const index = await readIndex(deps);
+    const row = index.accounts.find((a) => a.key === key);
+    if (!row) throw new UserError('No such linked account.');
+    row.trackingChosenAt = nowIso;
+    writeIndex(index);
+  });
+}
+
 // The history worker stamps the start of its pass on the entries it is about to run.
 export function notePendingAttempt(key, tenantIds, nowIso, deps = {}) {
   return withIndexLock(async () => {

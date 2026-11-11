@@ -22,7 +22,7 @@ import { isBusy } from './sync-loop.mjs';
 
 export const CHANGED_LINE = 'Beezi: these past sessions changed after the question was shown, so nothing was uploaded. Run /beezi:sync to see them again.';
 const COVERAGE_NOTE = '  Note: Beezi could not confirm what it already has, so this run resumed from local progress only.';
-const OFFER_COVERAGE_NOTE = '  Note: Beezi could not confirm what it already has, so it could not count past sessions. Nothing was uploaded; run /beezi:sync to try again.';
+export const OFFER_COVERAGE_NOTE = '  Note: Beezi could not confirm what it already has, so it could not count past sessions. Nothing was uploaded; run /beezi:sync to try again.';
 // The <ask> question, with "too" only when no-ask workspaces of the same account block uploaded first (R16).
 const askQuestion = (afterUploads) => `Upload your past sessions to these workspaces${afterUploads ? ' too' : ''}?`;
 // Ask-first workspaces per <ask> block, as the join picker splits its questions.
@@ -408,7 +408,7 @@ export function freshMode(who, tenantId) {
 }
 
 // The fresh whoami when there is one, else the cached row.
-const freshOf = (row, who) => (who != null && who.valid === true ? who : row);
+export const freshOf = (row, who) => (who != null && who.valid === true ? who : row);
 
 // One workspace's dry run under its engine, with ctx = { via, override, planRuns, runCache }. Settles a workspace with
 // nothing left to offer, or prints why it could not count; { offer, mode, status, who }, with offer null when there is none.
@@ -482,6 +482,15 @@ async function oweInBackground(row, noAsk) {
     }
   }
   return { owed, status };
+}
+
+// Owes each counted workspace its offer as a question would have shown it, also hiding `listedKinds[tenantId]`, recording no question; { owed, status }.
+export function oweConsented(row, counted, listedKinds) {
+  return oweInBackground(row, counted.map((c) => {
+    const offer = shownOffer(row, c);
+    const listed = Array.isArray(listedKinds[c.tenantId]) ? listedKinds[c.tenantId] : [];
+    return { ...c, offer: { ...offer, shownKinds: unionKinds([offer.shownKinds, listed]) } };
+  }));
 }
 
 // Owes every no-ask workspace before the first run (R5), then uploads each through `ctx.runOne`, one failure not

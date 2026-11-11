@@ -189,6 +189,11 @@ export function historyDeclinedFile(key, tenantId = null) {
   return path.join(accountDir(key), tenantId == null ? 'history-declined.json' : `history-declined.${tenantTag(tenantId)}.json`);
 }
 
+// The setup listing the user was shown, kept for the consented upload, next to the offer files.
+export function setupListingFile(key) {
+  return path.join(accountDir(key), 'setup-listing.json');
+}
+
 // File-name-safe form of a tenant id, shared by per-tenant ledgers and queue copies.
 export function tenantTag(tenantId) {
   return String(tenantId).replace(/[^A-Za-z0-9_-]/g, '_');
