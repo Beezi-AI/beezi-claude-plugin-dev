@@ -4,7 +4,7 @@ import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { readSessionWorkspace } from './workspace.mjs';
 import { createRouteContext, routeForDir, routeKeyForDir, shortLabel } from './workspace-rules.mjs';
 import { firstRecordedCwd, listAllTranscripts } from './transcript-index.mjs';
-import { runAudit as _runAudit, createRunCache } from './session-audit.mjs';
+import { runAudit as _runAudit, AuditReason, createRunCache } from './session-audit.mjs';
 import {
   OfferEngine, OfferGate, OfferVia, coverageUnknown, engineOf, engineRunOptions, offerGate, offerTenantKey, workspaceWhoami,
 } from './history-offer.mjs';
@@ -23,6 +23,29 @@ const NO_ROUTES = () => ({ routes: new Map() });
 export const UNSAFE_LINE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 // A match or label holding " <word>=" could be read as one of the T line's fields, so the setup listing leaves it out.
 const FIELD_LIKE = / [\w-]+=/;
+export const SETUP_BUSY_WAIT_MS = 60000;
+export const SETUP_BUSY_POLL_MS = 2000;
+const SETUP_BUSY_MAX_SLEEPS = SETUP_BUSY_WAIT_MS / SETUP_BUSY_POLL_MS;
+
+const sleepFor = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// runAudit run again every poll while it answers busy, under one deadline and sleep count shared by every call.
+export function retryWhileBusy(runAuditImpl, deps) {
+  const runAudit = runAuditImpl == null ? _runAudit : runAuditImpl;
+  const now = deps.now == null ? Date.now : deps.now;
+  const sleep = deps.sleep == null ? sleepFor : deps.sleep;
+  let firstAttempt = null;
+  let sleeps = 0;
+  return async (runDeps, options) => {
+    if (firstAttempt == null) firstAttempt = now();
+    for (;;) {
+      const result = await runAudit(runDeps, options);
+      if (result.reason !== AuditReason.BUSY || now() - firstAttempt >= SETUP_BUSY_WAIT_MS || sleeps >= SETUP_BUSY_MAX_SLEEPS) return result;
+      sleeps += 1;
+      await sleep(SETUP_BUSY_POLL_MS);
+    }
+  };
+}
 
 // The workspaces whose past-session offer gate is open: the ones the upload may count and send to.
 export function openTenantIds(row) {
@@ -33,13 +56,12 @@ export function openTenantIds(row) {
 
 // One workspace's dry run without routes or Don't-track exclusions, less declined sessions; null after printing a failed count.
 async function plannedFor(row, tenantId, runCache, deps) {
-  const runAudit = deps.runAudit == null ? _runAudit : deps.runAudit;
   const who = await workspaceWhoami(row, tenantId, deps);
   const engine = engineOf(who);
   const options = engineRunOptions(row, tenantId, OfferVia.LOGIN, engine, { ...deps, planWorkspaceRuns: NO_ROUTES });
   delete options.sessionRoutes;
   delete options.excludedSessionIds;
-  const result = await runAudit({ runCache, whoamiImpl: async () => who }, { ...options, dryRun: true });
+  const result = await deps.runAudit({ runCache, whoamiImpl: async () => who }, { ...options, dryRun: true });
   if (result.reason != null || result.halt != null) {
     const stop = printStop(result, { via: OfferVia.LOGIN, workspace: workspaceName(row, tenantId), dryRun: true });
     return stop === StopStatus.FAILED ? null : [];
@@ -55,9 +77,10 @@ async function plannedFor(row, tenantId, runCache, deps) {
 // sessionId → startedAtMs over every workspace the upload could send to; null when one could not count.
 async function plannedSessions(row, deps) {
   const runCache = createRunCache();
+  const runAudit = retryWhileBusy(deps.runAudit, deps);
   const planned = new Map();
   for (const tenantId of openTenantIds(row)) {
-    const sessions = await plannedFor(row, tenantId, runCache, deps);
+    const sessions = await plannedFor(row, tenantId, runCache, { ...deps, runAudit });
     if (sessions == null) return null;
     for (const s of sessions) if (!planned.has(s.sessionId)) planned.set(s.sessionId, s.startedAtMs);
   }

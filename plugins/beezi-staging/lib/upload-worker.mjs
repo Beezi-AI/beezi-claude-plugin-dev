@@ -4,6 +4,7 @@ import path from 'path';
 import { accountsRoot, uploadWorkerFile } from './paths.mjs';
 import { readJson, writeJsonSecure } from './fs-store.mjs';
 import { acquireOwnedLock } from './single-instance-lock.mjs';
+import { AUTH_STATES } from './auth-state.mjs';
 
 // The background uploader: one process per Beezi home drains every linked account's queue under
 // the owned lock `upload` (<home>/upload.lock), so hooks only enqueue and hand off.
@@ -29,6 +30,9 @@ export const WORKER_RUN_MS = 270000;
 // After the batch route failed and the single-route fallback delivered (an older server), the
 // worker posts one by one for this long before it tries batches again.
 export const BATCH_UNSUPPORTED_MS = 24 * 60 * 60 * 1000;
+// While another process refreshes a token, the sessions are resolved again after this wait, up to AUTH_RESOLVES times in all.
+export const AUTH_RETRY_MS = 2000;
+const AUTH_RESOLVES = 3;
 
 const STATUS_VERSION = 1;
 // A crash (a throw out of the run, an uncaught error in the entrypoint) and a watchdog cut-off
@@ -135,7 +139,7 @@ async function loadModules() {
 // Drains the queue in passes until it is empty, then exits. Each pass, per account: flushQueue,
 // then deliverOutbox (lib/outbox-delivery.mjs); then one statusline drain across every account's
 // snapshot targets, and (first pass only) the installation binding. Returns
-// { outcome: 'busy'|'no-accounts'|'empty'|'stalled'|'tracking-disabled'|'lock-lost'|'deadline', passes, flushed }.
+// { outcome: 'busy'|'no-accounts'|'auth-busy'|'empty'|'stalled'|'tracking-disabled'|'lock-lost'|'deadline', passes, flushed }.
 // A throw inside the run still releases the lock and records `crash` before it propagates.
 export async function runUploadWorker(deps = {}) {
   const acquireLock = deps.acquireLock == null ? acquireOwnedLock : deps.acquireLock;
@@ -199,7 +203,12 @@ export async function runUploadWorker(deps = {}) {
 
       // Nobody is waiting on this process, so credential reads get the interactive caps: the
       // longer store-read timeout and a refresh that may wait on another holder's lock.
-      const interactiveAuth = (d, o) => getAuthentication(d, Object.assign({}, o, { waitMs: mods.interactiveWaitMs }));
+      let refreshSeen = false;
+      const interactiveAuth = async (d, o) => {
+        const auth = await getAuthentication(d, Object.assign({}, o, { waitMs: mods.interactiveWaitMs }));
+        if (auth != null && auth.authState === AUTH_STATES.REFRESHING) refreshSeen = true;
+        return auth;
+      };
       // The env snapshot posts stamp their identity with: resolved once per run, and only when a
       // snapshot is sent (the OS probe may start a process). Held in memory, never written.
       const getEnv = () => {
@@ -210,13 +219,18 @@ export async function runUploadWorker(deps = {}) {
         return envValue;
       };
       let sessions = [];
-      try {
-        sessions = await linkedSessions({ getAuthentication: interactiveAuth });
-      } catch { sessions = []; }
-      sessions = (Array.isArray(sessions) ? sessions : []).filter((s) => s != null && s.token);
+      for (let resolves = 1; ; resolves += 1) {
+        refreshSeen = false;
+        try {
+          sessions = await linkedSessions({ getAuthentication: interactiveAuth });
+        } catch { sessions = []; }
+        sessions = (Array.isArray(sessions) ? sessions : []).filter((s) => s != null && s.token);
+        if (sessions.length > 0 || !refreshSeen || resolves >= AUTH_RESOLVES) break;
+        await sleep(AUTH_RETRY_MS);
+      }
 
       if (sessions.length === 0) {
-        roundOutcome = 'no-accounts';
+        roundOutcome = refreshSeen ? 'auth-busy' : 'no-accounts';
       } else {
         let idlePasses = 0;
         for (;;) {
