@@ -1,5 +1,11 @@
 # Beezi plugin release notes
 
+## 0.46.1 (2026-11-17) — Setup and uploads wait out a busy moment
+
+### Fixed
+- **Setup waits for a busy Beezi job** — setup no longer gives up on your past sessions when another Beezi job is briefly busy. It tries again for up to a minute.
+- **No five-minute pause during a token refresh** — when another Beezi process is renewing your sign-in, uploads wait a few seconds for it instead of pausing for five minutes.
+
 ## 0.46.0 (2026-11-11) — One-question setup
 
 ### New

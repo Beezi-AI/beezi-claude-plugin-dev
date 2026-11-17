@@ -4,7 +4,7 @@ import { isMultiTenant } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { startHistoryWorker } from '../lib/history-trigger.mjs';
 import { OfferVia } from '../lib/history-offer.mjs';
-import { answeredSetupListing, openTenantIds, removeSetupListing } from '../lib/setup-places.mjs';
+import { answeredSetupListing, openTenantIds, removeSetupListing, retryWhileBusy } from '../lib/setup-places.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 import {
   countWorkspace, presentOffers, oweConsented, acceptOffer, acceptPrefix, foregroundRun, printCounts, flagValue, routeSummary, workspaceName,
@@ -107,8 +107,9 @@ async function oweListed(row, listing, deps) {
 export async function backfillConsented(row, deps = {}) {
   const listing = answeredSetupListing(row.key);
   if (listing == null) return printUploading([], 0);
+  const runAudit = retryWhileBusy(deps.runAudit, deps);
   try {
-    return await oweListed(row, listing, deps);
+    return await oweListed(row, listing, { ...deps, runAudit });
   } finally {
     removeSetupListing(row.key);
   }
