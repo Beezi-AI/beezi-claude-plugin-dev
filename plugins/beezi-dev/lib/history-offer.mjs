@@ -200,14 +200,13 @@ export function engineRunOptions(row, tenantId, via, engine, deps = {}) {
   return options;
 }
 
-// The Upload of a stored or accepted offer: its engine and cutoff, its session ids, and the kinds its question hid.
+// The Upload of a stored or accepted offer: its engine and cutoff and its session ids.
 export function replayOptions(row, tenantId, replay, deps = {}) {
   const options = engineRunOptions(row, tenantId, replay.via, replay.engine, deps);
   if (replay.engine !== OfferEngine.BACKFILL) options.historyCutoffMs = replay.historyCutoffMs == null ? null : replay.historyCutoffMs;
   if (replay.override === true) delete options.sessionRoutes;
   options.onlySessionIds = Array.isArray(replay.sessionIds) ? replay.sessionIds : [];
   options.consented = true;
-  options.consentKinds = replay.kinds || [];
   return options;
 }
 

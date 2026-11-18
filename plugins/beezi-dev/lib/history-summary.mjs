@@ -12,7 +12,7 @@ import { followUploads, plainLine, doneLine, REST_LINE } from './upload-progress
 import { RunOutcome, pendingHistoryOf } from './pending-history.mjs';
 import { readDeclinedIds, rememberDeclined, forgetDeclined } from './offer-declines.mjs';
 import { newFoldersOf } from './workspace.mjs';
-import { anonymizationFor, kindsOf, pastSessionsFor, unionKinds } from './anonymization.mjs';
+import { anonymizationFor, kindsOf, pastSessionsFor } from './anonymization.mjs';
 import { ANON_KINDS } from './anonymize.mjs';
 import { pluginRoot } from './paths.mjs';
 import { SOLO_KEY, offerStateOf, OfferMode, offerMode } from './offer-gate.mjs';
@@ -156,14 +156,9 @@ async function askOffer(row, tenantId, offer, uploadPrefix, checklist) {
   printOfferBlock(row, tenantId, offer, `${uploadPrefix} --offer ${token}`, token, checklist);
 }
 
-// The replay a yes stands for: the offer under every kind its question hid or the workspace hides now.
-export function consentedReplay(row, tenantId, offer) {
-  return { ...offer, kinds: unionKinds([shownKindsOf(offer), kindsOf(anonymizationFor(row, tenantId))]) };
-}
-
 // Owes the workspace the offer's sessions for the history worker; true when an entry holds them.
 export function oweUpload(row, tenantId, offer) {
-  return requestConsentedHistory(row.key, tenantId, new Date().toISOString(), consentedReplay(row, tenantId, offer));
+  return requestConsentedHistory(row.key, tenantId, new Date().toISOString(), offer);
 }
 
 export function backgroundLine(row, tenantIds, n) {
@@ -333,6 +328,9 @@ export function printStop(result, { via, workspace, dryRun = false }) {
     console.error(`Beezi: ${workspace} hides some names, but this machine has no valid key for it yet, so nothing was uploaded. Start a new Claude Code session to refresh it, then run /beezi:sync.`);
     return StopStatus.FAILED;
   }
+  if (result.halt === BackfillHalt.ANONYMIZATION_UNKNOWN) {
+    return failed(`Beezi: could not check which names ${workspace} hides, so nothing was uploaded. Run /beezi:sync again later.`);
+  }
   if (dryRun && (result.reason != null || result.halt != null)) {
     console.error(`Beezi: could not count past sessions for ${workspace} (${result.reason == null ? result.halt : result.reason}). Run /beezi:sync to try again.`);
     return StopStatus.FAILED;
@@ -462,7 +460,7 @@ export const freshOf = (row, who) => (who != null && who.valid === true ? who : 
 
 // One workspace's dry run under its engine, with ctx = { via, override, planRuns, runCache }. Settles a workspace with
 // nothing left to offer, or prints why it could not count; { offer, mode, status, who }, with offer null when there is none.
-// An override (R6) and an Audit workspace (R15) always ask; no-ask comes from the fresh whoami (R17), and /beezi:sync
+// An override (R6) always asks; no-ask comes from the fresh whoami (R17), Audit workspaces included, and /beezi:sync
 // asks first where it would upload a session declined under the workspace's current choice (R18).
 export async function countWorkspace(row, tenantId, ctx, deps = {}) {
   const runAudit = deps.runAudit == null ? _runAudit : deps.runAudit;
@@ -499,7 +497,7 @@ export async function countWorkspace(row, tenantId, ctx, deps = {}) {
     // Held-back sessions count as still open, so the accepted upload scans again instead of settling.
     nowIso: new Date().toISOString(), active: result.pendingLive > 0 ? result.active + result.pendingLive : result.active,
   });
-  let mode = ctx.override === true || engine === OfferEngine.BACKFILL ? OfferMode.ASK : freshMode(who, tenantId);
+  let mode = ctx.override === true ? OfferMode.ASK : freshMode(who, tenantId);
   if (mode === OfferMode.UPLOAD && ctx.via === OfferVia.SYNC) {
     const declinedNow = readDeclinedIds(row.key, tenantKey, changedAt);
     if (planned.some((s) => declinedNow.has(s.sessionId))) mode = OfferMode.ASK;
@@ -535,13 +533,9 @@ async function oweInBackground(row, noAsk) {
   return { owed, status };
 }
 
-// Owes each counted workspace its offer as a question would have shown it, also hiding `listedKinds[tenantId]`, recording no question; { owed, status }.
-export function oweConsented(row, counted, listedKinds) {
-  return oweInBackground(row, counted.map((c) => {
-    const offer = shownOffer(row, c);
-    const listed = Array.isArray(listedKinds[c.tenantId]) ? listedKinds[c.tenantId] : [];
-    return { ...c, offer: { ...offer, shownKinds: unionKinds([offer.shownKinds, listed]) } };
-  }));
+// Owes each counted workspace its offer as a question would have shown it, recording no question; { owed, status }.
+export function oweConsented(row, counted) {
+  return oweInBackground(row, counted.map((c) => ({ ...c, offer: shownOffer(row, c) })));
 }
 
 // Owes every no-ask workspace before the first run (R5), then uploads each through `ctx.runOne`, one failure not
@@ -583,17 +577,12 @@ async function uploadNoAsk(row, noAsk, ctx) {
   return status;
 }
 
-// The offer as its block shows it: a no-ask upload hides every kind the cached row or the fresh whoami hides, and is
-// stamped with the fresh whoami's changedAt (F4 (#21)).
+// The offer as its block shows it: the kinds the fresh whoami hides (the cached row's without one), and a no-ask
+// upload is stamped with its changedAt (F4 (#21)).
 function shownOffer(row, c) {
-  const kinds = kindsOf(anonymizationFor(row, c.tenantId));
-  if (c.mode !== OfferMode.UPLOAD) return { ...c.offer, shownKinds: kinds };
   const fresh = freshOf(row, c.who);
-  return {
-    ...c.offer,
-    shownKinds: unionKinds([kinds, kindsOf(anonymizationFor(fresh, c.tenantId))]),
-    changedAt: pastSessionsFor(fresh, c.tenantId).changedAt,
-  };
+  const offer = { ...c.offer, shownKinds: kindsOf(anonymizationFor(fresh, c.tenantId)) };
+  return c.mode === OfferMode.UPLOAD ? { ...offer, changedAt: pastSessionsFor(fresh, c.tenantId).changedAt } : offer;
 }
 
 // Prints the account's counted workspaces ({ tenantId, offer, mode, who }): one keeps today's full block, several share
@@ -640,7 +629,7 @@ async function runAccepted(row, tenantKey, offer, runOne, report, deps = {}) {
   const engine = offer.engine === OfferEngine.BACKFILL ? OfferEngine.BACKFILL : OfferEngine.SYNC;
   forgetDeclined(row.key, tenantKey, offer.sessionIds);
   const where = { via: OfferVia.SYNC, workspace: workspaceName(row, tenantId) };
-  const result = await runOne(replayOptions(row, tenantId, consentedReplay(row, tenantId, offer)), { tenantId: tenantKey, workspace: where.workspace }, engine);
+  const result = await runOne(replayOptions(row, tenantId, offer), { tenantId: tenantKey, workspace: where.workspace }, engine);
   if (isBusy(result) && (await followRunning(row, tenantKey, deps))) return { status: 0, clean: false, busy: true };
   const outcome = classifyRun(result, false, engine);
   const clean = outcome === RunOutcome.CLEAN;

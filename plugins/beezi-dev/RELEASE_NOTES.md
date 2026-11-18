@@ -1,5 +1,12 @@
 # Beezi plugin release notes
 
+## 0.46.3 (2026-11-18) — Past sessions follow the workspace owner
+
+### Improved
+- **Uploads follow the owner's current settings** — past sessions are uploaded with the names the workspace hides at the moment they are sent. If the owner turns off hiding for a kind of name after you agreed to an upload, that kind is sent as it is. When Beezi can't confirm the workspace's settings at that moment, nothing is sent and the upload tries again later.
+- **Audit workspaces follow the owner's choice too** — an audit workspace whose owner chose to upload past sessions without asking now uploads them without asking, like any other workspace.
+- **Plan usage follows the owner's current settings** — a plan usage reading waiting to be sent is sent with the names the workspace hides when it goes out, not the ones hidden when an earlier reading was taken.
+
 ## 0.46.2 (2026-11-18) — Startup card and upload progress
 
 ### New

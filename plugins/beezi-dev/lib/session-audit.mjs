@@ -56,7 +56,7 @@ import {
   TrackingMode,
 } from './tracking.mjs';
 import { UserError } from './friendly-error.mjs';
-import { withConsentKinds } from './anonymization.mjs';
+import { anonymizationFor } from './anonymization.mjs';
 
 // Error posts are single small upserts, so a little parallelism is free — but not unbounded,
 // or a 200-session run opens 200 sockets at once.
@@ -322,8 +322,8 @@ async function runAuditUnlocked(deps, options) {
   if (isMultiTenant(resolved) && tenantId == null) { result.reason = AuditReason.WORKSPACE_REQUIRED; return result; }
   // Each workspace of a multi-workspace account keeps its own ledger, so one import never blocks the rest.
   const ledgerTenant = isMultiTenant(resolved) ? tenantId : null;
-  // Rebound by renewSession; dispatches and follow-ups read it when they run. consentKinds join its block, so every send hides them.
-  let session = withConsentKinds({ ...resolved, token: auth.accessToken, tenantId }, tenantId, options.consentKinds == null ? [] : options.consentKinds);
+  // Rebound by renewSession; dispatches and follow-ups read it when they run.
+  let session = { ...resolved, token: auth.accessToken, tenantId };
   const identity = session.clientId;
   // Sync drops every gate that encodes one-timeness and every skip keyed on the session id alone;
   // the server's per-session line coverage decides what is already uploaded.
@@ -343,10 +343,13 @@ async function runAuditUnlocked(deps, options) {
 
   // The server is the authority on "has this pull been used": local caches can be deleted (or
   // a reinstall never had them), and without this check a re-run would re-parse every
-  // transcript only to be 403'd on its first chunk. Offline/old servers answer null — proceed;
-  // the chunk-level ALREADY_COMPLETED guard still stands behind us.
+  // transcript only to be 403'd on its first chunk. With no valid answer a dry run still counts,
+  // but an upload sends nothing (see freshBlock below).
   const who = await whoamiImpl(session, { fetchImpl }).catch(() => null);
+  // Every send hides what the owner hides now: the fresh blocks replace the cached row's, never fall back to them.
+  const freshBlock = who != null && who.valid ? anonymizationFor(who, tenantId) : null;
   if (who != null && who.valid) {
+    session = { ...session, tenants: who.tenants, anonymization: who.anonymization };
     // One workspace's answer must not overwrite a multi-workspace account's cache.
     if (!isMultiTenant(resolved)) {
       try { recordWhoamiImpl(key, who, identity); } catch { /* best-effort */ }
@@ -456,6 +459,14 @@ async function runAuditUnlocked(deps, options) {
 
   if (candidates.length === 0) {
     result.ok = true;
+    return result;
+  }
+
+  // No block for this workspace in the run's own whoami: send nothing, so an owed upload stays owed for a retry.
+  if (!options.dryRun && freshBlock == null) {
+    result.ok = true;
+    result.halt = BackfillHalt.ANONYMIZATION_UNKNOWN;
+    result.lastError = BackfillHalt.ANONYMIZATION_UNKNOWN;
     return result;
   }
 

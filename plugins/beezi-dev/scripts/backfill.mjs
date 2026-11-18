@@ -94,7 +94,7 @@ function onlyListed(counted, sessionIds) {
 async function oweListed(row, listing, deps) {
   const done = await countOpen(row, deps);
   if (done.status !== 0) return printUploading(row, [], 1);
-  const { owed, status } = await oweConsented(row, onlyListed(done.counted, listing.sessionIds), listing.kinds);
+  const { owed, status } = await oweConsented(row, onlyListed(done.counted, listing.sessionIds));
   if (owed.length === 0) return printUploading(row, [], status);
   const start = deps.startHistoryWorker == null ? startHistoryWorker : deps.startHistoryWorker;
   if (!(await start(row.key))) {

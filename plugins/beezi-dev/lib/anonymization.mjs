@@ -71,21 +71,6 @@ export function pastSessionsFor(row, tenantId) {
   return found == null ? { ...PAST_SESSIONS_DEFAULT } : found;
 }
 
-// A copy whose block for tenantId also hides `kinds`, written where anonymizationFor reads it; no block fails closed with no key.
-export function withConsentKinds(session, tenantId, kinds) {
-  if (kinds.length === 0) return session;
-  const block = anonymizationFor(session, tenantId);
-  const id = scopeId(session, tenantId);
-  const next = block == null
-    ? { tenantId: id, kinds: unionKinds([kinds]), key: null, machineName: null }
-    : { ...block, kinds: unionKinds([kindsOf(block), kinds]) };
-  const tenants = Array.isArray(session.tenants) ? session.tenants : null;
-  if (id != null && tenants != null && tenants.some((t) => t.id === id)) {
-    return { ...session, tenants: tenants.map((t) => (t.id === id ? { ...t, anonymization: next } : t)) };
-  }
-  return { ...session, anonymization: next };
-}
-
 // The account row's workspaces, anonymization blocks and past-sessions choices, so authHeaders can pick the host header.
 export function anonymizationScope(row) {
   return row == null ? {} : { tenants: row.tenants, anonymization: row.anonymization, pastSessions: row.pastSessions };
