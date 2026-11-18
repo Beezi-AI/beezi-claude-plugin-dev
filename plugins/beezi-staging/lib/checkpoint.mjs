@@ -995,7 +995,7 @@ async function checkpointBody(input, deps, options, gate) {
       // One snapshot item per account: its targets are that account's sender workspaces, and the
       // sample is the usage reading this checkpoint already stamped. Written even without a
       // sample: the targets are what carries the statusline drain to the worker.
-      // Items and status-line rows carry the kinds of the targets that hide accounts now, honored at send.
+      // Status-line rows carry the kinds of the targets that hide accounts now, honored at send.
       const hidesAccounts = accountKinds(kindMap);
       const targetsByKey = new Map();
       for (const s of senders) {
@@ -1004,7 +1004,7 @@ async function checkpointBody(input, deps, options, gate) {
       }
       for (const [key, targets] of targetsByKey) {
         try {
-          enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets, capturedKinds: hidesAccounts, ...(utilization ? { sample: utilization } : {}) });
+          enqueueOutbox(key, { kind: OUTBOX_KINDS.SNAPSHOT, tenantId: null, targets, ...(utilization ? { sample: utilization } : {}) });
           outboxed += 1;
         } catch { /* best-effort */ }
       }

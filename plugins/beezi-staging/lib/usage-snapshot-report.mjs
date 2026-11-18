@@ -316,9 +316,7 @@ export async function maybePostUsageSnapshot(session, deps = {}) {
   // these are, and it is half the server's dedupe key. billing.json rides along so the plan fields
   // and the mismatch guard read from the same record every other path uses.
   const stamp = buildIdentityStamp(account, billing, env);
-  // deps.capturedKinds: the kind map an outbox snapshot item recorded at capture, so a kind turned off before the send stays applied.
-  const built = buildSnapshotPayload(utilization, account, stamp, billing);
-  const payload = bodyForTarget(deps.capturedKinds == null ? built : markPrivate(built, deps.capturedKinds), session);
+  const payload = bodyForTarget(buildSnapshotPayload(utilization, account, stamp, billing), session);
   if (payload == null) return { reported: false, reason: 'anonymization-key-missing' };
   try {
     const res = await postJson(`${apiBase()}${ENDPOINTS.usageSnapshot}`, session, payload, { fetchImpl });

@@ -26,8 +26,8 @@ function readyOffer(row, tenantId, tenantKey) {
 
 // The session-start offers of every workspace whose scan is ready, built from the file the scan counted; a ready
 // workspace without that file loses ready and scans again. A printed question records the decline (K6); a no-ask
-// workspace's upload is owed to the history worker only when its fresh whoami still says upload (R17); Audit workspaces
-// always ask (R15). The exit status: 1 when a workspace failed.
+// workspace's upload is owed to the history worker only when its fresh whoami still says upload (R17), Audit workspaces
+// included. The exit status: 1 when a workspace failed.
 export async function offer(row, deps = {}) {
   let shown = { offers: 0, notices: 0, status: 0 };
   if (row != null) {
@@ -38,7 +38,7 @@ export async function offer(row, deps = {}) {
         await clearOfferReady(row.key, tenantKey);
         continue;
       }
-      const noAsk = mode === OfferMode.UPLOAD && stored.audit !== true;
+      const noAsk = mode === OfferMode.UPLOAD;
       const who = noAsk ? await workspaceWhoami(row, tenantId, deps) : null;
       counted.push({ tenantId, offer: stored, who, mode: noAsk ? freshMode(who, tenantId) : OfferMode.ASK });
     }

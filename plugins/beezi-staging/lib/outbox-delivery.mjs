@@ -136,7 +136,7 @@ export async function deliverOutbox(session, deps = {}) {
 
   // Every target clone gets every stored sample, oldest first. The first retryable failure stops
   // the item: the rest would most likely time out the same way, and the whole item is kept.
-  const postSamples = async (targets, samples, capturedKinds) => {
+  const postSamples = async (targets, samples) => {
     if (targets.length === 0 || samples.length === 0) return 'sent';
     const env = getEnv();
     let anySent = false;
@@ -146,7 +146,7 @@ export async function deliverOutbox(session, deps = {}) {
         if (pastDeadline()) return 'retry';
         const verdict = await send((s) => maybePostUsageSnapshot(
           Object.assign({}, s, { tenantId }),
-          { env, utilization: sample, capturedKinds, fetchImpl },
+          { env, utilization: sample, fetchImpl },
         ));
         if (verdict === 'retry') return 'retry';
         if (verdict === 'sent') anySent = true;
@@ -162,8 +162,7 @@ export async function deliverOutbox(session, deps = {}) {
   // did not take. Built after the posts, so a renewed token is used.
   const sendSnapshot = async (item) => {
     const targets = targetsOf(item);
-    // An item written before capturedKinds existed has none and goes out under the current kinds.
-    const verdict = await postSamples(targets, samplesOf(item), item.capturedKinds);
+    const verdict = await postSamples(targets, samplesOf(item));
     for (const tenantId of targets) result.drainTargets.push(Object.assign({}, current, { tenantId }));
     return verdict;
   };

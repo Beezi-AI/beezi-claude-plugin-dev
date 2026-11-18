@@ -42,6 +42,8 @@ export const BackfillHalt = Object.freeze({
   UNSUPPORTED_SERVER: 'unsupported-server',
   FORBIDDEN: 'forbidden',
   ANONYMIZATION_KEY_MISSING: 'anonymization-key-missing',
+  // The run's whoami gave no anonymization block for the workspace, so nothing is sent.
+  ANONYMIZATION_UNKNOWN: 'anonymization-unknown',
 });
 
 // A group as the live queue would send it: the marker stripped, private reports and their cost state anonymized; null when private without a key.

@@ -1,7 +1,5 @@
 // Pure helpers for the per-account pending-history marker and its notice results; no I/O.
 
-import { unionKinds } from './anonymization.mjs';
-
 export const HISTORY_RETRY_MS = 60 * 60 * 1000;
 export const HISTORY_GIVE_UP_MS = 7 * 24 * 60 * 60 * 1000;
 export const HISTORY_RETRY_NOTICE_AT = 3;
@@ -34,8 +32,6 @@ function owedIds(row) {
   return members.length > 0 || typeof row.tenantId !== 'string' || row.tenantId === '' ? members : [row.tenantId];
 }
 
-const listOf = (value) => (Array.isArray(value) ? value : []);
-
 // The replay an accepted offer stands for; a repeated yes adds its sessions to the earlier one's and keeps the larger open count.
 function acceptedOf(offer, earlier) {
   const before = earlier != null && Array.isArray(earlier.sessionIds) ? earlier.sessionIds : [];
@@ -46,7 +42,6 @@ function acceptedOf(offer, earlier) {
     override: offer.override === true,
     changedAt: offer.changedAt == null ? null : offer.changedAt,
     sessionIds: before.concat(offer.sessionIds.filter((id) => before.indexOf(id) === -1)),
-    kinds: unionKinds([earlier == null ? [] : listOf(earlier.kinds), listOf(offer.kinds)]),
     active: Math.max(earlier == null ? 0 : earlier.active || 0, offer.active || 0),
   };
 }

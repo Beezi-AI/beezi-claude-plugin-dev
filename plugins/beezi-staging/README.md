@@ -126,8 +126,10 @@ uploads to the ones that don't ask, then asks once about the rest.
   run the question; Not now is remembered only once the question was actually printed. A session that
   never shows the question uploads nothing. Whether it remembers a decline depends on whether that
   session can ask, so the next attended session may ask again.
-- **An upload hides what the question said was hidden.** Every kind the question listed as hidden
-  stays hidden for that upload, even if the workspace owner turns one off before it finishes.
+- **An upload follows the owner's settings when it is sent.** It hides the kinds the workspace hides
+  at that moment, so a kind the owner turns off after you agreed is sent as it is.
+- **Audit workspaces follow the same choice.** An audit workspace whose owner chose upload without
+  asking uploads without asking too.
 - **Declined sessions are not asked about again** at `/beezi:login`, in terminal setup or at session
   start, but `/beezi:sync` still lists them.
 - **`/beezi:sync` offers have no link cutoff.** It offers every past session Beezi does not already
