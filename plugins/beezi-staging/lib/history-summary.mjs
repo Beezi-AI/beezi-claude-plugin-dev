@@ -6,10 +6,12 @@ import {
   engineRunOptions, replayOptions, coverageUnknown, workspaceWhoami, engineOf, plural, answeredBy,
   hidesPhrase, combinedHeader, noticeLines, progressLine, listText, uploadedLine as uploadedTotalsLine,
 } from './history-offer.mjs';
-import { classifyRun } from './pending-history-run.mjs';
+import { classifyRun, runWithProgress, workspaceName } from './pending-history-run.mjs';
+import { createProgressWriter as _createProgressWriter, readProgress as _readProgress, isLive, markReported } from './upload-progress.mjs';
+import { followUploads, plainLine, doneLine, REST_LINE } from './upload-progress-view.mjs';
 import { RunOutcome, pendingHistoryOf } from './pending-history.mjs';
 import { readDeclinedIds, rememberDeclined, forgetDeclined } from './offer-declines.mjs';
-import { tenantById, newFoldersOf } from './workspace.mjs';
+import { newFoldersOf } from './workspace.mjs';
 import { anonymizationFor, kindsOf, pastSessionsFor, unionKinds } from './anonymization.mjs';
 import { ANON_KINDS } from './anonymize.mjs';
 import { pluginRoot } from './paths.mjs';
@@ -29,6 +31,8 @@ const askQuestion = (afterUploads) => `Upload your past sessions to these worksp
 const ASK_PART_SIZE = 3;
 const NO_ASK_GROUP = '  Uploading without a question — these workspaces chose that';
 const ASK_GROUP = '  Asks you first';
+// A followed upload's plain lines stop here: the tool call that runs the script times out.
+const FOLLOW_CAP_MS = 100000;
 
 export const StopStatus = Object.freeze({ NONE: 'none', DONE: 'done', FAILED: 'failed' });
 
@@ -42,10 +46,61 @@ export function printProgress({ processed, total }) {
   console.log(`Beezi: ${processed}/${total} sessions read…`);
 }
 
-// A foreground upload through deps.runAudit that prints its progress.
+// A foreground upload through deps.runAudit that prints its progress and writes the record of `target` = { tenantId, workspace };
+// it prints its own result, so the record finishes reported (the card and the prompt hook never repeat it).
 export function foregroundRun(deps = {}) {
   const runAudit = deps.runAudit == null ? _runAudit : deps.runAudit;
-  return (options) => runAudit({ onProgress: printProgress }, options);
+  const createWriter = deps.createProgressWriter == null ? _createProgressWriter : deps.createProgressWriter;
+  return (options, target, engine) => runWithProgress(
+    runAudit, { onProgress: printProgress }, options, createWriter({ key: options.account, ...target }), { engine, reported: true },
+  );
+}
+
+// Follows the upload writing `tenantKey`'s record from `sinceMs` with a plain line per change, then its done line (marking
+// it reported), the cap line, or REST_LINE when the run left the rest to the worker. deps: log, follow, read, now, sleep.
+export async function followRecord(row, tenantKey, sinceMs, deps = {}) {
+  const log = deps.log == null ? console.log : deps.log;
+  const follow = deps.follow == null ? followUploads : deps.follow;
+  const read = deps.read == null ? _readProgress : deps.read;
+  const now = deps.now == null ? Date.now : deps.now;
+  const sleep = deps.sleep == null ? (ms) => new Promise((resolve) => setTimeout(resolve, ms)) : deps.sleep;
+  const workspace = workspaceName(row, tenantIdOfKey(tenantKey));
+  let last = null;
+  const { timedOut, stopped } = await follow({
+    key: row.key,
+    tenantIds: [tenantKey],
+    sinceMs,
+    capMs: FOLLOW_CAP_MS,
+    onUpdate: (record) => {
+      last = record;
+      log(plainLine(record));
+    },
+    onDone: (record) => {
+      log(doneLine(record));
+      // A failed mark only risks the next session start repeating this line.
+      try { markReported(row.key, tenantKey); } catch {}
+    },
+    read,
+    now,
+    sleep,
+  });
+  if (stopped) log(REST_LINE);
+  else if (timedOut) {
+    log(last == null
+      ? REST_LINE
+      : `✓ ${last.processed} of ${last.total} past sessions uploaded to ${workspace}; the rest keeps uploading in the background`);
+  }
+}
+
+// A /beezi:sync run that met another run's lock follows that run while it writes this workspace's live record; false
+// when there is none, so the busy line is printed instead.
+async function followRunning(row, tenantKey, deps) {
+  const read = deps.read == null ? _readProgress : deps.read;
+  const now = deps.now == null ? Date.now : deps.now;
+  const record = read(row.key, tenantKey);
+  if (record == null || !isLive(record, now())) return false;
+  await followRecord(row, tenantKey, Date.parse(record.startedAt), deps);
+  return true;
 }
 
 // A summary's last line: the ask-first workspaces asked, then the no-ask workspaces noticed (R9).
@@ -64,12 +119,7 @@ export function tenantIdOfKey(tenantKey) {
   return tenantKey === SOLO_KEY ? null : tenantKey;
 }
 
-export function workspaceName(row, tenantId) {
-  const t = tenantById(row, tenantId);
-  if (t != null && t.name) return t.name;
-  if (row.tenantName) return row.tenantName;
-  return tenantId == null ? 'your workspace' : tenantId;
-}
+export { workspaceName };
 
 export function nothingLine(row, tenantId) {
   return `Beezi: nothing to upload for ${workspaceName(row, tenantId)}. Run /beezi:sync to check again.`;
@@ -424,6 +474,7 @@ export async function countWorkspace(row, tenantId, ctx, deps = {}) {
   if (ctx.override) delete options.sessionRoutes;
   const runDeps = { runCache: ctx.runCache, onProgress: printProgress, whoamiImpl: async () => who };
   const result = await runAudit(runDeps, { ...options, dryRun: true });
+  if (ctx.via === OfferVia.SYNC && isBusy(result) && (await followRunning(row, tenantKey, deps))) return { offer: null, status: 0, reason: result.reason };
   if (result.reason != null || result.halt != null) {
     return { offer: null, status: exitStatus(printStop(result, { via: ctx.via, workspace, dryRun: true })), reason: result.reason };
   }
@@ -515,7 +566,7 @@ async function uploadNoAsk(row, noAsk, ctx) {
   const uploaded = [];
   for (const c of due) {
     try {
-      const run = await runAccepted(row, offerTenantKey(row, c.tenantId), c.offer, ctx.runOne, false);
+      const run = await runAccepted(row, offerTenantKey(row, c.tenantId), c.offer, ctx.runOne, false, ctx);
       if (run.status !== 0) status = 1;
       if (run.clean && c.clears) {
         const nowMs = Date.now();
@@ -580,15 +631,17 @@ export async function presentOffers(row, counted, ctx) {
   return { offers, notices: noAsk.length, status };
 }
 
-// Uploads an accepted offer through `runOne(options)` → result and prints the result, or without `report` only its stop
+// Uploads an accepted offer through `runOne(options, target, engine)` → result and prints the result, or without `report` only its stop
 // line, else the failure line of an unclean run; { status, clean }. A clean run that answered the file now on disk
-// settles the workspace, or scans it again when the offer left active sessions.
-async function runAccepted(row, tenantKey, offer, runOne, report) {
+// settles the workspace, or scans it again when the offer left active sessions. A run that met another run's lock
+// follows that run's record (followRecord's `deps`) when it has one.
+async function runAccepted(row, tenantKey, offer, runOne, report, deps = {}) {
   const tenantId = tenantIdOfKey(tenantKey);
   const engine = offer.engine === OfferEngine.BACKFILL ? OfferEngine.BACKFILL : OfferEngine.SYNC;
   forgetDeclined(row.key, tenantKey, offer.sessionIds);
-  const result = await runOne(replayOptions(row, tenantId, consentedReplay(row, tenantId, offer)));
   const where = { via: OfferVia.SYNC, workspace: workspaceName(row, tenantId) };
+  const result = await runOne(replayOptions(row, tenantId, consentedReplay(row, tenantId, offer)), { tenantId: tenantKey, workspace: where.workspace }, engine);
+  if (isBusy(result) && (await followRunning(row, tenantKey, deps))) return { status: 0, clean: false, busy: true };
   const outcome = classifyRun(result, false, engine);
   const clean = outcome === RunOutcome.CLEAN;
   let status;
@@ -616,8 +669,9 @@ async function runAccepted(row, tenantKey, offer, runOne, report) {
   return { status, clean, busy: isBusy(result) };
 }
 
-// Uploads the stored offer the printed `token` names through `runOne(options)` → result, and prints it; the exit status.
-export async function acceptOffer(row, tenantKey, token, runOne) {
+// Uploads the stored offer the printed `token` names through `runOne(options, target, engine)` → result, and prints it; the
+// exit status. `deps` as runAccepted's.
+export async function acceptOffer(row, tenantKey, token, runOne, deps = {}) {
   const tenantId = tenantIdOfKey(tenantKey);
   const offer = readOffer(row.key, tenantKey);
   if (offer == null) {
@@ -628,5 +682,5 @@ export async function acceptOffer(row, tenantKey, token, runOne) {
     console.log(CHANGED_LINE);
     return 0;
   }
-  return (await runAccepted(row, tenantKey, offer, runOne, true)).status;
+  return (await runAccepted(row, tenantKey, offer, runOne, true, deps)).status;
 }

@@ -61,7 +61,8 @@ export function setupMain(deps) {
   const style = terminalStyle({ stream: output, env: deps.env });
   // Wrapped to the width on a terminal; a log keeps each line whole.
   const format = (line) => (output.isTTY ? formatLine(style, indent(line), output.columns || 80) : paint(style, indent(line)));
-  const print = (line) => { output.write(`${format(line)}\n`); };
+  // `end` '' leaves the cursor on the line, for a line redrawn in place.
+  const print = (line, end = '\n') => { output.write(`${format(line)}${end}`); };
   if (deps.env.BEEZI_INSTALLER !== '1') headerLines({ agent: AGENT, style }).forEach((line) => { output.write(`${line}\n`); });
   const input = deps.openTerminal();
   if (input === null) {
@@ -73,8 +74,14 @@ export function setupMain(deps) {
   // Shows the cursor again on process exit.
   if (output.isTTY) deps.onExit(() => { output.write(SHOW_CURSOR); });
   let run = null;
+  // Set by the upload follow: while it follows, Ctrl+C ends only the following.
+  const interrupt = { following: false, stopped: false };
   // Shared by SIGINT and Ctrl+C inside an arrow-key menu; a drawn activity line is cleared first.
   const stop = () => {
+    if (interrupt.following) {
+      interrupt.stopped = true;
+      return;
+    }
     if (run !== null) run.clearActivity();
     print('');
     print(STOPPED);
@@ -87,13 +94,14 @@ export function setupMain(deps) {
   const settings = deps.settingsEnv();
   const env = Object.assign({}, deps.env, settings);
   delete env[OAUTH_TOKEN];
+  const activity = output.isTTY === true && deps.env.TERM !== 'dumb';
   run = deps.createRunner({
     root: deps.root, cwd, env, sessionKeys: SESSION_KEYS, paint: format,
-    output, activity: output.isTTY === true && deps.env.TERM !== 'dumb', margin: MARGIN, accent: style.accent,
+    output, activity, margin: MARGIN, accent: style.accent,
   });
   const progress = (label) => { run.setLabel(label); };
   const notices = hiddenShellToken(deps, settings) ? [HIDDEN_TOKEN] : [];
-  return deps.runSetup({ run, ask, print, progress, style, notices })
+  return deps.runSetup({ run, ask, print, progress, style, notices, output, activity, interrupt })
     .catch((error) => {
       print(`✗ ${friendlyMessage(error)}`);
       return 1;

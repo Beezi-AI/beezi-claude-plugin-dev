@@ -3,7 +3,7 @@ import { parseAccountFlag, getAccount, describeAccount } from '../lib/accounts.m
 import { isMultiTenant } from '../lib/workspace.mjs';
 import { friendlyMessage } from '../lib/friendly-error.mjs';
 import { startHistoryWorker } from '../lib/history-trigger.mjs';
-import { OfferVia } from '../lib/history-offer.mjs';
+import { OfferVia, offerTenantKey } from '../lib/history-offer.mjs';
 import { answeredSetupListing, openTenantIds, removeSetupListing, retryWhileBusy } from '../lib/setup-places.mjs';
 import { isEntryScript } from '../lib/entry-script.mjs';
 import {
@@ -74,11 +74,12 @@ export async function backfillSummary(row, deps = {}) {
   return status;
 }
 
-// The consented run's last line, with the distinct sessions owed; returns `status`.
-function printUploading(owed, status) {
+// The consented run's last line, with the distinct sessions owed and the owed workspaces' progress-record keys; returns `status`.
+function printUploading(row, owed, status) {
   const ids = new Set();
   owed.forEach((c) => c.offer.sessionIds.forEach((id) => ids.add(id)));
-  console.log(`uploading=${ids.size} workspaces=${owed.length}`);
+  const tenants = owed.map((c) => offerTenantKey(row, c.tenantId)).join(',');
+  console.log(`uploading=${ids.size} workspaces=${owed.length} tenants=${tenants}`);
   return status;
 }
 
@@ -92,21 +93,21 @@ function onlyListed(counted, sessionIds) {
 
 async function oweListed(row, listing, deps) {
   const done = await countOpen(row, deps);
-  if (done.status !== 0) return printUploading([], 1);
+  if (done.status !== 0) return printUploading(row, [], 1);
   const { owed, status } = await oweConsented(row, onlyListed(done.counted, listing.sessionIds), listing.kinds);
-  if (owed.length === 0) return printUploading([], status);
+  if (owed.length === 0) return printUploading(row, [], status);
   const start = deps.startHistoryWorker == null ? startHistoryWorker : deps.startHistoryWorker;
   if (!(await start(row.key))) {
     console.log(WORKER_LATER);
-    return printUploading([], 1);
+    return printUploading(row, [], 1);
   }
-  return printUploading(owed, status);
+  return printUploading(row, owed, status);
 }
 
 // Owes each workspace the answered listing's sessions it routes to now and starts the worker once, then drops the listing; the exit status.
 export async function backfillConsented(row, deps = {}) {
   const listing = answeredSetupListing(row.key);
-  if (listing == null) return printUploading([], 0);
+  if (listing == null) return printUploading(row, [], 0);
   const runAudit = retryWhileBusy(deps.runAudit, deps);
   try {
     return await oweListed(row, listing, { ...deps, runAudit });

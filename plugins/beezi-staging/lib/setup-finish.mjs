@@ -1,6 +1,18 @@
 import { STOPPED, lastLine, outputLines, report, token } from './setup-routing.mjs';
+import { markReported as _markReported } from './upload-progress.mjs';
+import { REST_LINE, barLine, doneLine, followUploads, plainLine } from './upload-progress-view.mjs';
 
 const FAILURE_LINE = /^(?:✗ |Beezi: )/;
+const CLEAR_LINE = '\r\x1b[2K';
+// Off a terminal setup runs under an agent's tool, whose call times out.
+const PLAIN_CAP_MS = 100000;
+// setup-main's left margin, and the widest row its format keeps whole (setup-style's wrapLines).
+const MARGIN_COLUMNS = 2;
+const MAX_ROW = 100;
+
+function realSleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
 
 // A failed upload's stdout ✗ and Beezi: lines, then its stderr; never its route summary, workspace headers or progress.
 function failureLines(result) {
@@ -9,17 +21,68 @@ function failureLines(result) {
   return lines.length > 0 ? lines : [STOPPED];
 }
 
-// Queues the consented upload and says how many sessions are on their way; a failure prints only its failure lines.
+// The bar line cut to one row of a `columns`-wide terminal: the workspace name is shortened with '…', so the in-place
+// redraw, which clears one row, never leaves a wrapped row behind.
+function fittedBar(record, ascii, columns) {
+  const room = Math.min(Math.max((columns || 80) - 1, 20), MAX_ROW) - MARGIN_COLUMNS;
+  const line = barLine(record, { ascii });
+  if (line.length <= room) return line;
+  const keep = record.workspace.length - (line.length - room) - 1;
+  if (keep < 1) return `${line.slice(0, room - 1)}…`;
+  return barLine({ ...record, workspace: `${record.workspace.slice(0, keep).trimEnd()}…` }, { ascii });
+}
+
+// Follows the worker's progress records of `tenantIds` from `sinceMs`: on a terminal one line redrawn in place, else a
+// plain line per change; each workspace's done line, or REST_LINE when following ends first. The worker carries on.
+async function followPast(ctx, key, tenantIds, sinceMs) {
+  const onTerminal = ctx.activity === true;
+  const ascii = (ctx.platform || process.platform) === 'win32';
+  const markReported = ctx.markReported || _markReported;
+  const interrupt = ctx.interrupt || { stopped: false };
+  // On a terminal each line replaces the bar drawn before it.
+  const show = (line, end) => {
+    if (onTerminal) ctx.output.write(CLEAR_LINE);
+    ctx.print(line, end);
+  };
+  interrupt.following = true;
+  let followed;
+  try {
+    followed = await followUploads({
+      key,
+      tenantIds,
+      sinceMs,
+      capMs: onTerminal ? Infinity : PLAIN_CAP_MS,
+      shouldStop: () => interrupt.stopped,
+      onUpdate: (record) => (onTerminal ? show(fittedBar(record, ascii, ctx.output.columns), '') : ctx.print(plainLine(record))),
+      onDone: (record) => {
+        show(doneLine(record));
+        // A failed write only lets the next session repeat the done line.
+        try {
+          markReported(key, record.tenantId);
+        } catch {}
+      },
+      read: ctx.read,
+      now: ctx.now,
+      sleep: ctx.sleep || realSleep,
+    });
+  } finally {
+    interrupt.following = false;
+  }
+  if (followed.stopped || followed.timedOut) show(REST_LINE);
+}
+
+// Queues the consented upload and follows it until each workspace is done; a failure prints only its failure lines.
 export async function uploadPast(ctx, key) {
+  const sinceMs = (ctx.now || Date.now)();
   const result = await ctx.run('backfill.mjs', ['--account', key, '--consented']);
   if (result.code !== 0) {
     failureLines(result).forEach((line) => ctx.print(line));
     return;
   }
   const line = lastLine(result.stdout, /^uploading=\d+ /);
-  const n = line === null ? 0 : Number(token(line, 'uploading'));
-  if (n === 1) ctx.print('✓ 1 past session is uploading in the background');
-  if (n > 1) ctx.print(`✓ ${n} past sessions are uploading in the background`);
+  const tenants = line === null ? null : token(line, 'tenants');
+  if (tenants === null || tenants === '') return;
+  await followPast(ctx, key, tenants.split(','), sinceMs);
 }
 
 // The `crash=… statusline=…` line of `settings.mjs keys`, or null.

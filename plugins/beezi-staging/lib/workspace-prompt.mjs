@@ -6,10 +6,12 @@ import {
   tenantById,
 } from './workspace.mjs';
 import { bindSessionRoutes, createRouteContext, routeKeyForDir, shortLabel, usesRules } from './workspace-rules.mjs';
-import { resultLine } from './pending-history.mjs';
+import { resultLine, HistoryStatus } from './pending-history.mjs';
 import { readTrackingState } from './tracking.mjs';
 import { workspacesAt } from './history-trigger.mjs';
 import { pluginRoot } from './paths.mjs';
+import { offerTenantKey } from './offer-gate.mjs';
+import { readProgress as _readProgress, markReported as _markReported } from './upload-progress.mjs';
 
 const GROUP_SIZE = 4;
 // Only a new session or /clear asks; resume and compact never do.
@@ -221,7 +223,15 @@ export async function buildJoinedPrompt(input, deps = {}) {
   return rows.length === 0 ? null : joinedPromptText(rows, pluginRoot(deps), sessionId);
 }
 
-// SessionStart: one user-only line per finished history upload, shown once on startup or clear.
+// A sent result whose foreground run, the card or the prompt hook already showed its done line.
+function reportedAlready(row, result, readProgress) {
+  if (result.status !== HistoryStatus.SENT) return false;
+  const record = readProgress(row.key, offerTenantKey(row, result.tenantId));
+  return record != null && record.reported === true;
+}
+
+// SessionStart: one user-only line per finished history upload not yet reported, shown once on startup or clear; a sent
+// result shown marks its workspace record reported, so the card and the prompt hook don't repeat it.
 export async function buildHistoryNotice(input, deps = {}) {
   if (input == null) return null;
   if (input.source != null && ASK_SOURCES.indexOf(input.source) === -1) return null;
@@ -229,12 +239,20 @@ export async function buildHistoryNotice(input, deps = {}) {
   const waiting = rows.filter((row) => Array.isArray(row.historyResults) && row.historyResults.length > 0);
   if (waiting.length === 0) return null;
   const take = deps.takeHistoryResults == null ? (await import('./accounts.mjs')).takeHistoryResults : deps.takeHistoryResults;
+  const readProgress = deps.readProgress == null ? _readProgress : deps.readProgress;
+  const markReported = deps.markReported == null ? _markReported : deps.markReported;
   const lines = [];
   for (const row of waiting) {
     let taken = [];
     try { taken = await take(row.key); } catch { continue; }
     const prefix = rows.length > 1 ? `Beezi (${emailOf(row)})` : 'Beezi';
-    for (const result of taken) lines.push(resultLine(result, { prefix, nameOf: (id) => nameOf(row, id), syncName: '/beezi:sync' }));
+    for (const result of taken.filter((r) => !reportedAlready(row, r, readProgress))) {
+      lines.push(resultLine(result, { prefix, nameOf: (id) => nameOf(row, id), syncName: '/beezi:sync' }));
+      // A failed mark only lets the card or the prompt hook show this upload's done line too.
+      if (result.status === HistoryStatus.SENT) {
+        try { markReported(row.key, offerTenantKey(row, result.tenantId)); } catch {}
+      }
+    }
   }
   return lines.length === 0 ? null : lines.join('\n');
 }
@@ -242,7 +260,7 @@ export async function buildHistoryNotice(input, deps = {}) {
 function historyOfferText(rows, root) {
   const commands = rows.map((row) => `\`node "${root}/scripts/history.mjs" offer --account ${row.key}\``).join(', then ');
   const options = optionList([
-    { label: 'Upload now', description: 'Sends them to <workspace> in the background' },
+    { label: 'Upload now', description: 'Sends them to <workspace> now' },
     { label: 'Not now', description: 'Nothing is sent. /beezi:sync uploads them any time' },
   ]);
   const notNow = optionText({ label: 'Not now', description: 'Nothing more is uploaded. Run /beezi:sync any time.' });
@@ -252,10 +270,10 @@ function historyOfferText(rows, root) {
     'For each `<notice>` or `<offers>` block it prints (workspaces that upload past sessions without asking), write its lines, and the `Uploading …` and `✓ …` lines after it, to the user verbatim inside one plain fenced code block (```, no language), keeping every leading space and line break; ask nothing about them.',
     'For each `<offer>` block it prints, write its lines the same way, except the `question=`, `upload-command=` and `decline-command=` lines (an `<offer>` with no other lines gets no code block).',
     `Then use the AskUserQuestion tool to ask one single-select question per \`<offer>\` block, up to 4 per call, one call per message: that block's \`question=\` text, with the options ${options}, where <workspace> is the workspace named in that question.`,
-    'If the answer is "Upload now", run that block\'s `upload-command=` EXACTLY and show the user only its first line.',
+    'If the answer is "Upload now", run that block\'s `upload-command=` EXACTLY and show the user only its last line.',
     'On any other answer, including a dismissed question, run that block\'s `decline-command=` EXACTLY and show nothing from it.',
     `For each \`<ask>\` block, write nothing from it and make one AskUserQuestion call with one multiSelect: true question: its \`question=\` text word for word, with one option per \`workspace=\` line (label the \`workspace=\` value, description the \`description=\` value after it), then ${notNow} last.`,
-    'For each picked workspace run the `upload-command=` after its `workspace=` line EXACTLY and show the user only its first line; for each other workspace of the block run its `decline-command=` EXACTLY and show nothing from it.',
+    'For each picked workspace run the `upload-command=` after its `workspace=` line EXACTLY and show the user only its last line; for each other workspace of the block run its `decline-command=` EXACTLY and show nothing from it.',
     'If "Not now" is chosen together with any workspace, run nothing yet and ask that question again once, starting with `"Not now" can\'t be combined with a workspace — pick one or the other.` A second mixed answer, nothing picked or a dismissed question counts as "Not now", which runs every `decline-command=` of the block.',
     'Then continue with the user\'s request.',
   ].join(' ');
