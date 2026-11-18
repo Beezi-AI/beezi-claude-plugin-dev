@@ -5,6 +5,8 @@ import { pendingHistoryOf, waitingOnRecent, RunOutcome } from './pending-history
 import {
   OfferEngine, coverageUnknown, replayOptions, offerTenantKey, answeredBy, readOffer as _readOffer, removeOffer as _removeOffer,
 } from './history-offer.mjs';
+import { createProgressWriter as _createProgressWriter } from './upload-progress.mjs';
+import { tenantById } from './workspace.mjs';
 
 const REFUSED_REASONS = [AuditReason.NO_ACCOUNT, AuditReason.WORKSPACE_REQUIRED, AuditReason.AUDIT_ONLY, AuditReason.ALREADY_COMPLETED];
 const REFUSED_HALTS = [BackfillHalt.ALREADY_COMPLETED, BackfillHalt.NOT_ALLOWED, BackfillHalt.FORBIDDEN, BackfillHalt.UNSUPPORTED_SERVER];
@@ -21,6 +23,42 @@ export function classifyRun(result, waiting, engine = OfferEngine.SYNC) {
   // so retry soon like a busy run instead of closing the request with them left out.
   if (result.pendingLive > 0) return RunOutcome.BUSY;
   return waiting ? RunOutcome.WAITING : RunOutcome.CLEAN;
+}
+
+export function workspaceName(row, tenantId) {
+  const t = tenantById(row, tenantId);
+  if (t != null && t.name) return t.name;
+  if (row.tenantName) return row.tenantName;
+  return tenantId == null ? 'your workspace' : tenantId;
+}
+
+// A progress-record write is best-effort: one that fails never fails or changes the upload.
+function quietly(write) {
+  try {
+    write();
+  } catch {}
+}
+
+// runAudit under `runDeps`, also writing the run's progress record through `writer`; the run's result. The record
+// finishes failed unless the run ended clean under `engine`, and reported when the caller prints the result itself.
+export async function runWithProgress(runAudit, runDeps, options, writer, { engine = OfferEngine.SYNC, reported = false } = {}) {
+  let counts = { processed: 0, total: 0, sent: 0 };
+  const onProgress = (p) => {
+    if (runDeps.onProgress != null) runDeps.onProgress(p);
+    counts = { processed: p.processed, total: p.total, sent: p.sessionsImported };
+    quietly(() => writer.update(counts));
+  };
+  let result = null;
+  try {
+    result = await runAudit({ ...runDeps, onProgress }, options);
+    return result;
+  } finally {
+    // A run that met another run's lock leaves that run's record alone.
+    if (result == null || result.reason !== AuditReason.BUSY) {
+      const failed = classifyRun(result, false, engine) !== RunOutcome.CLEAN;
+      quietly(() => writer.finish(counts, { failed, reported }));
+    }
+  }
 }
 
 function startedAtMs(recent, readShell) {
@@ -62,6 +100,7 @@ export async function runPendingHistory(key, deps = {}) {
   const readShell = deps.readSessionShell == null ? _readSessionShell : deps.readSessionShell;
   const readOffer = deps.readOffer == null ? _readOffer : deps.readOffer;
   const removeOffer = deps.removeOffer == null ? _removeOffer : deps.removeOffer;
+  const createWriter = deps.createProgressWriter == null ? _createProgressWriter : deps.createProgressWriter;
   const now = deps.now == null ? () => Date.now() : deps.now;
   // Stamped before the row is read: a request written after the read is newer than the plan, so it stays.
   const plannedAtMs = now();
@@ -79,7 +118,8 @@ export async function runPendingHistory(key, deps = {}) {
     let run = { outcome: busy ? RunOutcome.BUSY : RunOutcome.REFUSED, sent: 0, skipped: 0 };
     if (!busy && options != null) {
       // A throwing run settles as failed (classifyRun's null) rather than leaving the entry unsettled.
-      const result = await runAudit({ runCache }, options).catch(() => null);
+      const writer = createWriter({ key, tenantId: tenantKey, workspace: workspaceName(row, entry.tenantId) });
+      const result = await runWithProgress(runAudit, { runCache }, options, writer, { engine: offer.engine }).catch(() => null);
       const recent = result != null && Array.isArray(result.recent) ? result.recent.map((r) => startedAtMs(r, readShell)) : [];
       run = { outcome: classifyRun(result, waitingOnRecent(recent, entry.requestedAt), offer.engine), sent: result == null ? 0 : result.sessionsImported || 0, skipped: 0 };
       busy = run.outcome === RunOutcome.BUSY;

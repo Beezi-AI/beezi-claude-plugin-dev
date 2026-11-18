@@ -1,8 +1,8 @@
 import { parseAccountFlag, getAccount, clearOfferReady, recordOfferDecline } from '../lib/accounts.mjs';
-import { declineLine, readOffer, removeOffer, idsToken, workspaceWhoami } from '../lib/history-offer.mjs';
+import { declineLine, readOffer, removeOffer, idsToken, workspaceWhoami, plural } from '../lib/history-offer.mjs';
 import {
   CHANGED_LINE, scriptCommand, flagValue, tenantIdOfKey, nothingLine, matchesShown, oweUpload, backgroundLine, presentOffers, printCounts, freshMode,
-  offerChangedAt,
+  offerChangedAt, workspaceName, followRecord,
 } from '../lib/history-summary.mjs';
 import { offerStateOf, OfferMode } from '../lib/offer-gate.mjs';
 import { rememberDeclined, forgetDeclined } from '../lib/offer-declines.mjs';
@@ -50,7 +50,18 @@ export async function offer(row, deps = {}) {
   return shown.status;
 }
 
-// The session-start yes: owes the workspace the shown offer's sessions and starts the worker.
+// The upload the worker now runs, shown through its progress record: the card line when the card draws it, else
+// plain lines and a last line that closes the follow (followRecord's). `since` and `count` = when the yes came and how many sessions it covers.
+export async function followAccepted(row, tenantKey, { since, count }, deps = {}) {
+  const { env = process.env, log = console.log } = deps;
+  if (env.BEEZI_CARD && env.BEEZI_CARD === env.CLAUDE_CODE_SESSION_ID) {
+    log(`✓ Uploading ${plural(count, 'past session')} to ${workspaceName(row, tenantIdOfKey(tenantKey))} — progress is on the Beezi card`);
+    return;
+  }
+  await followRecord(row, tenantKey, since, { ...deps, log });
+}
+
+// The session-start yes: owes the workspace the shown offer's sessions, starts the worker and follows its progress.
 async function accept(row, tenantKey, token) {
   const tenantId = tenantIdOfKey(tenantKey);
   const stored = row == null ? null : readOffer(row.key, tenantKey);
@@ -63,8 +74,9 @@ async function accept(row, tenantKey, token) {
     console.log(nothingLine(row == null ? {} : row, tenantId));
     return;
   }
-  await startHistoryWorker(row.key);
-  console.log(backgroundLine(row, [tenantId], stored.sessionIds.length));
+  const since = Date.now();
+  if (await startHistoryWorker(row.key)) await followAccepted(row, tenantKey, { since, count: stored.sessionIds.length });
+  else console.log(backgroundLine(row, [tenantId], stored.sessionIds.length));
 }
 
 // The session-start no: remembers the offer's sessions as declined, then the workspace's decline. The file goes only

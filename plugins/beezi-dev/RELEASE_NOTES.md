@@ -1,5 +1,18 @@
 # Beezi plugin release notes
 
+## 0.46.2 (2026-11-18) — Startup card and upload progress
+
+### New
+- **A Beezi card above the prompt** — when a session starts, the terminal and the Claude desktop app show a card with your account and where this folder's sessions go, with a dot for its state: green tracked, amber no rule yet or analytics off, gray not sent. It notes when the workspace is anonymized. After your first prompt it shrinks to one line; `details` brings it back.
+- **Change where a folder goes from the card** — `Change where this goes` lists the choices `/beezi:settings rules` offers, each saying what it does, and saves one with a key press. `/beezi:settings undo` takes it back. A folder with no rule yet shows `Choose where this goes`.
+- **Where it shows** — on a Claude Code version with plugin modules, in the terminal and the desktop app. Older versions and the VS Code extension keep the text line at session start.
+- **Upload progress in setup** — terminal setup and the one-line installers show a bar that fills in place while your past sessions upload, `Uploading past sessions to Acme  ▓▓▓▓░░░░░░░░░░  30/100`, then `✓ 100 past sessions uploaded to Acme`. Off a terminal you get plain `Beezi: 30/100 sessions read…` lines instead. Press Ctrl+C, or wait 100 seconds off a terminal, to stop following; an upload that is stopped or fails ends on `Beezi: the rest keeps uploading in the background`, and the rest keeps uploading.
+- **Upload now shows its progress** — `Upload now` in a session follows the upload for up to 100 seconds with the same plain lines and ends on the done line, or on `✓ 30 of 100 past sessions uploaded to Acme; the rest keeps uploading in the background`.
+- **Uploads that start by themselves show on the card** — the card shows a live progress row, then the done line. Where the card can't draw, such as the VS Code extension and older Claude Code versions, each prompt shows `Beezi: uploading past sessions to Acme  30/100` until it finishes, then the done line once.
+
+### Improved
+- **A finished upload is not announced twice** — once you have seen the done line, the next session start no longer repeats the result.
+
 ## 0.46.1 (2026-11-17) — Setup and uploads wait out a busy moment
 
 ### Fixed

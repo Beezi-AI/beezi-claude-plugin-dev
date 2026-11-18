@@ -79,10 +79,10 @@ async function trackStep(key, run) {
   return { lead, upload: false };
 }
 
-// The lines the agent shows verbatim: `lead`, the upload line, the closing lines.
-async function finish(key, run, step) {
+// The lines the agent shows verbatim: `lead`, the upload's lines, the closing lines; `follow` holds the upload follow's seams.
+async function finish(key, run, step, follow) {
   const lines = step.lead.slice();
-  const ctx = collector(run, lines);
+  const ctx = Object.assign(collector(run, lines), follow);
   if (step.upload) await uploadPast(ctx, key);
   const on = await applyDefaults(ctx);
   const closing = closingLines({
@@ -93,7 +93,7 @@ async function finish(key, run, step) {
 }
 
 // Step 0 and 1, the plan, then the tracking listing; finishes right away when there is no question to ask.
-async function start({ run, live }) {
+async function start({ run, live, follow }) {
   const preflight = run('login-preflight.mjs', []);
   block('preflight', preflight);
   if (!preflight.stdout.startsWith('✓')) {
@@ -113,10 +113,10 @@ async function start({ run, live }) {
   await planStep(key, run);
   const done = await trackStep(key, run);
   if (done === null) next('track', key);
-  else await finish(key, run, done);
+  else await finish(key, run, done, follow);
 }
 
-// deps: `run` (captured script) and `live` (streamed script).
+// deps: `run` (captured script), `live` (streamed script) and `follow` (the upload follow's read, now, sleep and markReported).
 export async function loginFlow(argv, deps = {}) {
   const all = { run: runScript, live: runLive, ...deps };
   const { account, rest } = await parseAccountFlag(argv);
@@ -125,7 +125,7 @@ export async function loginFlow(argv, deps = {}) {
     return;
   }
   if (account == null || rest.length !== 2 || rest[0] !== '--from' || rest[1] !== 'finish') throw new UserError(USAGE);
-  await finish(account, all.run, { lead: [], upload: true });
+  await finish(account, all.run, { lead: [], upload: true }, all.follow);
 }
 
 if (isEntryScript(import.meta.url)) {
