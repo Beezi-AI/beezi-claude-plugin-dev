@@ -6,7 +6,7 @@ argument-hint: "7d | 30d"
 
 # Beezi: personal analytics summary
 
-Template version: 9.0
+Template version: 9.1
 
 1. You write no prose of your own. Every line of the reply is either fixed text from the template or a string copied from the payload — there is no headline, no verdict, no interpretation, no advice and no closing thought you author. Where a payload string is absent, drop its line rather than filling the gap.
 2. Every number comes from the get_my_usage_summary payload; never invent, estimate, or recalculate figures — facts, recommendations, references, and observations are precomputed and render verbatim.
@@ -30,11 +30,13 @@ Template version: 9.0
 18. Keep the whole reply one short chat message.
 19. If the beezi server is not connected or the call fails with an authentication error, reply exactly: Sign in to Beezi first: run /mcp, choose the beezi server, then Authenticate. — and stop.
 20. If the tool returns any other error, print its message verbatim and stop.
+21. The summary covers only the signed-in user. When the argument or the request names any other person or group (an email, a name, a team), reply exactly: This plugin shows only your own Beezi analytics. To see other people, open the Beezi portal. — and stop, with no tool call.
 
 Workflow:
-1. The period is "7d" or "30d", taken from the argument. Anything else, or no argument, means "7d".
-2. Call get_my_usage_summary on the beezi MCP server with { period }. When the user asks for every coding agent ("all agents", "everything"), call it with { period, agents: "all" }.
-3. Render the payload with the template below, and stop — there is nothing to write and nothing to save.
+1. The period is the first "7d" or "30d" token of the argument. Anything else, or no argument, means "7d".
+2. If the argument or the request names any other person or group, follow rule 21 and stop before calling the tool.
+3. Call get_my_usage_summary on the beezi MCP server with { period }. When the user asks for every coding agent ("all agents", "everything"), call it with { period, agents: "all" }.
+4. Render the payload with the template below, and stop — there is nothing to write and nothing to save.
 
 Template (fill placeholders from the payload only):
 

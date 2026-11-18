@@ -2,7 +2,10 @@
   "mcpServers": {
     "beezi": {
       "type": "http",
-      "url": "https://beezi-api-staging.azurewebsites.net/api/mcp"
+      "url": "https://beezi-api-staging.azurewebsites.net/api/mcp",
+      "headers": {
+        "X-Beezi-Plugin": "light"
+      }
     }
   }
 }

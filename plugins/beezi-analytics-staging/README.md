@@ -31,7 +31,7 @@ Run `/mcp`, choose the `beezi` server, then Authenticate. A browser window opens
 
 ## What it connects to
 
-The plugin declares one MCP server, `beezi`, at `https://beezi-api-staging.azurewebsites.net/api/mcp`. The plugin has no hooks, scripts, commands or local code, and it uploads no conversation transcripts; only the arguments of the tools Claude calls reach Beezi. Its skills call only your personal summary. If you ask Claude other questions about your Beezi analytics, it may use the server's other read-only tools, which return only what your Beezi role lets you see.
+The plugin declares one MCP server, `beezi`, at `https://beezi-api-staging.azurewebsites.net/api/mcp`. Its requests carry the header `X-Beezi-Plugin: light`, so Beezi offers it only your personal summary. The plugin has no hooks, scripts, commands or local code, and it uploads no conversation transcripts; only that header and the arguments of the tools Claude calls reach Beezi. It can read only your personal summary; questions about other people are declined.
 
 ## The full Beezi plugin
 
