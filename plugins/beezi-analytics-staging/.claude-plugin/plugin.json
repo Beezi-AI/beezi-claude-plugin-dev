@@ -1,7 +1,7 @@
 {
   "name": "beezi-analytics-staging",
   "displayName": "Beezi (staging)",
-  "version": "0.1.3-staging.6449",
+  "version": "0.1.3-staging.6453",
   "description": "See your Beezi usage analytics in Claude Code: spend, sessions, status and recommendations for the last 7 or 30 days. Read-only; sign in with your Beezi account. — staging environment build.",
   "author": {
     "name": "Beezi",
