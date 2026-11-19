@@ -9,7 +9,7 @@
       "name": "beezi-dev",
       "source": "./plugins/beezi-dev",
       "description": "Reports Claude Code session usage and cost to Beezi, and shows a personal usage summary on demand. — dev environment build.",
-      "version": "0.46.4-dev.6432",
+      "version": "0.46.6-dev.6448",
       "author": {
         "name": "Beezi",
         "url": "https://beezi.ai"
