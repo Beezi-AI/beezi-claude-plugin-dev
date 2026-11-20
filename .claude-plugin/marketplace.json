@@ -42,7 +42,7 @@
       "name": "beezi-analytics-staging",
       "source": "./plugins/beezi-analytics-staging",
       "description": "See your Beezi usage analytics in Claude Code: spend, sessions, status and recommendations for the last 7 or 30 days. Read-only; sign in with your Beezi account. — staging environment build.",
-      "version": "0.1.3-staging.6453",
+      "version": "0.1.3-staging.6494",
       "author": {
         "name": "Beezi",
         "url": "https://beezi.ai"
